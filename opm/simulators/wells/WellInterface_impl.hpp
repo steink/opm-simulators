@@ -252,7 +252,31 @@ namespace Opm
         return changed;
     }
 
+    template<typename TypeTag>
+    bool
+    WellInterface<TypeTag>::
+    updateWellControlLocalIteration(const Simulator& ebos_simulator,
+                      WellState& well_state,
+                      const GroupState& group_state,
+                      const Well::InjectionControls& inj_controls,
+                      const Well::ProductionControls& prod_controls,
+                      DeferredLogger& deferred_logger) /* const */
+    {
+        const auto& summary_state = ebos_simulator.vanguard().summaryState();
 
+        if (this->stopppedOrZeroRateTarget(summary_state, well_state)) {
+           return false;
+        }
+        //const auto& schedule = ebos_simulator.vanguard().schedule();
+        //const auto& well = this->well_ecl_;
+        auto& ws = well_state.well(this->index_of_well_);
+        bool changed = this->checkIndividualConstraints(ws, summary_state, deferred_logger, inj_controls, prod_controls);
+        if (changed) {
+            updateWellStateWithTarget(ebos_simulator, group_state, well_state, deferred_logger);
+            updatePrimaryVariables(summary_state, well_state, deferred_logger);
+        }
+        return changed;
+    }
 
     template<typename TypeTag>
     void

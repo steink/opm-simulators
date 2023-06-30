@@ -1270,7 +1270,29 @@ namespace Opm
         int stagnate_count = 0;
         bool relax_convergence = false;
         this->regularize_ = false;
+        int itsSinceLastSwitch = 0;
         for (; it < max_iter_number; ++it, ++debug_cost_counter_) {
+            if(it > max_iter_number-10){
+                bool stop = true;
+            }
+            if (true){
+                if (!this->wellIsStopped()){
+                    const double wqTotal = this->primary_variables_.getWQTotal().value();
+                    if (wqTotal == 0){
+                        this->stopWell();
+                    }
+                } else {
+                    const double bhp = this->primary_variables_.getBhp().value();
+                    const double bhp_diff = (this->isProducer())? bhp - prod_controls.bhp_limit : inj_controls.bhp_limit - bhp;
+                    if (bhp_diff > 0){
+                        this->openWell();
+                    }
+                }
+                const bool changed_well = this->updateWellControlLocalIteration(ebosSimulator, well_state, group_state, inj_controls, prod_controls, deferred_logger); 
+                if (changed_well){
+                    itsSinceLastSwitch = 0;
+                }    
+            }
 
             assembleWellEqWithoutIteration(ebosSimulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
 
