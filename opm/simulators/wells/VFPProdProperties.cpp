@@ -176,9 +176,42 @@ EvalWell VFPProdProperties::bhp(const int table_id,
 
     detail::VFPEvaluation bhp_val = detail::interpolate(table, flo_i, thp_i, wfr_i, gfr_i, alq_i);
 
-    bhp = (bhp_val.dwfr * wfr) + (bhp_val.dgfr * gfr) - (std::max(0.0, bhp_val.dflo) * flo);
+    if (false){
+        bhp = (bhp_val.dwfr * wfr) + (bhp_val.dgfr * gfr) - (std::max(0.0, bhp_val.dflo) * flo);
+        bhp.setValue(bhp_val.value);
+    } else {
+        if (bhp_val.dflo < 0){
+            // Curve has negative slope. Attempt guide to positive region 
+            // We reset to explicit fractions here for robustness of approach
+            wfr = explicit_wfr;
+            gfr = explicit_gfr;
+            wfr_i = detail::findInterpData( wfr.value(), table.getWFRAxis());
+            gfr_i = detail::findInterpData( gfr.value(), table.getGFRAxis());
+            std::vector<double> flos = table.getFloAxis();
+            int nflo = flos.size();
+            for (int i = 0; i < nflo; i++)
+            {
+                flos[i] = -flos[i];
+            }
+            // get bhp-array
+            const std::vector<double> bhp_array = bhpwithflo(flos, table_id, wfr.value(), gfr.value(), thp, alq, 0.0); 
+            // attempt to get a new target FLO with positive dFLO/dp
+            double flo_target = detail::getImprovedFloTarget(flos, bhp_array, flo.value(), bhp_val.value);
+            // linearize at (flo_target, bhp(flo_target)) and re-evaluate bhp and its derivatives
+            auto flo_target_i = detail::findInterpData(-flo_target, table.getFloAxis());
+            detail::VFPEvaluation bhp_target = detail::interpolate(table, flo_target_i, thp_i, wfr_i, gfr_i, alq_i);
+            // shift back bhp-value : y1 = a*(x2-x1)+y2
+            bhp_target.value -= bhp_target.dflo*(flo.value()-flo_target);
+            bhp  = (bhp_val.dwfr * wfr) + (bhp_val.dgfr * gfr) - (bhp_target.dflo * flo);
+            bhp.setValue(bhp_target.value);
+        } else {
+            //bhp = (bhp_val.dwfr * wfr.value()) + (bhp_val.dgfr * gfr.value()) - (bhp_target.dflo * flo);
+            //bhp.setValue(bhp_target.dflo*(flo.value()-flo_target)+bhp_target.value());
+            bhp = (bhp_val.dwfr * wfr) + (bhp_val.dgfr * gfr) - (bhp_val.dflo * flo);
+            bhp.setValue(bhp_val.value);
+        }
+        }
 
-    bhp.setValue(bhp_val.value);
     return bhp;
 }
 

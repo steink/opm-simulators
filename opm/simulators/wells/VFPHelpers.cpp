@@ -499,6 +499,48 @@ double findTHP(const std::vector<double>& bhp_array,
     return thp;
 }
 
+double  getImprovedFloTarget(const std::vector<double>& flo_array,
+                             const std::vector<double>& bhp_array,
+                             double flo,
+                             const double bhp_target)
+{
+    double flo_target = -1e100; // largest flo s.t. bhp(flo)=bhp_target
+    double flo_bhp_min;         // largesflo s.t. dbhp/dflo = 0 (and curvature > 0)
+    double bhp_min = bhp_target;
+    flo = abs(flo); // work with positive flo-values, return negative
+    int bhp_min_ix = -1; 
+    int nflo = flo_array.size();
+    int i=0;
+    // loop trough flo-array and record last intersection bhp(flo_target)=bhp_target
+    // and index for smallest bhp on curve
+    for (; i<nflo-1; ++i) {
+        const double& y0 = bhp_array[i  ];
+        const double& y1 = bhp_array[i+1];
+        if (y0 <= bhp_target && bhp_target < y1){
+            flo_target = -findX(flo_array[i], flo_array[i+1], y0, y1, bhp_target);
+        }
+        if (y1 <= bhp_min){
+            bhp_min = y1;
+            bhp_min_ix = i+1;
+        }
+    } 
+    if (flo_target < 0){
+        // failed to find intersection, return largest value in table.
+        // we could extrapolate, but this might result in a "too large" correction 
+        flo_target = flo_array[nflo-1];
+    } 
+    // we expect that input flo lies to the left of minimal bhp on curve, i.e., 
+    // bhp(flo) > bhp_min and flo < flo_bhp_min
+    // if this is not the case, we simply replace flo_bhp_min with flo to ensure
+    // that we move in the direction of the stable solution
+    flo_bhp_min = flo;
+    if (bhp_min_ix >= 0){
+        flo_bhp_min = -flo_array[bhp_min_ix];
+    }
+    flo_bhp_min = max(flo_bhp_min, flo);
+    return -0.9*flo_bhp_min - 0.1*flo_target;
+}
+
 template <typename T>
 T getFlo(const VFPProdTable& table,
          const T& aqua,

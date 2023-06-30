@@ -181,6 +181,11 @@ double findTHP(const std::vector<double>& bhp_array,
                const std::vector<double>& thp_array,
                double bhp);
 
+double  getImprovedFloTarget(const std::vector<double>& flo_array,
+                             const std::vector<double>& bhp_array,
+                             double flo,
+                             const double bhp_target);               
+
 
 } // namespace detail
 
