@@ -44,6 +44,7 @@
 #include <opm/material/fluidmatrixinteractions/EclMaterialLawManager.hpp>
 #include <opm/material/fluidsystems/BlackOilFluidSystem.hpp>
 
+#include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
 #include <dune/grid/common/mcmgmapper.hh>
 
 #include <fmt/format.h>
@@ -1278,6 +1279,15 @@ equilnum(const EclipseState& eclipseState,
         const auto& e = eclipseState.fieldProps().get_int("EQLNUM");
         std::transform(e.begin(), e.end(), eqlnum.begin(), [](int n){ return n - 1;});
     }
+    OPM_BEGIN_PARALLEL_TRY_CATCH();
+    const int num_regions = eclipseState.getTableManager().getEqldims().getNumEquilRegions();
+    if ( std::any_of(eqlnum.begin(), eqlnum.end(), [num_regions](int n){return n >= num_regions;}) ) {
+        throw std::runtime_error("Values larger than maximum Equil regions " + std::to_string(num_regions) + " provided in EQLNUM");
+    }
+    if ( std::any_of(eqlnum.begin(), eqlnum.end(), [](int n){return n < 0;}) ) {
+        throw std::runtime_error("zero or negative values provided in EQLNUM");
+    }
+    OPM_END_PARALLEL_TRY_CATCH("Invalied EQLNUM numbers: ", gridview.comm());
 
     return eqlnum;
 }
@@ -1299,6 +1309,7 @@ InitialStateComputer(MaterialLawManager& materialLawManager,
                      const GridView& gridView,
                      const CartesianIndexMapper& cartMapper,
                      const double grav,
+                     const int num_pressure_points,
                      const bool applySwatInit)
     : temperature_(grid.size(/*codim=*/0)),
       saltConcentration_(grid.size(/*codim=*/0)),
@@ -1310,7 +1321,8 @@ InitialStateComputer(MaterialLawManager& materialLawManager,
       rs_(grid.size(/*codim=*/0)),
       rv_(grid.size(/*codim=*/0)),
       rvw_(grid.size(/*codim=*/0)),
-      cartesianIndexMapper_(cartMapper)
+      cartesianIndexMapper_(cartMapper),
+      num_pressure_points_(num_pressure_points)
 {
     //Check for presence of kw SWATINIT
     if (applySwatInit) {
@@ -1750,8 +1762,8 @@ calcPressSatRsRv(const RMap& reg,
     using PhaseSat = Details::PhaseSaturations<
         MaterialLawManager, FluidSystem, EquilReg, typename RMap::CellId
     >;
-
-    auto ptable = Details::PressureTable<FluidSystem, EquilReg>{ grav };
+    
+    auto ptable = Details::PressureTable<FluidSystem, EquilReg>{ grav, this->num_pressure_points_ };
     auto psat   = PhaseSat { materialLawManager, this->swatInit_ };
     auto vspan  = std::array<double, 2>{};
 

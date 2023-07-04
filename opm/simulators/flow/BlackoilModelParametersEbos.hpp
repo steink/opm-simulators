@@ -20,9 +20,15 @@
 #ifndef OPM_BLACKOILMODELPARAMETERS_EBOS_HEADER_INCLUDED
 #define OPM_BLACKOILMODELPARAMETERS_EBOS_HEADER_INCLUDED
 
-#include <opm/models/utils/propertysystem.hh>
-#include <opm/models/utils/parametersystem.hh>
+#include <opm/models/discretization/common/fvbaseproperties.hh>
 
+#include <opm/models/utils/basicproperties.hh>
+#include <opm/models/utils/parametersystem.hh>
+#include <opm/models/utils/propertysystem.hh>
+
+#include <opm/simulators/flow/SubDomain.hpp>
+
+#include <stdexcept>
 #include <string>
 
 namespace Opm::Properties {
@@ -177,8 +183,42 @@ template<class TypeTag, class MyTypeTag>
 struct NetworkMaxIterations {
     using type = UndefinedProperty;
 };
-
-
+template<class TypeTag, class MyTypeTag>
+struct NonlinearSolver {
+    using type = UndefinedProperty;
+};
+template<class TypeTag, class MyTypeTag>
+struct LocalSolveApproach {
+    using type = UndefinedProperty;
+};
+template<class TypeTag, class MyTypeTag>
+struct MaxLocalSolveIterations {
+    using type = UndefinedProperty;
+};
+template<class TypeTag, class MyTypeTag>
+struct LocalToleranceScalingMb {
+    using type = UndefinedProperty;
+};
+template<class TypeTag, class MyTypeTag>
+struct LocalToleranceScalingCnv {
+    using type = UndefinedProperty;
+};
+template<class TypeTag, class MyTypeTag>
+struct NumLocalDomains {
+    using type = UndefinedProperty;
+};
+template<class TypeTag, class MyTypeTag>
+struct LocalDomainsPartitioningImbalance {
+    using type = UndefinedProperty;
+};
+template<class TypeTag, class MyTypeTag>
+struct LocalDomainsPartitioningMethod {
+    using type = UndefinedProperty;
+};
+template<class TypeTag, class MyTypeTag>
+struct LocalDomainsOrderingMeasure {
+    using type = UndefinedProperty;
+};
 template<class TypeTag>
 struct DbhpMaxRel<TypeTag, TTag::FlowModelParameters> {
     using type = GetPropType<TypeTag, Scalar>;
@@ -335,11 +375,46 @@ template<class TypeTag>
 struct NetworkMaxIterations<TypeTag, TTag::FlowModelParameters> {
     static constexpr int value = 200;
 };
-
-
-
-
-
+template<class TypeTag>
+struct NonlinearSolver<TypeTag, TTag::FlowModelParameters> {
+    static constexpr auto value = "newton";
+};
+template<class TypeTag>
+struct LocalSolveApproach<TypeTag, TTag::FlowModelParameters> {
+    static constexpr auto value = "jacobi";
+};
+template<class TypeTag>
+struct MaxLocalSolveIterations<TypeTag, TTag::FlowModelParameters> {
+    static constexpr int value = 20;
+};
+template<class TypeTag>
+struct LocalToleranceScalingMb<TypeTag, TTag::FlowModelParameters> {
+    using type = GetPropType<TypeTag, Scalar>;
+    static constexpr type value = 1.0;
+};
+template<class TypeTag>
+struct LocalToleranceScalingCnv<TypeTag, TTag::FlowModelParameters> {
+    using type = GetPropType<TypeTag, Scalar>;
+    static constexpr type value = 0.01;
+};
+template<class TypeTag>
+struct NumLocalDomains<TypeTag, TTag::FlowModelParameters> {
+    using type = int;
+    static constexpr auto value = 0;
+};
+template<class TypeTag>
+struct LocalDomainsPartitioningImbalance<TypeTag, TTag::FlowModelParameters> {
+    using type = GetPropType<TypeTag, Scalar>;
+    static constexpr auto value = type{1.03};
+};
+template<class TypeTag>
+struct LocalDomainsPartitioningMethod<TypeTag, TTag::FlowModelParameters> {
+    static constexpr auto value = "zoltan";
+};
+template<class TypeTag>
+struct LocalDomainsOrderingMeasure<TypeTag, TTag::FlowModelParameters> {
+    static constexpr auto value = "pressure";
+};
 // if openMP is available, determine the number threads per process automatically.
 #if _OPENMP
 template<class TypeTag>
@@ -461,6 +536,20 @@ namespace Opm
         /// Maximum number of iterations in the network solver before giving up
         int network_max_iterations_;
 
+        /// Nonlinear solver type: newton or nldd.
+        std::string nonlinear_solver_;
+        /// 'jacobi' and 'gauss-seidel' supported.
+        DomainSolveApproach local_solve_approach_{DomainSolveApproach::Jacobi};
+
+        int max_local_solve_iterations_;
+
+        double local_tolerance_scaling_mb_;
+        double local_tolerance_scaling_cnv_;
+
+        int num_local_domains_{0};
+        double local_domain_partition_imbalance_{1.03};
+        std::string local_domain_partition_method_;
+        DomainOrderingMeasure local_domain_ordering_{DomainOrderingMeasure::AveragePressure};
 
         /// Construct from user parameters or defaults.
         BlackoilModelParametersEbos()
@@ -497,9 +586,33 @@ namespace Opm
             check_well_operability_iter_ = EWOMS_GET_PARAM(TypeTag, bool, EnableWellOperabilityCheckIter);
             max_number_of_well_switches_ = EWOMS_GET_PARAM(TypeTag, int, MaximumNumberOfWellSwitches);
             use_average_density_ms_wells_ = EWOMS_GET_PARAM(TypeTag, bool, UseAverageDensityMsWells);
+            nonlinear_solver_ = EWOMS_GET_PARAM(TypeTag, std::string, NonlinearSolver);
+            std::string approach = EWOMS_GET_PARAM(TypeTag, std::string, LocalSolveApproach);
+            if (approach == "jacobi") {
+                local_solve_approach_ = DomainSolveApproach::Jacobi;
+            } else if (approach == "gauss-seidel") {
+                local_solve_approach_ = DomainSolveApproach::GaussSeidel;
+            } else {
+                throw std::runtime_error("Invalid domain solver approach '" + approach + "' specified.");
+            }
+
+            max_local_solve_iterations_ = EWOMS_GET_PARAM(TypeTag, int, MaxLocalSolveIterations);
+            local_tolerance_scaling_mb_ = EWOMS_GET_PARAM(TypeTag, double, LocalToleranceScalingMb);
+            local_tolerance_scaling_cnv_ = EWOMS_GET_PARAM(TypeTag, double, LocalToleranceScalingCnv);
+            num_local_domains_ = EWOMS_GET_PARAM(TypeTag, int, NumLocalDomains);
+            local_domain_partition_imbalance_ = std::max(1.0, EWOMS_GET_PARAM(TypeTag, double, LocalDomainsPartitioningImbalance));
+            local_domain_partition_method_ = EWOMS_GET_PARAM(TypeTag, std::string, LocalDomainsPartitioningMethod);
             deck_file_name_ = EWOMS_GET_PARAM(TypeTag, std::string, EclDeckFileName);
             network_max_strict_iterations_ = EWOMS_GET_PARAM(TypeTag, int, NetworkMaxStrictIterations);
-            network_max_iterations_ = EWOMS_GET_PARAM(TypeTag, int, NetworkMaxIterations);            
+            network_max_iterations_ = EWOMS_GET_PARAM(TypeTag, int, NetworkMaxIterations);
+            std::string measure = EWOMS_GET_PARAM(TypeTag, std::string, LocalDomainsOrderingMeasure);
+            if (measure == "residual") {
+                local_domain_ordering_ = DomainOrderingMeasure::Residual;
+            } else if (measure == "pressure") {
+                local_domain_ordering_ = DomainOrderingMeasure::AveragePressure;
+            } else {
+                throw std::runtime_error("Invalid domain ordering '" + measure + "' specified.");
+            }
         }
 
         static void registerParameters()
@@ -540,6 +653,17 @@ namespace Opm
             EWOMS_REGISTER_PARAM(TypeTag, bool, UseAverageDensityMsWells, "Approximate segment densitities by averaging over segment and its outlet");
             EWOMS_REGISTER_PARAM(TypeTag, int, NetworkMaxStrictIterations, "Maximum iterations in network solver before relaxing tolerance");
             EWOMS_REGISTER_PARAM(TypeTag, int, NetworkMaxIterations, "Maximum number of iterations in the network solver before giving up");
+            EWOMS_REGISTER_PARAM(TypeTag, std::string, NonlinearSolver, "Choose nonlinear solver. Valid choices are newton or nldd.");
+            EWOMS_REGISTER_PARAM(TypeTag, std::string, LocalSolveApproach, "Choose local solve approach. Valid choices are jacobi and gauss-seidel");
+            EWOMS_REGISTER_PARAM(TypeTag, int, MaxLocalSolveIterations, "Max iterations for local solves with NLDD nonlinear solver.");
+            EWOMS_REGISTER_PARAM(TypeTag, Scalar, LocalToleranceScalingMb, "Set lower than 1.0 to use stricter convergence tolerance for local solves.");
+            EWOMS_REGISTER_PARAM(TypeTag, Scalar, LocalToleranceScalingCnv, "Set lower than 1.0 to use stricter convergence tolerance for local solves.");
+            EWOMS_REGISTER_PARAM(TypeTag, int, NumLocalDomains, "Number of local domains for NLDD nonlinear solver.");
+            EWOMS_REGISTER_PARAM(TypeTag, Scalar, LocalDomainsPartitioningImbalance, "Subdomain partitioning imbalance tolerance. 1.03 is 3 percent imbalance.");
+            EWOMS_REGISTER_PARAM(TypeTag, std::string, LocalDomainsPartitioningMethod, "Subdomain partitioning method. "
+                                 "Allowed values are 'zoltan', 'simple', and the name of a partition file ending with '.partition'.");
+            EWOMS_REGISTER_PARAM(TypeTag, std::string, LocalDomainsOrderingMeasure, "Subdomain ordering measure. "
+                                 "Allowed values are 'pressure' and  'residual'.");
         }
     };
 } // namespace Opm

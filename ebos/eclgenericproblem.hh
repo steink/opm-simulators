@@ -272,6 +272,9 @@ public:
     { return maxFails_; }
 
     bool vapparsActive(int episodeIdx) const;
+    
+    int numPressurePointsEquil() const 
+    { return numPressurePointsEquil_; }
 
     bool operator==(const EclGenericProblem& rhs) const;
 
@@ -404,10 +407,13 @@ protected:
     Scalar restartShrinkFactor_;
     unsigned maxFails_;
     Scalar minTimeStepSize_;
+    
+    // equilibration parameters
+    int numPressurePointsEquil_;
 
 private:
     template<class T>
-    void updateNum(const std::string& name, std::vector<T>& numbers);
+    void updateNum(const std::string& name, std::vector<T>& numbers, size_t num_regions);
 };
 
 } // namespace Opm

@@ -310,10 +310,13 @@ namespace Opm {
             well->setGuideRate(&guideRate_);
         }
 
-        // Close completions due to economical reasons
+        // Close completions due to economic reasons
         for (auto& well : well_container_) {
             well->closeCompletions(wellTestState());
         }
+
+        // we need the inj_multiplier from the previous time step
+        this->initInjMult();
 
         if (alternative_well_rate_init_) {
             // Update the well rates of well_state_, if only single-phase rates, to
@@ -470,6 +473,10 @@ namespace Opm {
                 well->updateWaterThroughput(dt, this->wellState());
             }
         }
+
+        // at the end of the time step, updating the inj_multiplier saved in WellState for later use
+        this->updateInjMult(local_deferredLogger);
+
         // report well switching
         for (const auto& well : well_container_) {
             well->reportWellSwitching(this->wellState().well(well->indexOfWell()), local_deferredLogger);
@@ -1042,7 +1049,7 @@ namespace Opm {
     template<typename TypeTag>
     void
     BlackoilWellModel<TypeTag>::
-    assembleDomain(const int /*iterationIdx*/,
+    assembleDomain([[maybe_unused]] const int iterationIdx,
                    const double dt,
                    const Domain& domain)
     {
@@ -1568,7 +1575,6 @@ namespace Opm {
         const bool relax_tolerance = iterationIdx > param_.strict_outer_iter_wells_;
 
         Opm::DeferredLogger local_deferredLogger;
-
         ConvergenceReport local_report;
         for (const auto& well : well_container_) {
             if ((well_domain_.at(well->name()) == domain.index)) {

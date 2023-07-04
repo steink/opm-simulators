@@ -107,6 +107,14 @@ add_test_compareECLFiles(CASENAME gas_precsalt
                          REL_TOL ${rel_tol}
                          DIR spe1_precsalt)
 
+add_test_compareECLFiles(CASENAME gasoil_precsalt
+                         FILENAME GASCONDENSATE_VAPWAT_PRECSALT_REGRESSION
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}                         
+                         DIR spe1_precsalt
+                         TEST_ARGS --solver-max-time-step-in-days=0.05)
+
 add_test_compareECLFiles(CASENAME spe1_brine_gaswater
                          FILENAME SPE1CASE2_BRINE_GASWATER
                          SIMULATOR flow
@@ -462,6 +470,7 @@ set(_pinch_cases
   T1A_GAP T1A_NOGAP T1A_NOPINCH
   T1A1_NOGAP
   T2A1_GAP
+  T2A_NOPINCH T2A_GAP
   T1B_NOPINCH
   T1B1_GAP
   T1C_NOPINCH
@@ -504,6 +513,20 @@ add_test_compareECLFiles(CASENAME udq_in_actionx
 
 add_test_compareECLFiles(CASENAME co2store
                          FILENAME CO2STORE
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR co2store)
+
+add_test_compareECLFiles(CASENAME co2store_gw
+                         FILENAME CO2STORE_GW
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR co2store)
+
+add_test_compareECLFiles(CASENAME co2store_gaswat
+                         FILENAME CO2STORE_GASWAT
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
@@ -1176,16 +1199,30 @@ add_test_compareECLFiles(CASENAME 02_wgrupcon
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
                          DIR wgrupcon)
+add_test_compareECLFiles(CASENAME winjmult_stdw
+                         FILENAME WINJMULT_STDW
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR winjmult
+                         TEST_ARGS --enable-tuning=true)
+add_test_compareECLFiles(CASENAME winjmult_msw
+                         FILENAME WINJMULT_MSW
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR winjmult
+                         TEST_ARGS --enable-tuning=true)
 add_test_compareECLFiles(CASENAME 01_vappars
                          FILENAME VAPPARS-01
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR vappars)                         
+                         DIR vappars)
 add_test_compareECLFiles(CASENAME 01_multflt
                          FILENAME MULTFLT-01
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR mult)                         
-                         
+                         DIR mult)
+
