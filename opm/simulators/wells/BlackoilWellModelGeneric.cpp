@@ -956,7 +956,7 @@ forceShutWellByName(const std::string& wellname,
     // Only log a message on the output rank.
     if (terminal_output_ && well_was_shut) {
         const std::string msg = "Well " + wellname
-            + " will be shut because it cannot get converged.";
+            + " will be shut because it fails to converge.";
         OpmLog::info(msg);
     }
 
@@ -1419,6 +1419,21 @@ void BlackoilWellModelGeneric::initInjMult() {
             well->initInjMult(values);
         }
     }
+}
+
+
+void BlackoilWellModelGeneric::updateFiltrationParticleVolume(const double dt, const size_t water_index) {
+    for (auto& well : this->well_container_generic_) {
+        if (well->isInjector() && well->wellEcl().getFilterConc() > 0.) {
+            auto &values =  this->filtration_particle_volume_[well->name()];
+            const auto& ws = this->wellState().well(well->indexOfWell());
+            if (values.empty()) {
+                values.assign(ws.perf_data.size(), 0.); // initializing to be zero
+            }
+            well->updateFiltrationParticleVolume(dt, water_index, this->wellState(), values);
+        }
+    }
+
 }
 
 void BlackoilWellModelGeneric::updateInjMult(DeferredLogger& deferred_logger) {

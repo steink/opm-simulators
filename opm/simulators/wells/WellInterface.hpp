@@ -320,7 +320,7 @@ public:
     /// to the rates returned by computeCurrentWellRates().
     void updateWellStateRates(const Simulator& ebosSimulator,
                               WellState& well_state,
-                              DeferredLogger& deferred_logger) const;
+                              DeferredLogger& deferred_logger) const;                      
 
     void solveWellEquation(const Simulator& ebosSimulator,
                            WellState& well_state,

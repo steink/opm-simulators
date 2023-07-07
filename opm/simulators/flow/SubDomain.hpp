@@ -27,6 +27,17 @@
 
 namespace Opm
 {
+    //! \brief Solver approach for NLDD.
+    enum class DomainSolveApproach {
+        Jacobi,
+        GaussSeidel
+    };
+
+    //! \brief Measure to use for domain ordering.
+    enum class DomainOrderingMeasure {
+        AveragePressure,
+        Residual
+    };
 
     /// Representing a part of a grid, in a way suitable for performing
     /// local solves.

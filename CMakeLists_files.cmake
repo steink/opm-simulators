@@ -72,20 +72,21 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/linalg/PreconditionerFactory6.cpp
   opm/simulators/linalg/PropertyTree.cpp
   opm/simulators/linalg/setupPropertyTree.cpp
-  opm/simulators/utils/PartiallySupportedFlowKeywords.cpp
-  opm/simulators/utils/readDeck.cpp
-  opm/simulators/utils/UnsupportedFlowKeywords.cpp
   opm/simulators/timestepping/AdaptiveSimulatorTimer.cpp
   opm/simulators/timestepping/AdaptiveTimeSteppingEbos.cpp
   opm/simulators/timestepping/TimeStepControl.cpp
   opm/simulators/timestepping/SimulatorTimer.cpp
   opm/simulators/timestepping/SimulatorTimerInterface.cpp
   opm/simulators/timestepping/gatherConvergenceReport.cpp
+  opm/simulators/utils/ComponentName.cpp
   opm/simulators/utils/DeferredLogger.cpp
   opm/simulators/utils/gatherDeferredLogger.cpp
   opm/simulators/utils/ParallelFileMerger.cpp
   opm/simulators/utils/ParallelRestart.cpp
+  opm/simulators/utils/PartiallySupportedFlowKeywords.cpp
+  opm/simulators/utils/readDeck.cpp
   opm/simulators/utils/SerializationPackers.cpp
+  opm/simulators/utils/UnsupportedFlowKeywords.cpp
   opm/simulators/wells/ALQState.cpp
   opm/simulators/wells/BlackoilWellModelConstraints.cpp
   opm/simulators/wells/BlackoilWellModelGeneric.cpp
@@ -228,6 +229,7 @@ endif()
 # find tests -name '*.cpp' -a ! -wholename '*/not-unit/*' -printf '\t%p\n' | sort
 list (APPEND TEST_SOURCE_FILES
   tests/test_ALQState.cpp
+  tests/test_aquifergridutils.cpp
   tests/test_blackoil_amg.cpp
   tests/test_convergenceoutputconfiguration.cpp
   tests/test_convergencereport.cpp
@@ -358,6 +360,7 @@ list (APPEND PUBLIC_HEADER_FILES
   ebos/eclinterregflows.hh
   opm/simulators/flow/countGlobalCells.hpp
   opm/simulators/flow/BlackoilModelEbos.hpp
+  opm/simulators/flow/BlackoilModelEbosNldd.hpp
   opm/simulators/flow/BlackoilModelParametersEbos.hpp
   opm/simulators/flow/Banners.hpp
   opm/simulators/flow/ConvergenceOutputConfiguration.hpp
@@ -378,8 +381,9 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/WellContainer.hpp
   opm/simulators/aquifers/AquiferAnalytical.hpp
   opm/simulators/aquifers/AquiferCarterTracy.hpp
-  opm/simulators/aquifers/AquiferFetkovich.hpp
   opm/simulators/aquifers/AquiferConstantFlux.hpp
+  opm/simulators/aquifers/AquiferFetkovich.hpp
+  opm/simulators/aquifers/AquiferGridUtils.hpp
   opm/simulators/aquifers/AquiferInterface.hpp
   opm/simulators/aquifers/AquiferNumerical.hpp
   opm/simulators/aquifers/BlackoilAquiferModel.hpp
@@ -441,6 +445,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/timestepping/SimulatorTimer.hpp
   opm/simulators/timestepping/SimulatorTimerInterface.hpp
   opm/simulators/timestepping/gatherConvergenceReport.hpp
+  opm/simulators/utils/ComponentName.hpp
   opm/simulators/utils/ParallelFileMerger.hpp
   opm/simulators/utils/DeferredLoggingErrorHelpers.hpp
   opm/simulators/utils/DeferredLogger.hpp

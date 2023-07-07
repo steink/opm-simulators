@@ -235,7 +235,7 @@ namespace Opm {
                 // update VFP properties
                 vfp_properties_ = std::make_unique<VFPProperties>(sched_state.vfpinj(),
                                                                   sched_state.vfpprod(),
-                                                                  this->prevWellState());
+                                                                  this->wellState());
                 this->initializeWellProdIndCalculators();
                 if (sched_state.events().hasEvent(ScheduleEvents::Events::WELL_PRODUCTIVITY_INDEX)) {
                     this->runWellPIScaling(timeStepIdx, local_deferredLogger);
@@ -310,6 +310,16 @@ namespace Opm {
             well->setGuideRate(&guideRate_);
         }
 
+        for (auto& well : well_container_) {
+            if (well->isInjector()) {
+                const auto it = this->filtration_particle_volume_.find(well->name());
+                if (it != this->filtration_particle_volume_.end()) {
+                    const auto& filtration_particle_volume = it->second;
+                    well->updateInjFCMult(filtration_particle_volume, local_deferredLogger);
+                }
+            }
+        }
+
         // Close completions due to economic reasons
         for (auto& well : well_container_) {
             well->closeCompletions(wellTestState());
@@ -327,6 +337,12 @@ namespace Opm {
                 if (well->isProducer()) {
                     well->updateWellStateRates(ebosSimulator_, this->wellState(), local_deferredLogger);
                 }
+            }
+        }
+
+        for (auto& well : well_container_) {
+            if (well->isVFPActive(local_deferredLogger)){
+                well->setPrevSurfaceRates(this->wellState(), this->prevWellState());
             }
         }
 
@@ -472,6 +488,10 @@ namespace Opm {
             if (getPropValue<TypeTag, Properties::EnablePolymerMW>() && well->isInjector()) {
                 well->updateWaterThroughput(dt, this->wellState());
             }
+        }
+
+        if (Indices::waterEnabled) {
+            this->updateFiltrationParticleVolume(dt, FluidSystem::waterPhaseIdx);
         }
 
         // at the end of the time step, updating the inj_multiplier saved in WellState for later use

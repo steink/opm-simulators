@@ -21,7 +21,7 @@ set(BASE_RESULT_PATH ${PROJECT_BINARY_DIR}/tests/results)
 # Details:
 #   - This test class simply runs a simulation.
 function(add_test_runSimulator)
-  set(oneValueArgs CASENAME FILENAME SIMULATOR DIR DIR_PREFIX PROCS)
+  set(oneValueArgs CASENAME FILENAME SIMULATOR DIR DIR_PREFIX PROCS CONFIGURATION POST_COMMAND)
   set(multiValueArgs TEST_ARGS)
   cmake_parse_arguments(PARAM "$" "${oneValueArgs}" "${multiValueArgs}" ${ARGN} )
   if(NOT PARAM_DIR)
@@ -29,15 +29,24 @@ function(add_test_runSimulator)
   endif()
   set(RESULT_PATH ${BASE_RESULT_PATH}${PARAM_DIR_PREFIX}/${PARAM_SIMULATOR}+${PARAM_CASENAME})
   set(TEST_ARGS ${PARAM_TEST_ARGS})
+  set(DRIVER_ARGS -i ${OPM_TESTS_ROOT}/${PARAM_DIR}
+                  -r ${RESULT_PATH}
+                  -b ${PROJECT_BINARY_DIR}/bin
+                  -f ${PARAM_FILENAME})
+ if(PARAM_PROCS)
+   list(APPEND DRIVER_ARGS -n ${PARAM_PROCS})
+ endif()
+ if(PARAM_POST_COMMAND)
+   list(APPEND DRIVER_ARGS -p "${PARAM_POST_COMMAND}")
+ endif()
   opm_add_test(runSimulator/${PARAM_CASENAME} NO_COMPILE
                EXE_NAME ${PARAM_SIMULATOR}
-               DRIVER_ARGS -i ${OPM_TESTS_ROOT}/${PARAM_DIR}
-                           -r ${RESULT_PATH}
-                           -b ${PROJECT_BINARY_DIR}/bin
-                           -f ${PARAM_FILENAME}
-                           -n ${PARAM_PROCS}
+               DRIVER_ARGS ${DRIVER_ARGS}
                TEST_ARGS ${TEST_ARGS}
-               CONFIGURATION extra)
+               CONFIGURATION ${PARAM_CONFIGURATION})
+ if(PARAM_PROCS)
+    set_tests_properties(runSimulator/${PARAM_CASENAME} PROPERTIES PROCESSORS ${PARAM_PROCS})
+  endif()
 endfunction()
 
 ###########################################################################
@@ -277,13 +286,31 @@ opm_set_test_driver(${PROJECT_SOURCE_DIR}/tests/run-test.sh "")
 add_test_runSimulator(CASENAME norne
                       FILENAME NORNE_ATW2013
                       SIMULATOR flow
-                      PROCS 1)
+                      CONFIGURATION extra)
 
 add_test_runSimulator(CASENAME norne_parallel
                       FILENAME NORNE_ATW2013
                       SIMULATOR flow
                       DIR norne
-                      PROCS 4)
+                      PROCS 4
+                      CONFIGURATION extra)
+
+# Tests that are run based on simulator results, but not necessarily direct comparison to reference results
+add_test_runSimulator(CASENAME tuning_xxxmbe
+                      FILENAME 01_TUNING_XXXMBE
+                      SIMULATOR flow
+											DIR tuning
+                      TEST_ARGS --output-extra-convergence-info=iterations --enable-tuning=true
+                      POST_COMMAND $<TARGET_FILE:test_tuning_xxxMBE>)
+
+add_test_runSimulator(CASENAME notuning_xxxmbe
+                      FILENAME 01_TUNING_XXXMBE
+                      SIMULATOR flow
+											DIR tuning
+                      TEST_ARGS --output-extra-convergence-info=iterations --enable-tuning=false
+                      POST_COMMAND $<TARGET_FILE:test_tuning_xxxMBE>)
+
+set_tests_properties(runSimulator/notuning_xxxmbe PROPERTIES WILL_FAIL TRUE)
 
 include (${CMAKE_CURRENT_SOURCE_DIR}/regressionTests.cmake)
 include (${CMAKE_CURRENT_SOURCE_DIR}/restartTests.cmake)

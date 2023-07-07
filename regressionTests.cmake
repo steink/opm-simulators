@@ -107,6 +107,14 @@ add_test_compareECLFiles(CASENAME gas_precsalt
                          REL_TOL ${rel_tol}
                          DIR spe1_precsalt)
 
+add_test_compareECLFiles(CASENAME gasoil_precsalt
+                         FILENAME GASCONDENSATE_VAPWAT_PRECSALT_REGRESSION
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}                         
+                         DIR spe1_precsalt
+                         TEST_ARGS --solver-max-time-step-in-days=0.05)
+
 add_test_compareECLFiles(CASENAME spe1_brine_gaswater
                          FILENAME SPE1CASE2_BRINE_GASWATER
                          SIMULATOR flow
@@ -1183,14 +1191,16 @@ add_test_compareECLFiles(CASENAME 01_wgrupcon
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wgrupcon)
+                         DIR wgrupcon
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME 02_wgrupcon
                          FILENAME 02-WGRUPCON
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wgrupcon)
+                         DIR wgrupcon
+                         TEST_ARGS --enable-tuning=true)
 add_test_compareECLFiles(CASENAME winjmult_stdw
                          FILENAME WINJMULT_STDW
                          SIMULATOR flow
@@ -1204,6 +1214,20 @@ add_test_compareECLFiles(CASENAME winjmult_msw
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
                          DIR winjmult
+                         TEST_ARGS --enable-tuning=true)
+add_test_compareECLFiles(CASENAME winjdam_stdw
+                         FILENAME WINJDAM_STDW
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR winjdam
+                         TEST_ARGS --enable-tuning=true)
+add_test_compareECLFiles(CASENAME winjdam_msw
+                         FILENAME WINJDAM_MSW
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR winjdam
                          TEST_ARGS --enable-tuning=true)
 add_test_compareECLFiles(CASENAME 01_vappars
                          FILENAME VAPPARS-01

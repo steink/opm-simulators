@@ -322,6 +322,13 @@ endmacro (tests_hook)
 # all setup common to the OPM library modules is done here
 include (OpmLibMain)
 
+opm_add_test(test_tuning_xxxMBE
+              SOURCES
+                tests/test_tuning_XXXMBE.cpp
+              LIBRARIES
+                ${Boost_UNIT_TEST_FRAMEWORK_LIBRARY}
+              ONLY_COMPILE)
+
 if (HAVE_OPM_TESTS)
     include (${CMAKE_CURRENT_SOURCE_DIR}/compareECLFiles.cmake)
 endif()
@@ -492,6 +499,9 @@ foreach(OBJ ${COMMON_MODELS} ${FLOW_MODELS} ${FLOW_VARIANT_MODELS})
   list(APPEND FLOW_TGTS $<TARGET_OBJECTS:flow_lib${OBJ}>)
   if(TARGET fmt::fmt)
     target_link_libraries(flow_lib${OBJ} fmt::fmt)
+  endif()
+  if(TARGET opmcommon AND CMAKE_GENERATOR MATCHES "Makefiles")
+      add_dependencies(flow_lib${OBJ} opmcommon)
   endif()
   opm_add_test(flow_${OBJ}
                ONLY_COMPILE
