@@ -365,11 +365,32 @@ calculateBhpFromThp(const WellState& well_state,
         const auto& wfr =  well_.vfpProperties()->getExplicitWFR(controls.vfp_table_number, well_.indexOfWell());
         const auto& gfr = well_.vfpProperties()->getExplicitGFR(controls.vfp_table_number, well_.indexOfWell());
         const bool use_vfpexplicit = well_.useVfpExplicit();
-        bhp_tab = well_.vfpProperties()->getProd()->bhp(controls.vfp_table_number,
+        const auto& ipr_slope = well_state.well(well_.indexOfWell()).ipr_b;
+        bool has_ipr = false; 
+        for (double slope_i : ipr_slope){
+            has_ipr = has_ipr || slope_i != 0;
+        }
+        
+        if (!has_ipr){
+            bhp_tab = well_.vfpProperties()->getProd()->bhp(controls.vfp_table_number,
                                                       aqua, liquid, vapour,
                                                       thp_limit,
                                                       well_.getALQ(well_state),
                                                       wfr, gfr, use_vfpexplicit);
+        } else {
+            const PhaseUsage& pu = well_state.phaseUsage(); 
+            const double slope_aqua = (pu.phase_used[BlackoilPhases::PhaseIndex::Aqua]) ? ipr_slope[pu.phase_pos[Water]] : 0.0;
+            const double slope_liquid = (pu.phase_used[BlackoilPhases::PhaseIndex::Liquid]) ? ipr_slope[pu.phase_pos[Oil]] : 0.0;
+            const double slope_vapour = (pu.phase_used[BlackoilPhases::PhaseIndex::Vapour]) ? ipr_slope[pu.phase_pos[Gas]] : 0.0;
+            bool on_curve = true;
+            bhp_tab = well_.vfpProperties()->getProd()->bhp_ipr(controls.vfp_table_number,
+                                                                aqua, liquid, vapour,
+                                                                thp_limit,
+                                                                well_.getALQ(well_state),
+                                                                slope_aqua, slope_liquid, slope_vapour,  
+                                                                wfr, gfr, use_vfpexplicit, on_curve);   
+        }
+                                                
     }
     else {
         OPM_DEFLOG_THROW(std::logic_error, "Expected INJECTOR or PRODUCER for well " + well_.name(), deferred_logger);
@@ -385,6 +406,63 @@ calculateBhpFromThp(const WellState& well_state,
     const double dp_hydro = wellhelpers::computeHydrostaticCorrection(
             well_.refDepth(), vfp_ref_depth, rho, well_.gravity());
     return bhp_tab - dp_hydro + bhp_adjustment;
+}
+
+template<class EvalWell>
+bool WellBhpThpCalculator::
+isStableSolution(const WellState& well_state,
+                 const std::vector<EvalWell>& rates,
+                 const Well& well,
+                 const SummaryState& summaryState,
+                 const double rho,
+                 DeferredLogger& deferred_logger) const
+{
+    assert(int(rates.size()) == 3); // the vfp related only supports three phases now.
+
+    static constexpr int Gas = BlackoilPhases::Vapour;
+    static constexpr int Oil = BlackoilPhases::Liquid;
+    static constexpr int Water = BlackoilPhases::Aqua;
+
+    const EvalWell aqua = rates[Water];
+    const EvalWell liquid = rates[Oil];
+    const EvalWell vapour = rates[Gas];
+    const double thp_limit = well_.getTHPConstraint(summaryState);
+    if (well_.isInjector() )
+    {
+        // do we need a check here?
+        return true;
+    }
+    else if (well_.isProducer()) {
+        const auto& ipr_slope = well_state.well(well_.indexOfWell()).ipr_b;
+        const PhaseUsage& pu = well_state.phaseUsage(); 
+        const double slope_aqua = (pu.phase_used[BlackoilPhases::PhaseIndex::Aqua]) ? ipr_slope[pu.phase_pos[Water]] : 0.0;
+        const double slope_liquid = (pu.phase_used[BlackoilPhases::PhaseIndex::Liquid]) ? ipr_slope[pu.phase_pos[Oil]] : 0.0;
+        const double slope_vapour = (pu.phase_used[BlackoilPhases::PhaseIndex::Vapour]) ? ipr_slope[pu.phase_pos[Gas]] : 0.0;
+        bool has_ipr = false; 
+        for (double slope_i : ipr_slope){
+            has_ipr = has_ipr || slope_i != 0;
+        }
+        if (!has_ipr){
+            // Can't decide
+            return true;
+        } else {
+            const auto& controls = well.productionControls(summaryState);
+            const auto& wfr =  well_.vfpProperties()->getExplicitWFR(controls.vfp_table_number, well_.indexOfWell());
+            const auto& gfr = well_.vfpProperties()->getExplicitGFR(controls.vfp_table_number, well_.indexOfWell());
+            const bool use_vfpexplicit = well_.useVfpExplicit();
+            bool on_curve;
+            EvalWell  bhp_tab = well_.vfpProperties()->getProd()->bhp_ipr(controls.vfp_table_number,
+                                                                    aqua, liquid, vapour,
+                                                                    thp_limit,
+                                                                    well_.getALQ(well_state),
+                                                                    slope_aqua, slope_liquid, slope_vapour,  
+                                                                    wfr, gfr, use_vfpexplicit, on_curve);   
+            return on_curve;      
+        }                  
+    }
+    else {
+        OPM_DEFLOG_THROW(std::logic_error, "Expected INJECTOR or PRODUCER for well " + well_.name(), deferred_logger);
+    }
 }
 
 double WellBhpThpCalculator::getVfpBhpAdjustment(const double bhp_tab, const double thp_limit) const
@@ -846,7 +924,14 @@ calculateBhpFromThp<__VA_ARGS__>(const WellState&, \
                                  const Well&, \
                                  const SummaryState&, \
                                  const double, \
-                                 DeferredLogger&) const;
+                                 DeferredLogger&) const;\
+template bool WellBhpThpCalculator:: \
+isStableSolution<__VA_ARGS__>(const WellState&, \
+                             const std::vector<__VA_ARGS__>&, \
+                             const Well&, \
+                             const SummaryState&, \
+                             const double, \
+                             DeferredLogger&) const;                                 
 
 INSTANCE(double)
 INSTANCE(DenseAd::Evaluation<double,3,0u>)
