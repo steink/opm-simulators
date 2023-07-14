@@ -200,7 +200,8 @@ namespace Opm
                                       const Well::ProductionControls& prod_controls,
                                       WellState& well_state,
                                       const GroupState& group_state,
-                                      DeferredLogger& deferred_logger) override;
+                                      DeferredLogger& deferred_logger,
+                                      const bool allow_switch) override;
 
         /// \brief Wether the Jacobian will also have well contributions in it.
         virtual bool jacobianContainsWellContributions() const override
@@ -233,6 +234,8 @@ namespace Opm
             const double& bhp,
             std::vector<double>& well_flux,
             DeferredLogger& deferred_logger) const override;
+
+        void updateIPRImplicit(const Simulator& ebosSimulator, WellState& well_state, DeferredLogger& deferred_logger);            
 
         // NOTE: These cannot be protected since they are used by GasLiftRuntime
         using Base::phaseUsage;

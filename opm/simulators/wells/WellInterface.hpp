@@ -327,6 +327,10 @@ public:
                            const GroupState& group_state,
                            DeferredLogger& deferred_logger);
 
+    virtual void updateIPRImplicit(const Simulator& ebosSimulator, 
+                           WellState& well_state, 
+                           DeferredLogger& deferred_logger) = 0;                           
+
     const std::vector<RateVector>& connectionRates() const
     {
         return connectionRates_;
@@ -392,7 +396,8 @@ protected:
                                           const WellProductionControls& prod_controls,
                                           WellState& well_state,
                                           const GroupState& group_state,
-                                          DeferredLogger& deferred_logger) = 0;
+                                          DeferredLogger& deferred_logger, 
+                                          const bool allow_switch = false) = 0;
 
     bool iterateWellEquations(const Simulator& ebosSimulator,
                               const double dt,

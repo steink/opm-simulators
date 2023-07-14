@@ -272,7 +272,7 @@ namespace Opm
         auto& ws = well_state.well(this->index_of_well_);
         bool changed = this->checkIndividualConstraints(ws, summary_state, deferred_logger, inj_controls, prod_controls);
         if (changed) {
-            updateWellStateWithTarget(ebos_simulator, group_state, well_state, deferred_logger);
+            //updateWellStateWithTarget(ebos_simulator, group_state, well_state, deferred_logger);
             updatePrimaryVariables(summary_state, well_state, deferred_logger);
         }
         return changed;
@@ -385,7 +385,7 @@ namespace Opm
         const auto prod_controls = this->well_ecl_.isProducer() ? this->well_ecl_.productionControls(summary_state) : Well::ProductionControls(0);
         bool converged = false;
         try {
-            converged = this->iterateWellEqWithControl(ebosSimulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
+            converged = this->iterateWellEqWithControl(ebosSimulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger, true);
         } catch (NumericalProblem& e ) {
             const std::string msg = "Inner well iterations failed for well " + this->name() + " Treat the well as unconverged. ";
             deferred_logger.warning("INNER_ITERATION_FAILED", msg);
@@ -740,7 +740,6 @@ namespace Opm
         // Only check wells under BHP and THP control
         bool check_thp = thp_controlled || this->operability_status_.thp_limit_violated_but_not_switched;
         if (check_thp || bhp_controlled) {
-            updateIPR(ebos_simulator, deferred_logger);
             checkOperabilityUnderBHPLimit(well_state, ebos_simulator, deferred_logger);
         }
         // we do some extra checking for wells under THP control.
