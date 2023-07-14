@@ -393,6 +393,9 @@ namespace Opm {
                         well->updateWellStateWithTarget(ebosSimulator_, this->groupState(), this->wellState(), local_deferredLogger);
                         well->calculateExplicitQuantities(ebosSimulator_, this->wellState(), local_deferredLogger);
                         well->solveWellEquation(ebosSimulator_, this->wellState(), this->groupState(), local_deferredLogger);
+                        if (well->isVFPActive(local_deferredLogger)){
+                            well->updateIPRImplicit(ebosSimulator_, this->wellState(), local_deferredLogger);  
+                        }
                     } catch (const std::exception& e) {
                         const std::string msg = "Compute initial well solution for new well " + well->name() + " failed. Continue with zero initial rates";
                         local_deferredLogger.warning("WELL_INITIAL_SOLVE_FAILED", msg);
@@ -545,6 +548,12 @@ namespace Opm {
             local_deferredLogger.warning("WELL_POTENTIAL_CALCULATION_FAILED", msg);
         }
 
+        for (const auto& well : well_container_) {
+            if (well->isVFPActive(local_deferredLogger)){
+                well->updateIPRImplicit(ebosSimulator_, this->wellState(), local_deferredLogger);  
+            }
+        }
+        
         updateWellTestState(simulationTime, wellTestState());
 
         // check group sales limits at the end of the timestep
