@@ -174,6 +174,14 @@ public:
         return completions_;
     }
 
+    const std::vector<double>& ipr_a() const {
+        return ipr_a_;
+    }
+
+    const std::vector<double> ipr_b() const {
+        return ipr_b_;
+    }
+
     double getTHPConstraint(const SummaryState& summaryState) const;
     double getALQ(const WellState& well_state) const;
     double wsolvent() const;
@@ -250,7 +258,7 @@ protected:
             if (!operable_under_only_bhp_limit || !solvable || has_negative_potentials) {
                 return false;
             } else {
-                return ( (isOperableUnderBHPLimit() || isOperableUnderTHPLimit()) );
+                return ( (isOperableUnderBHPLimit() || isOperableUnderTHPLimit()) && !bhp_shifted_off_vfp_curve );
             }
         }
 
@@ -267,6 +275,7 @@ protected:
             obey_thp_limit_under_bhp_limit = true;
             can_obtain_bhp_with_thp_limit = true;
             obey_bhp_limit_with_thp_limit = true;
+            bhp_shifted_off_vfp_curve = false;
         }
 
         // whether the well can be operated under bhp limit
@@ -288,6 +297,8 @@ protected:
         mutable bool thp_limit_violated_but_not_switched = false;
 
         bool use_vfpexplicit = false;
+        // 
+        bool bhp_shifted_off_vfp_curve = false;
     };
 
     OperabilityStatus operability_status_;

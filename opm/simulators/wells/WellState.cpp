@@ -368,6 +368,8 @@ void WellState::init(const std::vector<double>& cellPressures,
                 new_well.surface_rates = prev_well.surface_rates;
                 new_well.reservoir_rates = prev_well.reservoir_rates;
                 new_well.well_potentials = prev_well.well_potentials;
+                new_well.ipr_a = prev_well.ipr_a;
+                new_well.ipr_b = prev_well.ipr_b;
 
                 // perfPhaseRates
                 const int num_perf_old_well = prev_well.perf_data.size();
