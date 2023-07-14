@@ -111,6 +111,37 @@ public:
             const double& bhp,
             const double& alq) const;
 
+    template <class EvalWell>
+    EvalWell bhp_ipr(const int table_id,
+                     const EvalWell& aqua,
+                     const EvalWell& liquid,
+                     const EvalWell& vapour,
+                     const double& thp,
+                     const double& alq,
+                     const double& ipr_slope_aqua,
+                     const double& ipr_slope_liquid,
+                     const double& ipr_slope_vapour,
+                     const double& explicit_wfr,
+                     const double& explicit_gfr,
+                     const bool use_expvfp,
+                     bool& on_vfp_curve) const;
+
+    double bhp_ipr(const int table_id,
+                   const double& aqua,
+                   const double& liquid,
+                   const double& vapour,
+                   const double& thp,
+                   const double& alq,
+                   const double& ipr_slope_aqua,
+                   const double& ipr_slope_liquid,
+                   const double& ipr_slope_vapour,
+                   const double& explicit_wfr,
+                   const double& explicit_gfr,
+                   const bool use_expvfp,
+                   bool& on_vfp_curve) const;
+
+
+
     /**
      * Returns the table associated with the ID, or throws an exception if
      * the table does not exist

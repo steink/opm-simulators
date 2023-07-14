@@ -97,6 +97,25 @@ double VFPProdProperties::bhp(int table_id,
     return retval.value;
 }
 
+double VFPProdProperties::bhp_ipr(int table_id,
+                                  const double& aqua,
+                                  const double& liquid,
+                                  const double& vapour,
+                                  const double& thp_arg,
+                                  const double& alq,
+                                  const double& ipr_slope_aqua,
+                                  const double& ipr_slope_liquid,
+                                  const double& ipr_slope_vapour,
+                                  const double& explicit_wfr,
+                                  const double& explicit_gfr,
+                                  const bool    use_expvfp,
+                                  bool& on_vfp_curve) const {
+    const VFPProdTable& table = detail::getTable(m_tables, table_id);
+    // don't do special ipr-adjustments for the double-version
+    detail::VFPEvaluation retval = detail::bhp(table, aqua, liquid, vapour, thp_arg, alq, explicit_wfr, explicit_gfr, use_expvfp);
+    return retval.value;
+}
+
 
 const VFPProdTable& VFPProdProperties::getTable(const int table_id) const {
     return detail::getTable(m_tables, table_id);
@@ -182,10 +201,85 @@ EvalWell VFPProdProperties::bhp(const int table_id,
     return bhp;
 }
 
+template <class EvalWell>
+EvalWell VFPProdProperties::bhp_ipr(const int table_id,
+                                    const EvalWell& aqua,
+                                    const EvalWell& liquid,
+                                    const EvalWell& vapour,
+                                    const double& thp,
+                                    const double& alq,
+                                    const double& ipr_slope_aqua,
+                                    const double& ipr_slope_liquid,
+                                    const double& ipr_slope_vapour,
+                                    const double& explicit_wfr,
+                                    const double& explicit_gfr,
+                                    const bool use_expvfp,
+                                    bool& on_vfp_curve) const
+{
+    //Get the table
+    const VFPProdTable& table = detail::getTable(m_tables, table_id);
+    EvalWell bhp = 0.0 * aqua;
+
+    //Find interpolation variables
+    EvalWell flo = detail::getFlo(table, aqua, liquid, vapour);
+    EvalWell wfr = detail::getWFR(table, aqua, liquid, vapour);
+    EvalWell gfr = detail::getGFR(table, aqua, liquid, vapour);
+    if (use_expvfp || -flo.value() < table.getFloAxis().front()) {
+        wfr = explicit_wfr;
+        gfr = explicit_gfr;
+    }
+    const double ipr_slope = detail::getIPRSlope(table, ipr_slope_aqua, ipr_slope_liquid, ipr_slope_vapour);
+    // slope should be positive since flo is negative
+    const bool has_ipr = (ipr_slope>0);
+
+    //First, find the values to interpolate between
+    //Value of FLO is negative in OPM for producers, but positive in VFP table
+    auto flo_i = detail::findInterpData(-flo.value(), table.getFloAxis());
+    auto thp_i = detail::findInterpData( thp, table.getTHPAxis()); // assume constant
+    auto wfr_i = detail::findInterpData( wfr.value(), table.getWFRAxis());
+    auto gfr_i = detail::findInterpData( gfr.value(), table.getGFRAxis());
+    auto alq_i = detail::findInterpData( alq, table.getALQAxis()); //assume constant
+
+    detail::VFPEvaluation bhp_val = detail::interpolate(table, flo_i, thp_i, wfr_i, gfr_i, alq_i);
+    if ( (bhp_val.dflo + 1/ipr_slope >= 0) || (!has_ipr && bhp_val.dflo >= 0) ){
+        // for sure stable region
+        on_vfp_curve = true;
+        bhp = (bhp_val.dwfr * wfr) + (bhp_val.dgfr * gfr) - (bhp_val.dflo * flo);
+        bhp.setValue(bhp_val.value);
+        return bhp;
+    } else {
+        // We are in the unstable region of the bhp-curve. We set bhp corresponding to minimum value on curve 
+        // flo(bhp)-flo_ipr(bhp) and set bhp_val.dflo = 0. This basically switches the control to bhp in attempt
+        // to make FLO reach the stable region in next iteration(s). If well converges before reacing the stable 
+        // region, it means the well is not operable. This needs to be checked after convergence.
+        on_vfp_curve = false;
+        double min_value = 1e100; 
+        double bhp_min;
+        std::vector<double> flos = table.getFloAxis();
+        for (size_t i = 0; i < flos.size(); ++i) {
+            flo_i = detail::findInterpData(flos[i], table.getFloAxis());
+            const detail::VFPEvaluation bhp_i = detail::interpolate(table, flo_i, thp_i, wfr_i, gfr_i, alq_i);
+            //const double cur_value = (bhp_i.value - bhp_val.value) + (flos[i]+flo.value())/ipr_slope;
+            const double cur_value = bhp_i.value + flos[i]/ipr_slope;
+            if (cur_value < min_value){
+                min_value = cur_value;
+                bhp_min = bhp_i.value;
+            }
+        }
+        bhp = (bhp_val.dwfr * wfr) + (bhp_val.dgfr * gfr);
+        bhp.setValue(bhp_min);
+        return bhp;
+    }
+}
+
 #define INSTANCE(...) \
     template __VA_ARGS__ VFPProdProperties::bhp<__VA_ARGS__>(const int, \
                                                              const __VA_ARGS__&, const __VA_ARGS__&, const __VA_ARGS__&, \
-                                                             const double&, const double&, const double&, const double&, const bool) const;
+                                                             const double&, const double&, const double&, const double&, const bool) const;\
+    template __VA_ARGS__ VFPProdProperties::bhp_ipr<__VA_ARGS__>(const int, \
+                                                             const __VA_ARGS__&, const __VA_ARGS__&, const __VA_ARGS__&, \
+                                                             const double&, const double&, const double&, const double&, \
+                                                             const double&, const double&, const double&, const bool, bool&) const;                                                             
 
 INSTANCE(DenseAd::Evaluation<double, -1, 4u>)
 INSTANCE(DenseAd::Evaluation<double, -1, 5u>)
