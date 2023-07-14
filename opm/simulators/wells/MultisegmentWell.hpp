@@ -128,6 +128,8 @@ namespace Opm
                                                WellState& well_state,
                                                DeferredLogger& deferred_logger) override; // const?
 
+        void updateIPRImplicit(const Simulator& ebos_simulator, WellState& well_state, DeferredLogger& deferred_logger);
+
         virtual void calculateExplicitQuantities(const Simulator& ebosSimulator,
                                                  const WellState& well_state,
                                                  DeferredLogger& deferred_logger) override; // should be const?
@@ -251,7 +253,8 @@ namespace Opm
                                               const Well::ProductionControls& prod_controls,
                                               WellState& well_state,
                                               const GroupState& group_state,
-                                              DeferredLogger& deferred_logger) override;
+                                              DeferredLogger& deferred_logger,
+                                              const bool allow_switch) override;
 
         virtual void assembleWellEqWithoutIteration(const Simulator& ebosSimulator,
                                                     const double dt,

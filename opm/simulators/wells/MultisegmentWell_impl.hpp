@@ -419,7 +419,7 @@ namespace Opm
         const double dt = ebosSimulator.timeStepSize();
         // iterate to get a solution at the given bhp.
         well_copy.iterateWellEqWithControl(ebosSimulator, dt, inj_controls, prod_controls, well_state_copy, group_state,
-                                           deferred_logger);
+                                           deferred_logger, true);
 
         // compute the potential and store in the flux vector.
         well_flux.clear();
@@ -1096,8 +1096,13 @@ namespace Opm
         }
     }
 
-
-
+    template<typename TypeTag>
+    void
+    MultisegmentWell<TypeTag>::
+    updateIPRImplicit(const Simulator& ebos_simulator, WellState& well_state, DeferredLogger& deferred_logger)
+    {
+    }
+    
     template<typename TypeTag>
     void
     MultisegmentWell<TypeTag>::
@@ -1253,7 +1258,8 @@ namespace Opm
                              const Well::ProductionControls& prod_controls,
                              WellState& well_state,
                              const GroupState& group_state,
-                             DeferredLogger& deferred_logger)
+                             DeferredLogger& deferred_logger, 
+                             const bool allow_switch)
     {
         if (!this->isOperableAndSolvable() && !this->wellIsStopped()) return true;
 
