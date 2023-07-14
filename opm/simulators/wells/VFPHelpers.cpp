@@ -590,6 +590,27 @@ T getGFR(const VFPProdTable& table,
     }
 }
 
+double getIPRSlope(const VFPProdTable& table,
+                   const double& slope_aqua,
+                   const double& slope_liquid,
+                   const double& slope_vapour)
+{
+    auto type = table.getFloType();
+    switch (type) {
+    case VFPProdTable::FLO_TYPE::FLO_OIL:
+        //Oil = liquid phase
+        return slope_liquid;
+    case VFPProdTable::FLO_TYPE::FLO_LIQ:
+        //Liquid = aqua + liquid phases
+        return slope_aqua + slope_liquid;
+    case VFPProdTable::FLO_TYPE::FLO_GAS:
+        //Gas = vapor phase
+        return slope_vapour;
+    default:
+        throw std::logic_error("Invalid FLO_TYPE");
+    }
+}
+
 template <typename T>
 const T& getTable(const std::map<int, std::reference_wrapper<const T>>& tables, int table_id)
 {

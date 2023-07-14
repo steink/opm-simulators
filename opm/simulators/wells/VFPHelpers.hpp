@@ -78,6 +78,12 @@ T getGFR(const VFPProdTable& table,
          const T& liquid,
          const T& vapour);
 
+
+double getIPRSlope(const VFPProdTable& table,
+                   const double& slope_aqua,
+                   const double& slope_liquid,
+                   const double& slope_vapour);
+
 /**
  * Helper struct for linear interpolation
  */
