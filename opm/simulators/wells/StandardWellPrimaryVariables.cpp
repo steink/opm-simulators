@@ -282,7 +282,8 @@ updateNewton(const BVectorWell& dwells,
 
     // updating the total rates Q_t
     value_[WQTotal] = value_[WQTotal] - dwells[0][WQTotal] * relaxation_factor_rate;
-    if (stop_or_zero_rate_target) {
+    const int wellSign = well_.isInjector() ? 1 : -1;
+    if (stop_or_zero_rate_target || wellSign*value_[WQTotal] < 0.) {
         value_[WQTotal] = 0.;
     }
     // TODO: here, we make sure it is zero for zero rated wells
