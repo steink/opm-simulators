@@ -49,7 +49,9 @@
 #include <opm/simulators/wells/BlackoilWellModelGuideRates.hpp>
 #include <opm/simulators/wells/BlackoilWellModelRestart.hpp>
 #include <opm/simulators/wells/GasLiftStage2.hpp>
+#include <opm/simulators/wells/ParallelWBPCalculation.hpp>
 #include <opm/simulators/wells/VFPProperties.hpp>
+#include <opm/simulators/wells/WellFilterCake.hpp>
 #include <opm/simulators/wells/WellGroupHelpers.hpp>
 #include <opm/simulators/wells/WellInterfaceGeneric.hpp>
 #include <opm/simulators/wells/WellState.hpp>
@@ -80,6 +82,7 @@ BlackoilWellModelGeneric(Schedule& schedule,
     , eclState_(eclState)
     , comm_(comm)
     , phase_usage_(phase_usage)
+    , wbpCalculationService_ { eclState.gridDims(), comm_ }
     , guideRate_(schedule)
     , active_wgstate_(phase_usage)
     , last_valid_wgstate_(phase_usage)
@@ -286,57 +289,89 @@ BlackoilWellModelGeneric::
 initializeWellPerfData()
 {
     well_perf_data_.resize(wells_ecl_.size());
+
+    this->conn_idx_map_.clear();
+    this->conn_idx_map_.reserve(wells_ecl_.size());
+
     int well_index = 0;
     for (const auto& well : wells_ecl_) {
         int connection_index = 0;
+
         // INVALID_ECL_INDEX marks no above perf available
         int connection_index_above = ParallelWellInfo::INVALID_ECL_INDEX;
+
         well_perf_data_[well_index].clear();
         well_perf_data_[well_index].reserve(well.getConnections().size());
-        CheckDistributedWellConnections checker(well, local_parallel_well_info_[well_index].get());
+
+        auto& connIdxMap = this->conn_idx_map_
+            .emplace_back(well.getConnections().size());
+
+        CheckDistributedWellConnections checker {
+            well, this->local_parallel_well_info_[well_index].get()
+        };
+
         bool hasFirstConnection = false;
         bool firstOpenConnection = true;
+
         auto& parallelWellInfo = this->local_parallel_well_info_[well_index].get();
         parallelWellInfo.beginReset();
 
         for (const auto& connection : well.getConnections()) {
-            const int active_index = compressedIndexForInterior(connection.global_index());
-            if (connection.state() == Connection::State::OPEN) {
+            const auto active_index =
+                this->compressedIndexForInterior(connection.global_index());
+
+            const auto connIsOpen =
+                connection.state() == Connection::State::OPEN;
+
+            if (active_index >= 0) {
+                connIdxMap.addActiveConnection(connection_index, connIsOpen);
+            }
+
+            if ((connIsOpen && (active_index >= 0)) || !connIsOpen) {
+                checker.connectionFound(connection_index);
+            }
+
+            if (connIsOpen) {
                 if (active_index >= 0) {
-                    if (firstOpenConnection)
-                    {
+                    if (firstOpenConnection) {
                         hasFirstConnection = true;
                     }
-                    checker.connectionFound(connection_index);
-                    PerforationData pd;
+
+                    auto pd = PerforationData{};
                     pd.cell_index = active_index;
                     pd.connection_transmissibility_factor = connection.CF();
                     pd.satnum_id = connection.satTableId();
                     pd.ecl_index = connection_index;
+
                     well_perf_data_[well_index].push_back(pd);
+
                     parallelWellInfo.pushBackEclIndex(connection_index_above,
                                                       connection_index);
                 }
+
                 firstOpenConnection = false;
-                // Next time this index is the one above as each open connection is
-                // is stored somehwere.
+
+                // Next time this index is the one above as each open
+                // connection is stored somewhere.
                 connection_index_above = connection_index;
-            } else {
-                checker.connectionFound(connection_index);
-                if (connection.state() != Connection::State::SHUT) {
-                    OPM_THROW(std::runtime_error,
-                              "Connection state: " +
-                              Connection::State2String(connection.state()) +
-                              " not handled");
-                }
             }
-            // Note: we rely on the connections being filtered! I.e. there are only connections
-            // to active cells in the global grid.
+            else if (connection.state() != Connection::State::SHUT) {
+                OPM_THROW(std::runtime_error,
+                          fmt::format("Connection state '{}' not handled",
+                                      Connection::State2String(connection.state())));
+            }
+
+            // Note: we rely on the connections being filtered!  I.e., there
+            // are only connections to active cells in the global grid.
             ++connection_index;
         }
+
         parallelWellInfo.endReset();
+
         checker.checkAllConnectionsFound();
+
         parallelWellInfo.communicateFirstPerforation(hasFirstConnection);
+
         ++well_index;
     }
 }
@@ -572,9 +607,9 @@ checkGroupHigherConstraints(const Group& group,
                 deferred_logger);
             if (is_changed) {
                 switched_prod_groups_.insert_or_assign(group.name(), Group::ProductionCMode2String(Group::ProductionCMode::FLD));
-                const auto exceed_action = group.productionControls(summaryState_).exceed_action;
+                const auto group_limit_action = group.productionControls(summaryState_).group_limit_action;
                 BlackoilWellModelConstraints(*this).
-                        actionOnBrokenConstraints(group, exceed_action,
+                        actionOnBrokenConstraints(group, group_limit_action,
                                                   Group::ProductionCMode::FLD,
                                                   this->groupState(),
                                                   deferred_logger);
@@ -1422,24 +1457,40 @@ void BlackoilWellModelGeneric::initInjMult() {
 }
 
 
-void BlackoilWellModelGeneric::updateFiltrationParticleVolume(const double dt, const size_t water_index) {
+void BlackoilWellModelGeneric::updateFiltrationParticleVolume(const double dt,
+                                                              const size_t water_index)
+{
     for (auto& well : this->well_container_generic_) {
         if (well->isInjector() && well->wellEcl().getFilterConc() > 0.) {
-            auto &values =  this->filtration_particle_volume_[well->name()];
-            const auto& ws = this->wellState().well(well->indexOfWell());
-            if (values.empty()) {
-                values.assign(ws.perf_data.size(), 0.); // initializing to be zero
-            }
-            well->updateFiltrationParticleVolume(dt, water_index, this->wellState(), values);
+            auto fc = this->filter_cake_
+                                      .emplace(std::piecewise_construct,
+                                               std::forward_as_tuple(well->name()),
+                                               std::tuple{});
+
+            fc.first->second.updateFiltrationParticleVolume(*well, dt, water_index,
+                                                            this->wellState());
         }
     }
-
 }
 
-void BlackoilWellModelGeneric::updateInjMult(DeferredLogger& deferred_logger) {
+void BlackoilWellModelGeneric::updateInjMult(DeferredLogger& deferred_logger)
+{
     for (const auto& well : this->well_container_generic_) {
         if (well->isInjector() && well->wellEcl().getInjMultMode() != Well::InjMultMode::NONE) {
             well->updateInjMult(this->prev_inj_multipliers_[well->name()], deferred_logger);
+        }
+    }
+}
+
+void BlackoilWellModelGeneric::updateInjFCMult(DeferredLogger& deferred_logger)
+{
+    for (auto& well : this->well_container_generic_) {
+        if (well->isInjector()) {
+            const auto it = filter_cake_.find(well->name());
+            if (it != filter_cake_.end()) {
+                it->second.updateInjFCMult(*well, deferred_logger);
+                well->updateFilterCakeMultipliers(it->second.multipliers());
+            }
         }
     }
 }

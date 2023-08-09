@@ -191,9 +191,9 @@ EclGenericOutputBlackoilModule(const EclipseState& eclState,
     anyFlows_ = false;
     enableFlores_ = false;  // Used for the output of i+, j+, k+
     enableFloresn_ = false; // Used for the special case of nnc
-    enableFlows_ = false; 
-    enableFlowsn_ = false; 
-    
+    enableFlows_ = false;
+    enableFlowsn_ = false;
+
     for (const auto& block : this->schedule_) { // Uses Schedule::begin() and Schedule::end()
         const auto& rstkw = block.rst_config().keywords;
 
@@ -419,7 +419,7 @@ outputProdLog(size_t reportStepNum,
                 tmp_values[6] = get("GWCT"); //WellProdDataType::WaterCut
                 tmp_values[7] = get("GGOR"); //WellProdDataType::GasOilRatio
             }
-        
+
             tmp_values[8] = tmp_values[3]/tmp_values[4]; //WellProdDataType::WaterGasRatio
             if (isnan(tmp_values[8])){
                 tmp_values[8] = 0.0;
@@ -741,80 +741,80 @@ assignToSolution(data::Solution& sol)
                    target);
     };
 
-    const auto baseSolutionArrays = std::vector<DataEntry> {
-        {"1OVERBG",  UnitSystem::measure::gas_inverse_formation_volume_factor,   invB_[gasPhaseIdx]},
-        {"1OVERBO",  UnitSystem::measure::oil_inverse_formation_volume_factor,   invB_[oilPhaseIdx]},
-        {"1OVERBW",  UnitSystem::measure::water_inverse_formation_volume_factor, invB_[waterPhaseIdx]},
-        {"FLOGASI+", UnitSystem::measure::gas_surface_rate,                      flowsi_[gasCompIdx]},
-        {"FLOGASJ+", UnitSystem::measure::gas_surface_rate,                      flowsj_[gasCompIdx]},
-        {"FLOGASK+", UnitSystem::measure::gas_surface_rate,                      flowsk_[gasCompIdx]},
-        {"FLOOILI+", UnitSystem::measure::liquid_surface_rate,                   flowsi_[oilCompIdx]},
-        {"FLOOILJ+", UnitSystem::measure::liquid_surface_rate,                   flowsj_[oilCompIdx]},
-        {"FLOOILK+", UnitSystem::measure::liquid_surface_rate,                   flowsk_[oilCompIdx]},
-        {"FLOWATI+", UnitSystem::measure::liquid_surface_rate,                   flowsi_[waterCompIdx]},
-        {"FLOWATJ+", UnitSystem::measure::liquid_surface_rate,                   flowsj_[waterCompIdx]},
-        {"FLOWATK+", UnitSystem::measure::liquid_surface_rate,                   flowsk_[waterCompIdx]},
-        {"FLRGASI+", UnitSystem::measure::rate,                                  floresi_[gasCompIdx]},
-        {"FLRGASJ+", UnitSystem::measure::rate,                                  floresj_[gasCompIdx]},
-        {"FLRGASK+", UnitSystem::measure::rate,                                  floresk_[gasCompIdx]},
-        {"FLROILI+", UnitSystem::measure::rate,                                  floresi_[oilCompIdx]},
-        {"FLROILJ+", UnitSystem::measure::rate,                                  floresj_[oilCompIdx]},
-        {"FLROILK+", UnitSystem::measure::rate,                                  floresk_[oilCompIdx]},
-        {"FLRWATI+", UnitSystem::measure::rate,                                  floresi_[waterCompIdx]},
-        {"FLRWATJ+", UnitSystem::measure::rate,                                  floresj_[waterCompIdx]},
-        {"FLRWATK+", UnitSystem::measure::rate,                                  floresk_[waterCompIdx]},
-        {"FOAM",     UnitSystem::measure::identity,                              cFoam_},
-        {"GASKR",    UnitSystem::measure::identity,                              relativePermeability_[gasPhaseIdx]},
-        {"GAS_DEN",  UnitSystem::measure::density,                               density_[gasPhaseIdx]},
-        {"GAS_VISC", UnitSystem::measure::viscosity,                             viscosity_[gasPhaseIdx]},
-        {"OILKR",    UnitSystem::measure::identity,                              relativePermeability_[oilPhaseIdx]},
-        {"OIL_DEN",  UnitSystem::measure::density,                               density_[oilPhaseIdx]},
-        {"OIL_VISC", UnitSystem::measure::viscosity,                             viscosity_[oilPhaseIdx]},
-        {"PBUB",     UnitSystem::measure::pressure,                              bubblePointPressure_},
-        {"PCOG",     UnitSystem::measure::pressure,                              pcog_},
-        {"PCOW",     UnitSystem::measure::pressure,                              pcow_},
-        {"PDEW",     UnitSystem::measure::pressure,                              dewPointPressure_},
-        {"POLYMER",  UnitSystem::measure::identity,                              cPolymer_},
-        {"PPCW",     UnitSystem::measure::pressure,                              ppcw_},
-        {"PRESROCC", UnitSystem::measure::pressure,                              minimumOilPressure_},
-        {"PRESSURE", UnitSystem::measure::pressure,                              fluidPressure_},
-        {"RS",       UnitSystem::measure::gas_oil_ratio,                         rs_},
-        {"RSSAT",    UnitSystem::measure::gas_oil_ratio,                         gasDissolutionFactor_},
-        {"RV",       UnitSystem::measure::oil_gas_ratio,                         rv_},
-        {"RVSAT",    UnitSystem::measure::oil_gas_ratio,                         oilVaporizationFactor_},
-        {"SALT",     UnitSystem::measure::salinity,                              cSalt_},
-        {"SOMAX",    UnitSystem::measure::identity,                              soMax_},
-        {"SSOLVENT", UnitSystem::measure::identity,                              sSol_},
-        {"SWMAX",    UnitSystem::measure::identity,                              swMax_},
-        {"WATKR",    UnitSystem::measure::identity,                              relativePermeability_[waterPhaseIdx]},
-        {"WAT_DEN",  UnitSystem::measure::density,                               density_[waterPhaseIdx]},
-        {"WAT_VISC", UnitSystem::measure::viscosity,                             viscosity_[waterPhaseIdx]},
+    const auto baseSolutionArrays = std::array {
+        DataEntry{"1OVERBG",  UnitSystem::measure::gas_inverse_formation_volume_factor,   invB_[gasPhaseIdx]},
+        DataEntry{"1OVERBO",  UnitSystem::measure::oil_inverse_formation_volume_factor,   invB_[oilPhaseIdx]},
+        DataEntry{"1OVERBW",  UnitSystem::measure::water_inverse_formation_volume_factor, invB_[waterPhaseIdx]},
+        DataEntry{"FLOGASI+", UnitSystem::measure::gas_surface_rate,                      flowsi_[gasCompIdx]},
+        DataEntry{"FLOGASJ+", UnitSystem::measure::gas_surface_rate,                      flowsj_[gasCompIdx]},
+        DataEntry{"FLOGASK+", UnitSystem::measure::gas_surface_rate,                      flowsk_[gasCompIdx]},
+        DataEntry{"FLOOILI+", UnitSystem::measure::liquid_surface_rate,                   flowsi_[oilCompIdx]},
+        DataEntry{"FLOOILJ+", UnitSystem::measure::liquid_surface_rate,                   flowsj_[oilCompIdx]},
+        DataEntry{"FLOOILK+", UnitSystem::measure::liquid_surface_rate,                   flowsk_[oilCompIdx]},
+        DataEntry{"FLOWATI+", UnitSystem::measure::liquid_surface_rate,                   flowsi_[waterCompIdx]},
+        DataEntry{"FLOWATJ+", UnitSystem::measure::liquid_surface_rate,                   flowsj_[waterCompIdx]},
+        DataEntry{"FLOWATK+", UnitSystem::measure::liquid_surface_rate,                   flowsk_[waterCompIdx]},
+        DataEntry{"FLRGASI+", UnitSystem::measure::rate,                                  floresi_[gasCompIdx]},
+        DataEntry{"FLRGASJ+", UnitSystem::measure::rate,                                  floresj_[gasCompIdx]},
+        DataEntry{"FLRGASK+", UnitSystem::measure::rate,                                  floresk_[gasCompIdx]},
+        DataEntry{"FLROILI+", UnitSystem::measure::rate,                                  floresi_[oilCompIdx]},
+        DataEntry{"FLROILJ+", UnitSystem::measure::rate,                                  floresj_[oilCompIdx]},
+        DataEntry{"FLROILK+", UnitSystem::measure::rate,                                  floresk_[oilCompIdx]},
+        DataEntry{"FLRWATI+", UnitSystem::measure::rate,                                  floresi_[waterCompIdx]},
+        DataEntry{"FLRWATJ+", UnitSystem::measure::rate,                                  floresj_[waterCompIdx]},
+        DataEntry{"FLRWATK+", UnitSystem::measure::rate,                                  floresk_[waterCompIdx]},
+        DataEntry{"FOAM",     UnitSystem::measure::identity,                              cFoam_},
+        DataEntry{"GASKR",    UnitSystem::measure::identity,                              relativePermeability_[gasPhaseIdx]},
+        DataEntry{"GAS_DEN",  UnitSystem::measure::density,                               density_[gasPhaseIdx]},
+        DataEntry{"GAS_VISC", UnitSystem::measure::viscosity,                             viscosity_[gasPhaseIdx]},
+        DataEntry{"OILKR",    UnitSystem::measure::identity,                              relativePermeability_[oilPhaseIdx]},
+        DataEntry{"OIL_DEN",  UnitSystem::measure::density,                               density_[oilPhaseIdx]},
+        DataEntry{"OIL_VISC", UnitSystem::measure::viscosity,                             viscosity_[oilPhaseIdx]},
+        DataEntry{"PBUB",     UnitSystem::measure::pressure,                              bubblePointPressure_},
+        DataEntry{"PCOG",     UnitSystem::measure::pressure,                              pcog_},
+        DataEntry{"PCOW",     UnitSystem::measure::pressure,                              pcow_},
+        DataEntry{"PDEW",     UnitSystem::measure::pressure,                              dewPointPressure_},
+        DataEntry{"POLYMER",  UnitSystem::measure::identity,                              cPolymer_},
+        DataEntry{"PPCW",     UnitSystem::measure::pressure,                              ppcw_},
+        DataEntry{"PRESROCC", UnitSystem::measure::pressure,                              minimumOilPressure_},
+        DataEntry{"PRESSURE", UnitSystem::measure::pressure,                              fluidPressure_},
+        DataEntry{"RS",       UnitSystem::measure::gas_oil_ratio,                         rs_},
+        DataEntry{"RSSAT",    UnitSystem::measure::gas_oil_ratio,                         gasDissolutionFactor_},
+        DataEntry{"RV",       UnitSystem::measure::oil_gas_ratio,                         rv_},
+        DataEntry{"RVSAT",    UnitSystem::measure::oil_gas_ratio,                         oilVaporizationFactor_},
+        DataEntry{"SALT",     UnitSystem::measure::salinity,                              cSalt_},
+        DataEntry{"SOMAX",    UnitSystem::measure::identity,                              soMax_},
+        DataEntry{"SSOLVENT", UnitSystem::measure::identity,                              sSol_},
+        DataEntry{"SWMAX",    UnitSystem::measure::identity,                              swMax_},
+        DataEntry{"WATKR",    UnitSystem::measure::identity,                              relativePermeability_[waterPhaseIdx]},
+        DataEntry{"WAT_DEN",  UnitSystem::measure::density,                               density_[waterPhaseIdx]},
+        DataEntry{"WAT_VISC", UnitSystem::measure::viscosity,                             viscosity_[waterPhaseIdx]},
     };
 
-    const auto extendedSolutionArrays = std::vector<DataEntry> {
-        {"BIOFILM",  UnitSystem::measure::identity,            cBiofilm_},
-        {"CALCITE",  UnitSystem::measure::identity,            cCalcite_},
-        {"DRSDTCON", UnitSystem::measure::gas_oil_ratio_rate,  drsdtcon_},
-        {"KRNSW_GO", UnitSystem::measure::identity,            krnSwMdcGo_},
-        {"KRNSW_OW", UnitSystem::measure::identity,            krnSwMdcOw_},
-        {"MICROBES", UnitSystem::measure::density,             cMicrobes_},
-        {"OXYGEN",   UnitSystem::measure::density,             cOxygen_},
-        {"PCSWM_GO", UnitSystem::measure::identity,            pcSwMdcGo_},
-        {"PCSWM_OW", UnitSystem::measure::identity,            pcSwMdcOw_},
-        {"PERMFACT", UnitSystem::measure::identity,            permFact_},
-        {"PORV_RC",  UnitSystem::measure::identity,            rockCompPorvMultiplier_},
-        {"PRES_OVB", UnitSystem::measure::pressure,            overburdenPressure_},
-        {"RSW",      UnitSystem::measure::gas_oil_ratio,       rsw_},
-        {"RVW",      UnitSystem::measure::oil_gas_ratio,       rvw_},
-        {"SALTP",    UnitSystem::measure::identity,            pSalt_},
-        {"SS_X",     UnitSystem::measure::identity,            extboX_},
-        {"SS_Y",     UnitSystem::measure::identity,            extboY_},
-        {"SS_Z",     UnitSystem::measure::identity,            extboZ_},
-        {"STD_CO2",  UnitSystem::measure::identity,            mFracCo2_},
-        {"STD_GAS",  UnitSystem::measure::identity,            mFracGas_},
-        {"STD_OIL",  UnitSystem::measure::identity,            mFracOil_},
-        {"TMULT_RC", UnitSystem::measure::identity,            rockCompTransMultiplier_},
-        {"UREA",     UnitSystem::measure::density,             cUrea_},
+    const auto extendedSolutionArrays = std::array {
+        DataEntry{"BIOFILM",  UnitSystem::measure::identity,           cBiofilm_},
+        DataEntry{"CALCITE",  UnitSystem::measure::identity,           cCalcite_},
+        DataEntry{"DRSDTCON", UnitSystem::measure::gas_oil_ratio_rate, drsdtcon_},
+        DataEntry{"KRNSW_GO", UnitSystem::measure::identity,           krnSwMdcGo_},
+        DataEntry{"KRNSW_OW", UnitSystem::measure::identity,           krnSwMdcOw_},
+        DataEntry{"MICROBES", UnitSystem::measure::density,            cMicrobes_},
+        DataEntry{"OXYGEN",   UnitSystem::measure::density,            cOxygen_},
+        DataEntry{"PCSWM_GO", UnitSystem::measure::identity,           pcSwMdcGo_},
+        DataEntry{"PCSWM_OW", UnitSystem::measure::identity,           pcSwMdcOw_},
+        DataEntry{"PERMFACT", UnitSystem::measure::identity,           permFact_},
+        DataEntry{"PORV_RC",  UnitSystem::measure::identity,           rockCompPorvMultiplier_},
+        DataEntry{"PRES_OVB", UnitSystem::measure::pressure,           overburdenPressure_},
+        DataEntry{"RSW",      UnitSystem::measure::gas_oil_ratio,      rsw_},
+        DataEntry{"RVW",      UnitSystem::measure::oil_gas_ratio,      rvw_},
+        DataEntry{"SALTP",    UnitSystem::measure::identity,           pSalt_},
+        DataEntry{"SS_X",     UnitSystem::measure::identity,           extboX_},
+        DataEntry{"SS_Y",     UnitSystem::measure::identity,           extboY_},
+        DataEntry{"SS_Z",     UnitSystem::measure::identity,           extboZ_},
+        DataEntry{"STD_CO2",  UnitSystem::measure::identity,           mFracCo2_},
+        DataEntry{"STD_GAS",  UnitSystem::measure::identity,           mFracGas_},
+        DataEntry{"STD_OIL",  UnitSystem::measure::identity,           mFracOil_},
+        DataEntry{"TMULT_RC", UnitSystem::measure::identity,           rockCompTransMultiplier_},
+        DataEntry{"UREA",     UnitSystem::measure::density,            cUrea_},
     };
 
     for (const auto& array : baseSolutionArrays) {
@@ -944,50 +944,43 @@ setRestart(const data::Solution& sol,
     assert(!saturation_[oilPhaseIdx].empty());
     saturation_[oilPhaseIdx][elemIdx] = so;
 
-    if (!fluidPressure_.empty() && sol.has("PRESSURE"))
-        fluidPressure_[elemIdx] = sol.data("PRESSURE")[globalDofIndex];
-    if (!temperature_.empty() && sol.has("TEMP"))
-        temperature_[elemIdx] = sol.data("TEMP")[globalDofIndex];
-    if (!rs_.empty() && sol.has("RS"))
-        rs_[elemIdx] = sol.data("RS")[globalDofIndex];
-    if (!rsw_.empty() && sol.has("RSW"))
-        rsw_[elemIdx] = sol.data("RSW")[globalDofIndex];
-    if (!rv_.empty() && sol.has("RV"))
-        rv_[elemIdx] = sol.data("RV")[globalDofIndex];
-    if (!rvw_.empty() && sol.has("RVW"))
-        rvw_[elemIdx] = sol.data("RVW")[globalDofIndex];
-    if (!cPolymer_.empty() && sol.has("POLYMER"))
-        cPolymer_[elemIdx] = sol.data("POLYMER")[globalDofIndex];
-    if (!cFoam_.empty() && sol.has("FOAM"))
-        cFoam_[elemIdx] = sol.data("FOAM")[globalDofIndex];
-    if (!cSalt_.empty() && sol.has("SALT"))
-        cSalt_[elemIdx] = sol.data("SALT")[globalDofIndex];
-    if (!pSalt_.empty() && sol.has("SALTP"))
-        pSalt_[elemIdx] = sol.data("SALTP")[globalDofIndex];
-    if (!permFact_.empty() && sol.has("PERMFACT"))
-        permFact_[elemIdx] = sol.data("PERMFACT")[globalDofIndex];
-    if (!soMax_.empty() && sol.has("SOMAX"))
-        soMax_[elemIdx] = sol.data("SOMAX")[globalDofIndex];
-    if (!pcSwMdcOw_.empty() && sol.has("PCSWM_OW"))
-        pcSwMdcOw_[elemIdx] = sol.data("PCSWM_OW")[globalDofIndex];
-    if (!krnSwMdcOw_.empty() && sol.has("KRNSW_OW"))
-        krnSwMdcOw_[elemIdx] = sol.data("KRNSW_OW")[globalDofIndex];
-    if (!pcSwMdcGo_.empty() && sol.has("PCSWM_GO"))
-        pcSwMdcGo_[elemIdx] = sol.data("PCSWM_GO")[globalDofIndex];
-    if (!krnSwMdcGo_.empty() && sol.has("KRNSW_GO"))
-        krnSwMdcGo_[elemIdx] = sol.data("KRNSW_GO")[globalDofIndex];
-    if (!ppcw_.empty() && sol.has("PPCW"))
-        ppcw_[elemIdx] = sol.data("PPCW")[globalDofIndex];
-    if (!cMicrobes_.empty() && sol.has("MICROBES"))
-        cMicrobes_[elemIdx] = sol.data("MICROBES")[globalDofIndex];
-    if (!cOxygen_.empty() && sol.has("OXYGEN"))
-        cOxygen_[elemIdx] = sol.data("OXYGEN")[globalDofIndex];
-    if (!cUrea_.empty() && sol.has("UREA"))
-        cUrea_[elemIdx] = sol.data("UREA")[globalDofIndex];
-    if (!cBiofilm_.empty() && sol.has("BIOFILM"))
-        cBiofilm_[elemIdx] = sol.data("BIOFILM")[globalDofIndex];
-    if (!cCalcite_.empty() && sol.has("CALCITE"))
-        cCalcite_[elemIdx] = sol.data("CALCITE")[globalDofIndex];
+    auto assign = [elemIdx, globalDofIndex, &sol](const std::string& name,
+                                                  ScalarBuffer& data)
+
+    {
+        if (!data.empty() && sol.has(name)) {
+            data[elemIdx] = sol.data(name)[globalDofIndex];
+        }
+    };
+
+    const auto fields = std::array{
+        std::pair{"BIOFILM", &cBiofilm_},
+        std::pair{"CALCITE",&cCalcite_},
+        std::pair{"FOAM", &cFoam_},
+        std::pair{"KRNSW_GO", &krnSwMdcGo_},
+        std::pair{"KRNSW_OW", &krnSwMdcOw_},
+        std::pair{"MICROBES", &cMicrobes_},
+        std::pair{"OXYGEN", &cOxygen_},
+        std::pair{"PCSWM_GO", &pcSwMdcGo_},
+        std::pair{"PCSWM_OW", &pcSwMdcOw_},
+        std::pair{"PERMFACT", &permFact_},
+        std::pair{"POLYMER", &cPolymer_},
+        std::pair{"PPCW", &ppcw_},
+        std::pair{"PRESSURE", &fluidPressure_},
+        std::pair{"RS", &rs_},
+        std::pair{"RSW", &rsw_},
+        std::pair{"RV", &rv_},
+        std::pair{"RVW", &rvw_},
+        std::pair{"SALT", &cSalt_},
+        std::pair{"SALTP", &pSalt_},
+        std::pair{"SOMAX", &soMax_},
+        std::pair{"TEMP", &temperature_},
+        std::pair{"UREA", &cUrea_},
+    };
+
+    std::for_each(fields.begin(), fields.end(),
+                  [&assign](const auto& p)
+                  { assign(p.first, *p.second); });
 }
 
 template<class FluidSystem,class Scalar>
@@ -1593,14 +1586,14 @@ outputProductionReport_(const ScalarBuffer& wellProd,
                             ss << ":        :           :    :  SCC/HR   :  SCC/HR   :  SCC/HR   :    RCC    :  SCC/SCC  :  SCC/SCC :  SCC/SCC   :  ATMA  :  ATMA  :\n";//                    :\n";
                     }
             ss << "=================================================================================================================================\n";//=================== \n";
-    } 
+    }
     else {
         if (wellProd[WellProdDataType::WellLocationi] < 1) {
             ss << std::right << std::fixed << ":" << std::setw (8) << wellProdNames[WellProdDataType::WellName] << ":" << std::setprecision(0) << std::setw(11) << "" << ":" << std::setw(4) << wellProdNames[WellProdDataType::CTRLMode] << ":" << std::setprecision(1) << std::setw(11) << wellProd[WellProdDataType::OilRate] << ":" << std::setw(11) << wellProd[WellProdDataType::WaterRate] << ":" <<  std::setw(11)<< wellProd[WellProdDataType::GasRate] << ":" <<  std::setw(11) << wellProd[WellProdDataType::FluidResVol] << std::setprecision(3) << ":" <<  std::setw(11) << wellProd[WellProdDataType::WaterCut] << std::setprecision(2) << ":" <<  std::setw(10) << wellProd[WellProdDataType::GasOilRatio] << std::setprecision(4) << ":" <<  std::setw(12) << wellProd[WellProdDataType::WatGasRatio] << std::setprecision(1) << ":" <<  std::setw(8) << "" << ":" <<  std::setw(8) << "" << ": \n";
         }
         else {
             ss << std::right << std::fixed << ":" << std::setw (8) << wellProdNames[WellProdDataType::WellName] << ":" << std::setprecision(0) << std::setw(5) << wellProd[WellProdDataType::WellLocationi] << "," << std::setw(5) << wellProd[WellProdDataType::WellLocationj] << ":" << std::setw(4) << wellProdNames[WellProdDataType::CTRLMode] << ":" << std::setprecision(1) << std::setw(11) << wellProd[WellProdDataType::OilRate] << ":" << std::setw(11) << wellProd[WellProdDataType::WaterRate] << ":" <<  std::setw(11)<< wellProd[WellProdDataType::GasRate] << ":" <<  std::setw(11) << wellProd[WellProdDataType::FluidResVol] << std::setprecision(3) << ":" <<  std::setw(11) << wellProd[WellProdDataType::WaterCut] << std::setprecision(2) << ":" <<  std::setw(10) << wellProd[WellProdDataType::GasOilRatio] << std::setprecision(4) << ":" <<  std::setw(12) << wellProd[WellProdDataType::WatGasRatio] << std::setprecision(1) << ":" <<  std::setw(8) << wellProd[WellProdDataType::BHP] << ":" <<  std::setw(8) << wellProd[WellProdDataType::THP] << ": \n";
-        }        
+        }
         ss << ":"<< std::setfill ('-') << std::setw (9) << ":" << std::setfill ('-') << std::setw (12) << ":" << std::setfill ('-') << std::setw (5) << ":" << std::setfill ('-') << std::setw (12) << ":" << std::setfill ('-') << std::setw (12) << ":" << std::setfill ('-') << std::setw (12) << ":" << std::setfill ('-') << std::setw (12) << ":" << std::setfill ('-') << std::setw (12) << ":" << std::setfill ('-') << std::setw (11) << ":" << std::setfill ('-') << std::setw (13) << ":" << std::setfill ('-') << std::setw (9) << ":" << std::setfill ('-') << std::setw (9) << ":" << "\n";
     }
     OpmLog::note(ss.str());

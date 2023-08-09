@@ -28,18 +28,19 @@
 #ifndef EWOMS_ECL_WRITER_HH
 #define EWOMS_ECL_WRITER_HH
 
+#include <dune/grid/common/partitionset.hh>
+
 #include <ebos/collecttoiorank.hh>
+#include <ebos/eclbasevanguard.hh>
 #include <ebos/eclgenericwriter.hh>
 #include <ebos/ecloutputblackoilmodule.hh>
-
-#include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
-#include <opm/simulators/utils/ParallelRestart.hpp>
 
 #include <opm/input/eclipse/Units/UnitSystem.hpp>
 
 #include <opm/output/eclipse/RestartValue.hpp>
 
-#include <dune/grid/common/partitionset.hh>
+#include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
+#include <opm/simulators/utils/ParallelRestart.hpp>
 
 #include <limits>
 #include <stdexcept>
@@ -210,7 +211,7 @@ public:
             simulator_.vanguard().setupTime();
 
         const auto localWellData            = simulator_.problem().wellModel().wellData();
-        const auto localWBP                 = data::WellBlockAveragePressures{};
+        const auto localWBP                 = simulator_.problem().wellModel().wellBlockAveragePressures();
         const auto localGroupAndNetworkData = simulator_.problem().wellModel()
             .groupAndNetworkData(reportStepNum);
 

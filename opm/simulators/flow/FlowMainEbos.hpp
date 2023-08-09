@@ -75,6 +75,8 @@ struct OutputInterval<TypeTag, TTag::EclFlowProblem> {
 namespace Opm {
 namespace detail {
 
+void checkAllMPIProcesses();
+
 void mergeParallelLogFiles(std::string_view output_dir,
                            std::string_view deck_filename,
                            bool enableLoggingFalloutWarning);
@@ -324,6 +326,24 @@ void handleExtraConvergenceOutput(SimulatorReport& report,
         // called by execute() or executeInitStep()
         int execute_(int (FlowMainEbos::* runOrInitFunc)(), bool cleanup)
         {
+            auto logger = [this](const std::exception& e, const std::string& message_start) {
+                std::ostringstream message;
+                message  << message_start << e.what();
+
+                if (this->output_cout_) {
+                    // in some cases exceptions are thrown before the logging system is set
+                    // up.
+                    if (OpmLog::hasBackend("STREAMLOG")) {
+                        OpmLog::error(message.str());
+                    }
+                    else {
+                        std::cout << message.str() << "\n";
+                    }
+                }
+                detail::checkAllMPIProcesses();
+                return EXIT_FAILURE;
+            };
+
             try {
                 // deal with some administrative boilerplate
 
@@ -342,25 +362,15 @@ void handleExtraConvergenceOutput(SimulatorReport& report,
                 }
                 return exitCode;
             }
+            catch (const TimeSteppingBreakdown& e) {
+                auto exitCode = logger(e, "Simulation aborted: ");
+                executeCleanup_();
+                return exitCode;
+            }
             catch (const std::exception& e) {
-                std::ostringstream message;
-                message  << "Program threw an exception: " << e.what();
-
-                if (this->output_cout_) {
-                    // in some cases exceptions are thrown before the logging system is set
-                    // up.
-                    if (OpmLog::hasBackend("STREAMLOG")) {
-                        OpmLog::error(message.str());
-                    }
-                    else {
-                        std::cout << message.str() << "\n";
-                    }
-                }
-#if HAVE_MPI
-                if (this->mpi_size_ > 1)
-                    MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
-#endif
-                return EXIT_FAILURE;
+                auto exitCode =  logger(e, "Simulation aborted as program threw an unexpected exception: ");
+                executeCleanup_();
+                return exitCode;
             }
         }
 

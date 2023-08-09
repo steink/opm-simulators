@@ -28,45 +28,37 @@
 #ifndef EWOMS_ECL_PROBLEM_HH
 #define EWOMS_ECL_PROBLEM_HH
 
-#if USE_ALUGRID
-#define DISABLE_ALUGRID_SFC_ORDERING 1
-#include "eclalugridvanguard.hh"
-#elif USE_POLYHEDRALGRID
-#include "eclpolyhedralgridvanguard.hh"
-#else
-#include "eclcpgridvanguard.hh"
-#endif
+#include <dune/common/version.hh>
+#include <dune/common/fvector.hh>
+#include <dune/common/fmatrix.hh>
 
-#include "eclactionhandler.hh"
-#include "eclequilinitializer.hh"
-#include "eclwriter.hh"
-#include "ecloutputblackoilmodule.hh"
-#include "ecltransmissibility.hh"
-#include "eclthresholdpressure.hh"
-#include "ecldummygradientcalculator.hh"
-#include "eclfluxmodule.hh"
-#include "eclbaseaquifermodel.hh"
-#include "eclnewtonmethod.hh"
-#include "ecltracermodel.hh"
-#include "vtkecltracermodule.hh"
-#include "eclgenericproblem.hh"
-#include "FIBlackOilModel.hpp"
+#include <ebos/eclactionhandler.hh>
+#include <ebos/eclbaseaquifermodel.hh>
+#include <ebos/ecldummygradientcalculator.hh>
+#include <ebos/eclequilinitializer.hh>
+#include <ebos/eclfluxmodule.hh>
+#include <ebos/eclgenericproblem.hh>
+#include <ebos/eclnewtonmethod.hh>
+#include <ebos/ecloutputblackoilmodule.hh>
+#include <ebos/eclthresholdpressure.hh>
+#include <ebos/ecltransmissibility.hh>
+#include <ebos/eclwriter.hh>
+#include <ebos/ecltracermodel.hh>
+#include <ebos/FIBlackOilModel.hpp>
+#include <ebos/vtkecltracermodule.hh>
+
+#include <opm/common/utility/TimeService.hpp>
 
 #include <opm/core/props/satfunc/RelpermDiagnostics.hpp>
 
-#include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
-#include <opm/simulators/utils/ParallelSerialization.hpp>
-#include <opm/simulators/timestepping/SimulatorReport.hpp>
+#include <opm/input/eclipse/EclipseState/EclipseState.hpp>
+#include <opm/input/eclipse/Parser/ParserKeywords/E.hpp>
+#include <opm/input/eclipse/Schedule/Schedule.hpp>
 
-#include <opm/models/common/directionalmobility.hh>
-#include <opm/models/utils/pffgridvector.hh>
-#include <opm/models/blackoil/blackoilmodel.hh>
-#include <opm/models/discretization/ecfv/ecfvdiscretization.hh>
-
-#include <opm/material/fluidmatrixinteractions/EclMaterialLawManager.hpp>
-#include <opm/material/thermal/EclThermalLawManager.hpp>
+#include <opm/material/common/ConditionalStorage.hpp>
+#include <opm/material/common/Valgrind.hpp>
 #include <opm/material/densead/Evaluation.hpp>
-
+#include <opm/material/fluidmatrixinteractions/EclMaterialLawManager.hpp>
 #include <opm/material/fluidstates/CompositionalFluidState.hpp>
 #include <opm/material/fluidsystems/BlackOilFluidSystem.hpp>
 #include <opm/material/fluidsystems/blackoilpvt/DryGasPvt.hpp>
@@ -75,29 +67,37 @@
 #include <opm/material/fluidsystems/blackoilpvt/DeadOilPvt.hpp>
 #include <opm/material/fluidsystems/blackoilpvt/ConstantCompressibilityOilPvt.hpp>
 #include <opm/material/fluidsystems/blackoilpvt/ConstantCompressibilityWaterPvt.hpp>
+#include <opm/material/thermal/EclThermalLawManager.hpp>
 
-#include <opm/material/common/Valgrind.hpp>
-#include <opm/input/eclipse/EclipseState/EclipseState.hpp>
-#include <opm/input/eclipse/Schedule/Schedule.hpp>
-#include <opm/common/utility/TimeService.hpp>
-#include <opm/utility/CopyablePtr.hpp>
-#include <opm/material/common/ConditionalStorage.hpp>
-
-#include <dune/common/version.hh>
-#include <dune/common/fvector.hh>
-#include <dune/common/fmatrix.hh>
+#include <opm/models/common/directionalmobility.hh>
+#include <opm/models/utils/pffgridvector.hh>
+#include <opm/models/blackoil/blackoilmodel.hh>
+#include <opm/models/discretization/ecfv/ecfvdiscretization.hh>
 
 #include <opm/output/eclipse/EclipseIO.hpp>
 
+#include <opm/simulators/timestepping/SimulatorReport.hpp>
+#include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
+#include <opm/simulators/utils/ParallelSerialization.hpp>
+
+#include <opm/utility/CopyablePtr.hpp>
+
 #include <opm/common/OpmLog/OpmLog.hpp>
 
-#include <opm/input/eclipse/Parser/ParserKeywords/E.hpp>
+#if USE_ALUGRID
+#define DISABLE_ALUGRID_SFC_ORDERING 1
+#include <ebos/eclalugridvanguard.hh>
+#elif USE_POLYHEDRALGRID
+#include <ebos/eclpolyhedralgridvanguard.hh>
+#else
+#include <ebos/eclcpgridvanguard.hh>
+#endif
 
-#include <set>
-#include <vector>
-#include <string>
 #include <algorithm>
 #include <functional>
+#include <set>
+#include <string>
+#include <vector>
 
 namespace Opm {
 template <class TypeTag>
@@ -217,7 +217,7 @@ template<class TypeTag>
 struct Model<TypeTag, TTag::EclBaseProblem> {
     using type = FIBlackOilModel<TypeTag>;
 };
-    
+
 // Select the element centered finite volume method as spatial discretization
 template<class TypeTag>
 struct SpatialDiscretizationSplice<TypeTag, TTag::EclBaseProblem> {
@@ -823,10 +823,10 @@ public:
         this->maxTimeStepAfterWellEvent_ = EWOMS_GET_PARAM(TypeTag, Scalar, EclMaxTimeStepSizeAfterWellEvent);
         this->restartShrinkFactor_ = EWOMS_GET_PARAM(TypeTag, Scalar, EclRestartShrinkFactor);
         this->maxFails_ = EWOMS_GET_PARAM(TypeTag, unsigned, MaxTimeStepDivisions);
-        
+
         // The value N for this parameter is defined in the following order of presedence:
         // 1. Command line value (--num-pressure-points-equil=N)
-        // 2. EQLDIMS item 2 
+        // 2. EQLDIMS item 2
         // Default value is defined in opm-common/src/opm/input/eclipse/share/keywords/000_Eclipse100/E/EQLDIMS
         if (EWOMS_PARAM_IS_SET(TypeTag, int, NumPressurePointsEquil))
         {
@@ -914,7 +914,7 @@ public:
             const auto& vanguard = this->simulator().vanguard();
             const auto& gridView = vanguard.gridView();
             int numElements = gridView.size(/*codim=*/0);
-            this->maxPolymerAdsorption_.resize(numElements, 0.0);
+            this->polymer_.maxAdsorption.resize(numElements, 0.0);
         }
 
         readBoundaryConditions_();
@@ -1598,7 +1598,7 @@ public:
     /*!
      * \copydoc FvBaseProblem::boundary
      *
-     * ECLiPSE uses no-flow conditions for all boundaries. \todo really?
+     * Reservoir simulation uses no-flow conditions as default for all boundaries.
      */
     template <class Context>
     void boundary(BoundaryRateVector& values,
@@ -1628,8 +1628,7 @@ public:
             unsigned interiorDofIdx = context.interiorScvIndex(spaceIdx, timeIdx);
             unsigned globalDofIdx = context.globalSpaceIndex(interiorDofIdx, timeIdx);
             unsigned pvtRegionIdx = pvtRegionIndex(context, spaceIdx, timeIdx);
-            FaceDir::DirEnum dir = FaceDir::FromIntersectionIndex(indexInInside);
-            const auto [type, massrate] = boundaryCondition(globalDofIdx, dir);
+            const auto [type, massrate] = boundaryCondition(globalDofIdx, indexInInside);
             if (type == BCType::THERMAL)
                 values.setThermalFlow(context, spaceIdx, timeIdx, boundaryFluidState(globalDofIdx, indexInInside));
             else if (type == BCType::FREE || type == BCType::DIRICHLET)
@@ -1751,10 +1750,10 @@ public:
             values[Indices::solventSaturationIdx] = this->solventSaturation_[globalDofIdx];
 
         if constexpr (enablePolymer)
-            values[Indices::polymerConcentrationIdx] = this->polymerConcentration_[globalDofIdx];
+            values[Indices::polymerConcentrationIdx] = this->polymer_.concentration[globalDofIdx];
 
         if constexpr (enablePolymerMolarWeight)
-            values[Indices::polymerMoleWeightIdx]= this->polymerMoleWeight_[globalDofIdx];
+            values[Indices::polymerMoleWeightIdx]= this->polymer_.moleWeight[globalDofIdx];
 
         if constexpr (enableBrine) {
             if (enableSaltPrecipitation && values.primaryVarsMeaningBrine() == PrimaryVariables::BrineMeaning::Sp) {
@@ -1766,11 +1765,11 @@ public:
         }
 
         if constexpr (enableMICP){
-            values[Indices::microbialConcentrationIdx]= this->microbialConcentration_[globalDofIdx];
-            values[Indices::oxygenConcentrationIdx]= this->oxygenConcentration_[globalDofIdx];
-            values[Indices::ureaConcentrationIdx]= this->ureaConcentration_[globalDofIdx];
-            values[Indices::calciteConcentrationIdx]= this->calciteConcentration_[globalDofIdx];
-            values[Indices::biofilmConcentrationIdx]= this->biofilmConcentration_[globalDofIdx];
+            values[Indices::microbialConcentrationIdx] = this->micp_.microbialConcentration[globalDofIdx];
+            values[Indices::oxygenConcentrationIdx]= this->micp_.oxygenConcentration[globalDofIdx];
+            values[Indices::ureaConcentrationIdx]= this->micp_.ureaConcentration[globalDofIdx];
+            values[Indices::calciteConcentrationIdx]= this->micp_.calciteConcentration[globalDofIdx];
+            values[Indices::biofilmConcentrationIdx]= this->micp_.biofilmConcentration[globalDofIdx];
         }
 
         values.checkDefined();
@@ -2541,23 +2540,19 @@ protected:
             this->solventSaturation_.resize(numElems, 0.0);
 
         if constexpr (enablePolymer)
-            this->polymerConcentration_.resize(numElems, 0.0);
+            this->polymer_.concentration.resize(numElems, 0.0);
 
         if constexpr (enablePolymerMolarWeight) {
             const std::string msg {"Support of the RESTART for polymer molecular weight "
                                    "is not implemented yet. The polymer weight value will be "
                                    "zero when RESTART begins"};
             OpmLog::warning("NO_POLYMW_RESTART", msg);
-            this->polymerMoleWeight_.resize(numElems, 0.0);
+            this->polymer_.moleWeight.resize(numElems, 0.0);
         }
 
-        if constexpr (enableMICP){
-            this->microbialConcentration_.resize(numElems, 0.0);
-            this->oxygenConcentration_.resize(numElems, 0.0);
-            this->ureaConcentration_.resize(numElems, 0.0);
-            this->biofilmConcentration_.resize(numElems, 0.0);
-            this->calciteConcentration_.resize(numElems, 0.0);
-          }
+        if constexpr (enableMICP) {
+            this->micp_.resize(numElems);
+        }
 
         for (size_t elemIdx = 0; elemIdx < numElems; ++elemIdx) {
             auto& elemFluidState = initialFluidStates_[elemIdx];
@@ -2591,13 +2586,13 @@ protected:
             }
 
             if constexpr (enablePolymer)
-                 this->polymerConcentration_[elemIdx] = eclWriter_->eclOutputModule().getPolymerConcentration(elemIdx);
+                 this->polymer_.concentration[elemIdx] = eclWriter_->eclOutputModule().getPolymerConcentration(elemIdx);
             if constexpr (enableMICP){
-                 this->microbialConcentration_[elemIdx] = eclWriter_->eclOutputModule().getMicrobialConcentration(elemIdx);
-                 this->oxygenConcentration_[elemIdx] = eclWriter_->eclOutputModule().getOxygenConcentration(elemIdx);
-                 this->ureaConcentration_[elemIdx] = eclWriter_->eclOutputModule().getUreaConcentration(elemIdx);
-                 this->biofilmConcentration_[elemIdx] = eclWriter_->eclOutputModule().getBiofilmConcentration(elemIdx);
-                 this->calciteConcentration_[elemIdx] = eclWriter_->eclOutputModule().getCalciteConcentration(elemIdx);
+                 this->micp_.microbialConcentration[elemIdx] = eclWriter_->eclOutputModule().getMicrobialConcentration(elemIdx);
+                 this->micp_.oxygenConcentration[elemIdx] = eclWriter_->eclOutputModule().getOxygenConcentration(elemIdx);
+                 this->micp_.ureaConcentration[elemIdx] = eclWriter_->eclOutputModule().getUreaConcentration(elemIdx);
+                 this->micp_.biofilmConcentration[elemIdx] = eclWriter_->eclOutputModule().getBiofilmConcentration(elemIdx);
+                 this->micp_.calciteConcentration[elemIdx] = eclWriter_->eclOutputModule().getCalciteConcentration(elemIdx);
             }
             // if we need to restart for polymer molecular weight simulation, we need to add related here
         }
@@ -2901,14 +2896,15 @@ protected:
     bool updateMaxPolymerAdsorption_(unsigned compressedDofIdx, const IntensiveQuantities& iq)
     {
         const Scalar pa = scalarValue(iq.polymerAdsorption());
-        auto& mpa = this->maxPolymerAdsorption_;
-        if(mpa[compressedDofIdx]<pa){
+        auto& mpa = this->polymer_.maxAdsorption;
+        if (mpa[compressedDofIdx] < pa) {
             mpa[compressedDofIdx] = pa;
             return true;
-        }else{
+        } else {
             return false;
         }
     }
+
 private:
     struct PffDofData_
     {

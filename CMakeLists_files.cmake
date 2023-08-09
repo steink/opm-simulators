@@ -33,6 +33,7 @@ list (APPEND MAIN_SOURCE_FILES
   ebos/eclgenericvanguard.cc
   ebos/eclgenericwriter.cc
   ebos/eclinterregflows.cc
+  ebos/eclsolutioncontainers.cc
   ebos/ecltransmissibility.cc
   ebos/equil/equilibrationhelpers.cc
   ebos/equil/initstateequil.cc
@@ -105,7 +106,9 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/wells/MultisegmentWellGeneric.cpp
   opm/simulators/wells/MultisegmentWellPrimaryVariables.cpp
   opm/simulators/wells/MultisegmentWellSegments.cpp
+  opm/simulators/wells/ParallelPAvgCalculator.cpp
   opm/simulators/wells/ParallelPAvgDynamicSourceData.cpp
+  opm/simulators/wells/ParallelWBPCalculation.cpp
   opm/simulators/wells/ParallelWellInfo.cpp
   opm/simulators/wells/PerfData.cpp
   opm/simulators/wells/RateConverter.cpp
@@ -125,6 +128,7 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/wells/WellConnectionAuxiliaryModule.cpp
   opm/simulators/wells/WellConstraints.cpp
   opm/simulators/wells/WellConvergence.cpp
+  opm/simulators/wells/WellFilterCake.cpp
   opm/simulators/wells/WellGroupConstraints.cpp
   opm/simulators/wells/WellGroupControls.cpp
   opm/simulators/wells/WellGroupHelpers.cpp
@@ -264,6 +268,7 @@ if(MPI_FOUND)
   list(APPEND TEST_SOURCE_FILES tests/test_parallelistlinformation.cpp
                                 tests/test_ParallelSerialization.cpp)
 endif()
+
 if(CUDA_FOUND)
   list(APPEND TEST_SOURCE_FILES tests/test_cusparseSolver.cpp)
   list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cusparse_safe_call.cpp)
@@ -357,7 +362,39 @@ list (APPEND TEST_DATA_FILES
 # originally generated with the command:
 # find opm -name '*.h*' -a ! -name '*-pch.hpp' -printf '\t%p\n' | sort
 list (APPEND PUBLIC_HEADER_FILES
+  ebos/alucartesianindexmapper.hh
+  ebos/collecttoiorank.hh
+  ebos/ebos.hh
+  ebos/eclactionhandler.hh
+  ebos/eclalugridvanguard.hh
+  ebos/eclbaseaquifermodel.hh
+  ebos/eclbasevanguard.hh
+  ebos/eclcpgridvanguard.hh
+  ebos/ecldummygradientcalculator.hh
+  ebos/eclequilinitializer.hh
+  ebos/eclfluxmodule.hh
+  ebos/eclgenericcpgridvanguard.hh
+  ebos/eclgenericoutputblackoilmodule.hh
+  ebos/eclgenericproblem.hh
+  ebos/eclgenericthresholdpressure.hh
+  ebos/eclgenerictracermodel.hh
+  ebos/eclgenerictracermodel_impl.hh
+  ebos/eclgenericvanguard.hh
+  ebos/eclgenericwriter.hh
   ebos/eclinterregflows.hh
+  ebos/eclmpiserializer.hh
+  ebos/eclnewtonmethod.hh
+  ebos/ecloutputblackoilmodule.hh
+  ebos/eclpolyhedralgridvanguard.hh
+  ebos/eclproblem.hh
+  ebos/eclsolutioncontainers.hh
+  ebos/eclthresholdpressure.hh
+  ebos/ecltracermodel.hh
+  ebos/ecltransmissibility.hh
+  ebos/eclwriter.hh
+  ebos/femcpgridcompat.hh
+  ebos/hdf5serializer.hh
+  ebos/vtkecltracermodule.hh
   opm/simulators/flow/countGlobalCells.hpp
   opm/simulators/flow/BlackoilModelEbos.hpp
   opm/simulators/flow/BlackoilModelEbosNldd.hpp
@@ -482,7 +519,9 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/MultisegmentWellGeneric.hpp
   opm/simulators/wells/MultisegmentWellPrimaryVariables.hpp
   opm/simulators/wells/MultisegmentWellSegments.hpp
+  opm/simulators/wells/ParallelPAvgCalculator.hpp
   opm/simulators/wells/ParallelPAvgDynamicSourceData.hpp
+  opm/simulators/wells/ParallelWBPCalculation.hpp
   opm/simulators/wells/ParallelWellInfo.hpp
   opm/simulators/wells/PerfData.hpp
   opm/simulators/wells/PerforationData.hpp
@@ -507,6 +546,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/WellConnectionAuxiliaryModule.hpp
   opm/simulators/wells/WellConstraints.hpp
   opm/simulators/wells/WellConvergence.hpp
+  opm/simulators/wells/WellFilterCake.hpp
   opm/simulators/wells/WellGroupConstraints.hpp
   opm/simulators/wells/WellGroupControls.hpp
   opm/simulators/wells/WellGroupHelpers.hpp

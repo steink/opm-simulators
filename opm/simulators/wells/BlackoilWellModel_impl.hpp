@@ -27,8 +27,11 @@
 #include <opm/input/eclipse/Units/UnitSystem.hpp>
 #include <opm/input/eclipse/Schedule/Network/Balance.hpp>
 #include <opm/input/eclipse/Schedule/Network/ExtNetwork.hpp>
+#include <opm/input/eclipse/Schedule/Well/PAvgDynamicSourceData.hpp>
 
 #include <opm/simulators/wells/BlackoilWellModelConstraints.hpp>
+#include <opm/simulators/wells/ParallelPAvgDynamicSourceData.hpp>
+#include <opm/simulators/wells/ParallelWBPCalculation.hpp>
 #include <opm/simulators/wells/VFPProperties.hpp>
 #include <opm/simulators/utils/MPIPacker.hpp>
 #include <opm/simulators/linalg/bda/WellContributions.hpp>
@@ -73,6 +76,48 @@ namespace Opm {
 
         this->alternative_well_rate_init_ =
             EWOMS_GET_PARAM(TypeTag, bool, AlternativeWellRateInit);
+
+        this->wbpCalculationService_
+            .localCellIndex([this](const std::size_t globalIndex)
+            { return this->compressedIndexForInterior(globalIndex); })
+            .evalCellSource([this](const int                                     localCell,
+                                   PAvgDynamicSourceData::SourceDataSpan<double> sourceTerms)
+            {
+                using Item = PAvgDynamicSourceData::SourceDataSpan<double>::Item;
+
+                const auto* intQuants = this->ebosSimulator_.model()
+                    .cachedIntensiveQuantities(localCell, /*timeIndex = */0);
+                const auto& fs = intQuants->fluidState();
+
+                sourceTerms.set(Item::PoreVol, intQuants->porosity().value() *
+                                this->ebosSimulator_.model().dofTotalVolume(localCell));
+
+                constexpr auto io = FluidSystem::oilPhaseIdx;
+                constexpr auto ig = FluidSystem::gasPhaseIdx;
+                constexpr auto iw = FluidSystem::waterPhaseIdx;
+
+                // Ideally, these would be 'constexpr'.
+                const auto haveOil = FluidSystem::phaseIsActive(io);
+                const auto haveGas = FluidSystem::phaseIsActive(ig);
+                const auto haveWat = FluidSystem::phaseIsActive(iw);
+
+                auto weightedPhaseDensity = [&fs](const auto ip)
+                {
+                    return fs.saturation(ip).value() * fs.density(ip).value();
+                };
+
+                if (haveOil)      { sourceTerms.set(Item::Pressure, fs.pressure(io).value()); }
+                else if (haveGas) { sourceTerms.set(Item::Pressure, fs.pressure(ig).value()); }
+                else              { sourceTerms.set(Item::Pressure, fs.pressure(iw).value()); }
+
+                // Strictly speaking, assumes SUM(s[p]) == 1.
+                auto rho = 0.0;
+                if (haveOil) { rho += weightedPhaseDensity(io); }
+                if (haveGas) { rho += weightedPhaseDensity(ig); }
+                if (haveWat) { rho += weightedPhaseDensity(iw); }
+
+                sourceTerms.set(Item::MixtureDensity, rho);
+            });
     }
 
     template<typename TypeTag>
@@ -190,63 +235,133 @@ namespace Opm {
     BlackoilWellModel<TypeTag>::
     beginReportStep(const int timeStepIdx)
     {
-        DeferredLogger local_deferredLogger;
+        DeferredLogger local_deferredLogger{};
 
-        report_step_starts_ = true;
+        this->report_step_starts_ = true;
 
-        const Grid& grid = ebosSimulator_.vanguard().grid();
-        const auto& summaryState = ebosSimulator_.vanguard().summaryState();
-        // Make wells_ecl_ contain only this partition's wells.
-        wells_ecl_ = getLocalWells(timeStepIdx);
-        this->local_parallel_well_info_ = createLocalParallelWellInfo(wells_ecl_);
-
-        // at least initializeWellState might be throw
-        // exception in opm-material (UniformTabulated2DFunction.hpp)
-        // playing it safe by extending the scope a bit.
-        OPM_BEGIN_PARALLEL_TRY_CATCH();
         {
+            // WELPI scaling runs at start of report step.
+            const auto enableWellPIScaling = true;
+            this->initializeLocalWellStructure(timeStepIdx, enableWellPIScaling);
+        }
 
-            // The well state initialize bhp with the cell pressure in the top cell.
-            // We must therefore provide it with updated cell pressures
-            this->initializeWellPerfData();
-            this->initializeWellState(timeStepIdx, summaryState);
+        this->initializeGroupStructure(timeStepIdx);
 
-            // handling MS well related
-            if (param_.use_multisegment_well_&& anyMSWellOpenLocal()) { // if we use MultisegmentWell model
-                this->wellState().initWellStateMSWell(wells_ecl_, &this->prevWellState());
-            }
+        const auto& comm = this->ebosSimulator_.vanguard().grid().comm();
 
-            const Group& fieldGroup = schedule().getGroup("FIELD", timeStepIdx);
-            WellGroupHelpers::setCmodeGroup(fieldGroup, schedule(), summaryState, timeStepIdx, this->wellState(), this->groupState());
+        OPM_BEGIN_PARALLEL_TRY_CATCH()
+        {
+            // Create facility for calculating reservoir voidage volumes for
+            // purpose of RESV controls.
+            this->rateConverter_ = std::make_unique<RateConverterType>
+                (this->phase_usage_, std::vector<int>(this->local_num_cells_, 0));
+            this->rateConverter_->template defineState<ElementContext>(this->ebosSimulator_);
 
-            // Compute reservoir volumes for RESV controls.
-            rateConverter_ = std::make_unique<RateConverterType>(phase_usage_,
-                                                                 std::vector<int>(local_num_cells_, 0));
-            rateConverter_->template defineState<ElementContext>(ebosSimulator_);
-
-            // Compute regional average pressures used by gpmaint
-            if (schedule_[timeStepIdx].has_gpmaint()) {
-                WellGroupHelpers::setRegionAveragePressureCalculator(fieldGroup, schedule(),
-                        timeStepIdx, this->eclState_.fieldProps(), phase_usage_, regionalAveragePressureCalculator_);
-            }
-
+            // Update VFP properties.
             {
                 const auto& sched_state = this->schedule()[timeStepIdx];
-                // update VFP properties
-                vfp_properties_ = std::make_unique<VFPProperties>(sched_state.vfpinj(),
-                                                                  sched_state.vfpprod(),
-                                                                  this->wellState());
-                this->initializeWellProdIndCalculators();
-                if (sched_state.events().hasEvent(ScheduleEvents::Events::WELL_PRODUCTIVITY_INDEX)) {
-                    this->runWellPIScaling(timeStepIdx, local_deferredLogger);
-                }
+
+                this->vfp_properties_ = std::make_unique<VFPProperties>
+                    (sched_state.vfpinj(), sched_state.vfpprod(), this->wellState());
             }
         }
-        OPM_END_PARALLEL_TRY_CATCH_LOG(local_deferredLogger, "beginReportStep() failed: ",
-                                       terminal_output_, grid.comm());
-        // Store the current well state, to be able to recover in the case of failed iterations
+        OPM_END_PARALLEL_TRY_CATCH_LOG(local_deferredLogger,
+                                       "beginReportStep() failed: ",
+                                       this->terminal_output_, comm)
+
+        // Store the current well and group states in order to recover in
+        // the case of failed iterations
         this->commitWGState();
     }
+
+
+
+
+
+    template <typename TypeTag>
+    void
+    BlackoilWellModel<TypeTag>::
+    initializeLocalWellStructure(const int  reportStepIdx,
+                                 const bool enableWellPIScaling)
+    {
+        DeferredLogger local_deferredLogger{};
+
+        const auto& comm = this->ebosSimulator_.vanguard().grid().comm();
+
+        // Wells_ecl_ holds this rank's wells, both open and stopped/shut.
+        this->wells_ecl_ = this->getLocalWells(reportStepIdx);
+        this->local_parallel_well_info_ =
+            this->createLocalParallelWellInfo(this->wells_ecl_);
+
+        // At least initializeWellState() might be throw an exception in
+        // UniformTabulated2DFunction.  Playing it safe by extending the
+        // scope a bit.
+        OPM_BEGIN_PARALLEL_TRY_CATCH()
+        {
+            this->initializeWellPerfData();
+            this->initializeWellState(reportStepIdx);
+            this->initializeWBPCalculationService();
+
+            if (this->param_.use_multisegment_well_ && this->anyMSWellOpenLocal()) {
+                this->wellState().initWellStateMSWell(this->wells_ecl_, &this->prevWellState());
+            }
+
+            this->initializeWellProdIndCalculators();
+
+            if (enableWellPIScaling && this->schedule()[reportStepIdx].events()
+                .hasEvent(ScheduleEvents::Events::WELL_PRODUCTIVITY_INDEX))
+            {
+                this->runWellPIScaling(reportStepIdx, local_deferredLogger);
+            }
+        }
+        OPM_END_PARALLEL_TRY_CATCH_LOG(local_deferredLogger,
+                                       "Failed to initialize local well structure: ",
+                                       this->terminal_output_, comm)
+    }
+
+
+
+
+
+    template <typename TypeTag>
+    void
+    BlackoilWellModel<TypeTag>::
+    initializeGroupStructure(const int reportStepIdx)
+    {
+        DeferredLogger local_deferredLogger{};
+
+        const auto& comm = this->ebosSimulator_.vanguard().grid().comm();
+
+        OPM_BEGIN_PARALLEL_TRY_CATCH()
+        {
+            const auto& fieldGroup =
+                this->schedule().getGroup("FIELD", reportStepIdx);
+
+            WellGroupHelpers::setCmodeGroup(fieldGroup,
+                                            this->schedule(),
+                                            this->summaryState(),
+                                            reportStepIdx,
+                                            this->groupState());
+
+            // Define per region average pressure calculators for use by
+            // pressure maintenance groups (GPMAINT keyword).
+            if (this->schedule()[reportStepIdx].has_gpmaint()) {
+                WellGroupHelpers::setRegionAveragePressureCalculator
+                    (fieldGroup,
+                     this->schedule(),
+                     reportStepIdx,
+                     this->eclState_.fieldProps(),
+                     this->phase_usage_,
+                     this->regionalAveragePressureCalculator_);
+            }
+        }
+        OPM_END_PARALLEL_TRY_CATCH_LOG(local_deferredLogger,
+                                       "Failed to initialize group structure: ",
+                                       this->terminal_output_, comm)
+    }
+
+
+
 
 
     // called at the beginning of a time step
@@ -310,15 +425,7 @@ namespace Opm {
             well->setGuideRate(&guideRate_);
         }
 
-        for (auto& well : well_container_) {
-            if (well->isInjector()) {
-                const auto it = this->filtration_particle_volume_.find(well->name());
-                if (it != this->filtration_particle_volume_.end()) {
-                    const auto& filtration_particle_volume = it->second;
-                    well->updateInjFCMult(filtration_particle_volume, local_deferredLogger);
-                }
-            }
-        }
+        this->updateInjFCMult(local_deferredLogger);
 
         // Close completions due to economic reasons
         for (auto& well : well_container_) {
@@ -478,7 +585,7 @@ namespace Opm {
     template<typename TypeTag>
     void
     BlackoilWellModel<TypeTag>::
-    timeStepSucceeded(const double& simulationTime, const double dt)
+    timeStepSucceeded(const double simulationTime, const double dt)
     {
         this->closed_this_step_.clear();
 
@@ -616,8 +723,7 @@ namespace Opm {
     template<typename TypeTag>
     void
     BlackoilWellModel<TypeTag>::
-    initializeWellState(const int           timeStepIdx,
-                        const SummaryState& summaryState)
+    initializeWellState(const int timeStepIdx)
     {
         std::vector<double> cellPressures(this->local_num_cells_, 0.0);
         ElementContext elemCtx(ebosSimulator_);
@@ -644,7 +750,7 @@ namespace Opm {
 
         this->wellState().init(cellPressures, schedule(), wells_ecl_, local_parallel_well_info_, timeStepIdx,
                                &this->prevWellState(), well_perf_data_,
-                               summaryState);
+                               this->summaryState());
     }
 
 
@@ -817,6 +923,8 @@ namespace Opm {
                 }
             }
         }
+
+        this->registerOpenWellsForWBPCalculation();
     }
 
 
@@ -1816,6 +1924,154 @@ namespace Opm {
             }
         }
     }
+
+
+
+
+
+    template <typename TypeTag>
+    void
+    BlackoilWellModel<TypeTag>::
+    initializeWBPCalculationService()
+    {
+        this->wbpCalcMap_.clear();
+        this->wbpCalcMap_.resize(this->wells_ecl_.size());
+
+        this->registerOpenWellsForWBPCalculation();
+
+        auto wellID = std::size_t{0};
+        for (const auto& well : this->wells_ecl_) {
+            this->wbpCalcMap_[wellID].wbpCalcIdx_ = this->wbpCalculationService_
+                .createCalculator(well,
+                                  this->local_parallel_well_info_[wellID],
+                                  this->conn_idx_map_[wellID].local(),
+                                  this->makeWellSourceEvaluatorFactory(wellID));
+
+            ++wellID;
+        }
+
+        this->wbpCalculationService_.defineCommunication();
+    }
+
+
+
+
+
+    template <typename TypeTag>
+    data::WellBlockAveragePressures
+    BlackoilWellModel<TypeTag>::
+    computeWellBlockAveragePressures() const
+    {
+        auto wbpResult = data::WellBlockAveragePressures{};
+
+        using Calculated = PAvgCalculator::Result::WBPMode;
+        using Output = data::WellBlockAvgPress::Quantity;
+
+        this->wbpCalculationService_.collectDynamicValues();
+
+        const auto numWells = this->wells_ecl_.size();
+        for (auto wellID = 0*numWells; wellID < numWells; ++wellID) {
+            const auto calcIdx = this->wbpCalcMap_[wellID].wbpCalcIdx_;
+            const auto& well = this->wells_ecl_[wellID];
+
+            if (! well.hasRefDepth()) {
+                // Can't perform depth correction without at least a
+                // fall-back datum depth.
+                continue;
+            }
+
+            this->wbpCalculationService_
+                .inferBlockAveragePressures(calcIdx, well.pavg(),
+                                            this->gravity_,
+                                            well.getWPaveRefDepth());
+
+            const auto& result = this->wbpCalculationService_
+                .averagePressures(calcIdx);
+
+            auto& reported = wbpResult.values[well.name()];
+
+            reported[Output::WBP]  = result.value(Calculated::WBP);
+            reported[Output::WBP4] = result.value(Calculated::WBP4);
+            reported[Output::WBP5] = result.value(Calculated::WBP5);
+            reported[Output::WBP9] = result.value(Calculated::WBP9);
+        }
+
+        return wbpResult;
+    }
+
+
+
+
+
+    template <typename TypeTag>
+    ParallelWBPCalculation::EvaluatorFactory
+    BlackoilWellModel<TypeTag>::
+    makeWellSourceEvaluatorFactory(const std::vector<Well>::size_type wellIdx) const
+    {
+        using Span = PAvgDynamicSourceData::SourceDataSpan<double>;
+        using Item = typename Span::Item;
+
+        return [wellIdx, this]() -> ParallelWBPCalculation::Evaluator
+        {
+            if (! this->wbpCalcMap_[wellIdx].openWellIdx_.has_value()) {
+                // Well is stopped/shut.  Return evaluator for stopped wells.
+                return []([[maybe_unused]] const int connIdx, Span sourceTerm)
+                {
+                    // Well/connection is stopped/shut.  Set all items to
+                    // zero.
+
+                    sourceTerm
+                        .set(Item::Pressure      , 0.0)
+                        .set(Item::PoreVol       , 0.0)
+                        .set(Item::MixtureDensity, 0.0);
+                };
+            }
+
+            // Well is open.  Return an evaluator for open wells/open connections.
+            return [this, wellPtr = this->well_container_[*this->wbpCalcMap_[wellIdx].openWellIdx_].get()]
+                (const int connIdx, Span sourceTerm)
+            {
+                // Note: The only item which actually matters for the WBP
+                // calculation at the well reservoir connection level is the
+                // mixture density.  Set other items to zero.
+
+                const auto& connIdxMap =
+                    this->conn_idx_map_[wellPtr->indexOfWell()];
+
+                const auto rho = wellPtr->
+                    connectionDensity(connIdxMap.global(connIdx),
+                                      connIdxMap.open(connIdx));
+
+                sourceTerm
+                    .set(Item::Pressure      , 0.0)
+                    .set(Item::PoreVol       , 0.0)
+                    .set(Item::MixtureDensity, rho);
+            };
+        };
+    }
+
+
+
+
+
+    template <typename TypeTag>
+    void
+    BlackoilWellModel<TypeTag>::
+    registerOpenWellsForWBPCalculation()
+    {
+        assert (this->wbpCalcMap_.size() == this->wells_ecl_.size());
+
+        for (auto& wbpCalc : this->wbpCalcMap_) {
+            wbpCalc.openWellIdx_.reset();
+        }
+
+        auto openWellIdx = typename std::vector<WellInterfacePtr>::size_type{0};
+        for (const auto* openWell : this->well_container_generic_) {
+            this->wbpCalcMap_[openWell->indexOfWell()].openWellIdx_ = openWellIdx++;
+        }
+    }
+
+
 
 
 
