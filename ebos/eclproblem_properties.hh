@@ -124,14 +124,6 @@ struct EclEnableAquifers {
 
 // time stepping parameters
 template<class TypeTag, class MyTypeTag>
-struct EclMaxTimeStepSizeAfterWellEvent {
-    using type = UndefinedProperty;
-};
-template<class TypeTag, class MyTypeTag>
-struct EclRestartShrinkFactor {
-    using type = UndefinedProperty;
-};
-template<class TypeTag, class MyTypeTag>
 struct EclEnableTuning {
     using type = UndefinedProperty;
 };
@@ -168,6 +160,23 @@ struct SpatialDiscretizationSplice<TypeTag, TTag::EclBaseProblem> {
 template<class TypeTag>
 struct LocalLinearizerSplice<TypeTag, TTag::EclBaseProblem> {
     using type = TTag::AutoDiffLocalLinearizer;
+};
+
+template<class TypeTag>
+struct BaseDiscretizationType<TypeTag, TTag::EclBaseProblem> {
+    using type = FvBaseDiscretizationNoAdapt<TypeTag>;
+};
+
+template<class TypeTag>
+struct DiscreteFunction<TypeTag, TTag::EclBaseProblem> {
+    using BaseDiscretization = FvBaseDiscretization<TypeTag>;
+    using type = typename BaseDiscretization::BlockVectorWrapper;
+};
+
+template<class TypeTag>
+struct GridView<TypeTag, TTag::EclBaseProblem>
+{
+    using type = typename GetPropType<TypeTag, Properties::Grid>::LeafGridView;
 };
 
 // Set the material law for fluid fluxes
@@ -516,16 +525,6 @@ struct EnableExperiments<TypeTag, TTag::EclBaseProblem> {
 };
 
 // set defaults for the time stepping parameters
-template<class TypeTag>
-struct EclMaxTimeStepSizeAfterWellEvent<TypeTag, TTag::EclBaseProblem> {
-    using type = GetPropType<TypeTag, Scalar>;
-    static constexpr type value = 3600*24*365.25;
-};
-template<class TypeTag>
-struct EclRestartShrinkFactor<TypeTag, TTag::EclBaseProblem> {
-    using type = GetPropType<TypeTag, Scalar>;
-    static constexpr type value = 3;
-};
 template<class TypeTag>
 struct EclEnableTuning<TypeTag, TTag::EclBaseProblem> {
     static constexpr bool value = false;

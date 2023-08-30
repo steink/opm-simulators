@@ -42,6 +42,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstddef>
 #include <sstream>
 #include <stdexcept>
 
@@ -142,7 +143,7 @@ void EclTransmissibility<Grid,GridView,ElementMapper,CartesianIndexMapper,Scalar
 update(bool global, const std::function<unsigned int(unsigned int)>& map)
 {
     const auto& cartDims = cartMapper_.cartesianDimensions();
-    auto& transMult = eclState_.getTransMult();
+    const auto& transMult = eclState_.getTransMult();
     const auto& comm = gridView_.comm();
     ElementMapper elemMapper(gridView_, Dune::mcmgElementLayout());
 
@@ -499,7 +500,7 @@ extractPermeability_()
         else
             permzData = permxData;
 
-        for (size_t dofIdx = 0; dofIdx < numElem; ++ dofIdx) {
+        for (std::size_t dofIdx = 0; dofIdx < numElem; ++ dofIdx) {
             permeability_[dofIdx] = 0.0;
             permeability_[dofIdx][0][0] = permxData[dofIdx];
             permeability_[dofIdx][1][1] = permyData[dofIdx];
@@ -541,9 +542,9 @@ extractPermeability_(const std::function<unsigned int(unsigned int)>& map)
         else
             permzData = permxData;
 
-        for (size_t dofIdx = 0; dofIdx < numElem; ++ dofIdx) {
+        for (std::size_t dofIdx = 0; dofIdx < numElem; ++ dofIdx) {
             permeability_[dofIdx] = 0.0;
-            size_t inputDofIdx = map(dofIdx);
+            std::size_t inputDofIdx = map(dofIdx);
             permeability_[dofIdx][0][0] = permxData[inputDofIdx];
             permeability_[dofIdx][1][1] = permyData[inputDofIdx];
             permeability_[dofIdx][2][2] = permzData[inputDofIdx];
@@ -662,7 +663,7 @@ updateFromEclState_(bool global)
 
     for (auto it = trans.begin(); it != trans.end(); ++it, ++key, ++perform)
     {
-        if(perform)
+        if(*perform)
             fp->apply_tran(*key, *it);
     }
 
@@ -822,16 +823,12 @@ computeFaceProperties(const Intersection& intersection,
 }
 
 template<class Grid, class GridView, class ElementMapper, class CartesianIndexMapper, class Scalar>
-std::tuple<std::vector<NNCdata>, std::vector<NNCdata>>
+void
 EclTransmissibility<Grid,GridView,ElementMapper,CartesianIndexMapper,Scalar>::
 applyNncToGridTrans_(const std::unordered_map<std::size_t,int>& cartesianToCompressed)
 {
     // First scale NNCs with EDITNNC.
-    std::vector<NNCdata> unprocessedNnc;
-    std::vector<NNCdata> processedNnc;
     const auto& nnc_input = eclState_.getInputNNC().input();
-    if (nnc_input.empty())
-        return std::make_tuple(processedNnc, unprocessedNnc);
 
     for (const auto& nncEntry : nnc_input) {
         auto c1 = nncEntry.cell1;
@@ -858,20 +855,13 @@ applyNncToGridTrans_(const std::unordered_map<std::size_t,int>& cartesianToCompr
         }
 
         auto candidate = trans_.find(isId(low, high));
-
-        if (candidate == trans_.end())
-            // This NNC is not resembled by the grid. Save it for later
-            // processing with local cell values
-            unprocessedNnc.push_back(nncEntry);
-        else {
+        if (candidate != trans_.end()) {
             // NNC is represented by the grid and might be a neighboring connection
             // In this case the transmissibilty is added to the value already
             // set or computed.
             candidate->second += nncEntry.trans;
-            processedNnc.push_back(nncEntry);
         }
     }
-    return std::make_tuple(processedNnc, unprocessedNnc);
 }
 
 template<class Grid, class GridView, class ElementMapper, class CartesianIndexMapper, class Scalar>

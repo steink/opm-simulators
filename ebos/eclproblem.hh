@@ -32,7 +32,6 @@
 #include <dune/common/fvector.hh>
 #include <dune/common/fmatrix.hh>
 
-#include <ebos/eclactionhandler.hh>
 #include <ebos/eclbaseaquifermodel.hh>
 #include <ebos/eclcpgridvanguard.hh>
 #include <ebos/ecldummygradientcalculator.hh>
@@ -78,6 +77,8 @@
 
 #include <opm/output/eclipse/EclipseIO.hpp>
 
+#include <opm/simulators/flow/EclActionHandler.hpp>
+#include <opm/simulators/timestepping/AdaptiveTimeSteppingEbos.hpp>
 #include <opm/simulators/timestepping/SimulatorReport.hpp>
 #include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
 #include <opm/simulators/utils/ParallelSerialization.hpp>
@@ -190,8 +191,6 @@ public:
     using EclGenericProblem<GridView,FluidSystem,Scalar>::helpPreamble;
     using EclGenericProblem<GridView,FluidSystem,Scalar>::shouldWriteOutput;
     using EclGenericProblem<GridView,FluidSystem,Scalar>::shouldWriteRestartFile;
-    using EclGenericProblem<GridView,FluidSystem,Scalar>::maxTimeIntegrationFailures;
-    using EclGenericProblem<GridView,FluidSystem,Scalar>::minTimeStepSize;
     using EclGenericProblem<GridView,FluidSystem,Scalar>::rockCompressibility;
     using EclGenericProblem<GridView,FluidSystem,Scalar>::rockReferencePressure;
     using EclGenericProblem<GridView,FluidSystem,Scalar>::porosity;
@@ -224,10 +223,6 @@ public:
         if constexpr (enableExperiments)
             EWOMS_REGISTER_PARAM(TypeTag, bool, EclEnableAquifers,
                                  "Enable analytic and numeric aquifer models");
-        EWOMS_REGISTER_PARAM(TypeTag, Scalar, EclMaxTimeStepSizeAfterWellEvent,
-                             "Maximum time step size after an well event");
-        EWOMS_REGISTER_PARAM(TypeTag, Scalar, EclRestartShrinkFactor,
-                             "Factor by which the time step is reduced after convergence failure");
         EWOMS_REGISTER_PARAM(TypeTag, bool, EclEnableTuning,
                              "Honor some aspects of the TUNING keyword from the ECL deck.");
         EWOMS_REGISTER_PARAM(TypeTag, std::string, OutputMode,
@@ -235,7 +230,6 @@ public:
         EWOMS_REGISTER_PARAM(TypeTag, int, NumPressurePointsEquil,
                              "Number of pressure points (in each direction) in tables used for equilibration");
         EWOMS_HIDE_PARAM(TypeTag, NumPressurePointsEquil); // Users will typically not need to modify this parameter..
-
     }
 
 
@@ -309,11 +303,7 @@ public:
 
         this->enableTuning_ = EWOMS_GET_PARAM(TypeTag, bool, EclEnableTuning);
         this->initialTimeStepSize_ = EWOMS_GET_PARAM(TypeTag, Scalar, InitialTimeStepSize);
-        this->minTimeStepSize_ = EWOMS_GET_PARAM(TypeTag, Scalar, MinTimeStepSize);
-        this->maxTimeStepSize_ = EWOMS_GET_PARAM(TypeTag, Scalar, MaxTimeStepSize);
-        this->maxTimeStepAfterWellEvent_ = EWOMS_GET_PARAM(TypeTag, Scalar, EclMaxTimeStepSizeAfterWellEvent);
-        this->restartShrinkFactor_ = EWOMS_GET_PARAM(TypeTag, Scalar, EclRestartShrinkFactor);
-        this->maxFails_ = EWOMS_GET_PARAM(TypeTag, unsigned, MaxTimeStepDivisions);
+        this->maxTimeStepAfterWellEvent_ = EWOMS_GET_PARAM(TypeTag, double, TimeStepAfterEventInDays)*24*60*60;
 
         // The value N for this parameter is defined in the following order of presedence:
         // 1. Command line value (--num-pressure-points-equil=N)
@@ -365,19 +355,32 @@ public:
             // if support for the TUNING keyword is enabled, we get the initial time
             // steping parameters from it instead of from command line parameters
             const auto& tuning = schedule[0].tuning();
-            this->initialTimeStepSize_ = tuning.TSINIT;
+            this->initialTimeStepSize_ = tuning.TSINIT.has_value() ? tuning.TSINIT.value() : -1.0;
             this->maxTimeStepAfterWellEvent_ = tuning.TMAXWC;
-            this->maxTimeStepSize_ = tuning.TSMAXZ;
-            this->restartShrinkFactor_ = 1./tuning.TSFCNV;
-            this->minTimeStepSize_ = tuning.TSMINZ;
         }
 
         this->initFluidSystem_();
 
         // deal with DRSDT
-        this->initDRSDT_(this->model().numGridDof(), this->episodeIndex());
+        this->mixControls_.init(this->model().numGridDof(),
+                                this->episodeIndex(),
+                                eclState.runspec().tabdims().getNumPVTTables());
 
-        this->readRockParameters_(simulator.vanguard().cellCenterDepths());
+        if (FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx) &&
+            FluidSystem::phaseIsActive(FluidSystem::gasPhaseIdx)) {
+            this->maxOilSaturation_.resize(this->model().numGridDof(), 0.0);
+        }
+
+        this->readRockParameters_(simulator.vanguard().cellCenterDepths(),
+                                  [&simulator](const unsigned idx)
+                                  {
+                                      std::array<int,dim> coords;
+                                      simulator.vanguard().cartesianCoordinate(idx, coords);
+                                      for (auto& c : coords) {
+                                          ++c;
+                                      }
+                                      return coords;
+                                  });
         readMaterialParameters_();
         readThermalParameters_();
 
@@ -539,7 +542,8 @@ public:
 
         // set the size of the initial time step of the episode
         Scalar dt = limitNextTimeStepSize_(simulator.episodeLength());
-        if (episodeIdx == 0 || tuningEvent)
+        // negative value of initialTimeStepSize_ indicates no active limit from TSINIT or NEXTSTEP
+        if ( (episodeIdx == 0 || tuningEvent) && this->initialTimeStepSize_ > 0)
             // allow the size of the initial time step to be set via an external parameter
             // if TUNING is enabled, also limit the time step size after a tuning event to TSINIT
             dt = std::min(dt, this->initialTimeStepSize_);
@@ -1157,22 +1161,9 @@ public:
      */
     Scalar maxGasDissolutionFactor(unsigned timeIdx, unsigned globalDofIdx) const
     {
-        int pvtRegionIdx = this->pvtRegionIndex(globalDofIdx);
-        int episodeIdx = this->episodeIndex();
-        if (!this->drsdtActive_(episodeIdx) || this->maxDRs_[pvtRegionIdx] < 0.0)
-            return std::numeric_limits<Scalar>::max()/2.0;
-
-        Scalar scaling = 1.0;
-        if (this->drsdtConvective_(episodeIdx)) {
-           scaling = this->convectiveDrs_[globalDofIdx];
-        }
-
-        // this is a bit hacky because it assumes that a time discretization with only
-        // two time indices is used.
-        if (timeIdx == 0)
-            return this->lastRs_[globalDofIdx] + this->maxDRs_[pvtRegionIdx] * scaling;
-        else
-            return this->lastRs_[globalDofIdx];
+        return this->mixControls_.maxGasDissolutionFactor(timeIdx, globalDofIdx,
+                                                          this->episodeIndex(),
+                                                          this->pvtRegionIndex(globalDofIdx));
     }
 
     /*!
@@ -1181,17 +1172,9 @@ public:
      */
     Scalar maxOilVaporizationFactor(unsigned timeIdx, unsigned globalDofIdx) const
     {
-        int pvtRegionIdx = this->pvtRegionIndex(globalDofIdx);
-        int episodeIdx = this->episodeIndex();
-        if (!this->drvdtActive_(episodeIdx) || this->maxDRv_[pvtRegionIdx] < 0.0)
-            return std::numeric_limits<Scalar>::max()/2.0;
-
-        // this is a bit hacky because it assumes that a time discretization with only
-        // two time indices is used.
-        if (timeIdx == 0)
-            return this->lastRv_[globalDofIdx] + this->maxDRv_[pvtRegionIdx];
-        else
-            return this->lastRv_[globalDofIdx];
+        return this->mixControls_.maxOilVaporizationFactor(timeIdx, globalDofIdx,
+                                                           this->episodeIndex(),
+                                                           this->pvtRegionIndex(globalDofIdx));
     }
 
     /*!
@@ -1205,8 +1188,8 @@ public:
     bool recycleFirstIterationStorage() const
     {
         int episodeIdx = this->episodeIndex();
-        return !this->drsdtActive_(episodeIdx) &&
-               !this->drvdtActive_(episodeIdx) &&
+        return !this->mixControls_.drsdtActive(episodeIdx) &&
+               !this->mixControls_.drvdtActive(episodeIdx) &&
                this->rockCompPoroMultWc_.empty() &&
                this->rockCompPoroMult_.empty();
     }
@@ -1684,7 +1667,7 @@ protected:
         const auto& model = this->simulator().model();
         const auto& primaryVars = model.solution(/*timeIdx*/0);
         const auto& vanguard = this->simulator().vanguard();
-        size_t numGridDof = primaryVars.size();
+        std::size_t numGridDof = primaryVars.size();
         OPM_BEGIN_PARALLEL_TRY_CATCH();
 #ifdef _OPENMP
 #pragma omp parallel for
@@ -1703,80 +1686,30 @@ protected:
         // update the "last Rs" values for all elements, including the ones in the ghost
         // and overlap regions
         int episodeIdx = this->episodeIndex();
-        std::array<bool,3> active{this->drsdtConvective_(episodeIdx),
-                                  this->drsdtActive_(episodeIdx),
-                                  this->drvdtActive_(episodeIdx)};
-        if (!active[0] && !active[1] && !active[2])
-          return;
+        std::array<bool,3> active{this->mixControls_.drsdtConvective(episodeIdx),
+                                  this->mixControls_.drsdtActive(episodeIdx),
+                                  this->mixControls_.drvdtActive(episodeIdx)};
+        if (!active[0] && !active[1] && !active[2]) {
+            return;
+        }
 
         this->updateProperty_("EclProblem::updateCompositionChangeLimits_()) failed:",
-                              [this,episodeIdx,active](unsigned compressedDofIdx, const IntensiveQuantities& iq)
+                              [this,episodeIdx,active](unsigned compressedDofIdx,
+                                                       const IntensiveQuantities& iq)
                               {
-                                  this->updateCompositionChangeLimits_(compressedDofIdx,
-                                                                       iq,
-                                                                       episodeIdx,
-                                                                       active);
+                                  const DimMatrix& perm = this->intrinsicPermeability(compressedDofIdx);
+                                  const Scalar distZ = active[0] ? this->simulator().vanguard().cellThickness(compressedDofIdx) : 0.0;
+                                  const int pvtRegionIdx = this->pvtRegionIndex(compressedDofIdx);
+                                  this->mixControls_.update(compressedDofIdx,
+                                                            iq,
+                                                            episodeIdx,
+                                                            this->gravity_[dim - 1],
+                                                            perm[dim - 1][dim - 1],
+                                                            distZ,
+                                                            pvtRegionIdx,
+                                                            active);
                               }
             );
-    }
-
-    void updateCompositionChangeLimits_(unsigned compressedDofIdx, const IntensiveQuantities& iq,int episodeIdx, const std::array<bool,3>& active)
-    {
-        auto& simulator = this->simulator();
-        auto& vanguard = simulator.vanguard();
-        if (active[0]) {
-            // This implements the convective DRSDT as described in
-            // Sandve et al. "Convective dissolution in field scale CO2 storage simulations using the OPM Flow
-            // simulator" Submitted to TCCS 11, 2021
-            const Scalar g = this->gravity_[dim - 1];
-            const DimMatrix& perm = intrinsicPermeability(compressedDofIdx);
-            const Scalar permz = perm[dim - 1][dim - 1]; // The Z permeability
-            const Scalar distZ = vanguard.cellThickness(compressedDofIdx);
-            const auto& fs = iq.fluidState();
-            const Scalar t = getValue(fs.temperature(FluidSystem::oilPhaseIdx));
-            const Scalar p = getValue(fs.pressure(FluidSystem::oilPhaseIdx));
-            const Scalar so = getValue(fs.saturation(FluidSystem::oilPhaseIdx));
-            const Scalar rssat = FluidSystem::oilPvt().saturatedGasDissolutionFactor(fs.pvtRegionIndex(), t, p);
-            const Scalar saturatedInvB
-                = FluidSystem::oilPvt().saturatedInverseFormationVolumeFactor(fs.pvtRegionIndex(), t, p);
-            const Scalar rsZero = 0.0;
-            const Scalar pureDensity
-                = FluidSystem::oilPvt().inverseFormationVolumeFactor(fs.pvtRegionIndex(), t, p, rsZero)
-                * FluidSystem::oilPvt().oilReferenceDensity(fs.pvtRegionIndex());
-            const Scalar saturatedDensity = saturatedInvB
-                * (FluidSystem::oilPvt().oilReferenceDensity(fs.pvtRegionIndex())
-                   + rssat * FluidSystem::referenceDensity(FluidSystem::gasPhaseIdx, fs.pvtRegionIndex()));
-            const Scalar deltaDensity = saturatedDensity - pureDensity;
-            const Scalar rs = getValue(fs.Rs());
-            const Scalar visc = FluidSystem::oilPvt().viscosity(fs.pvtRegionIndex(), t, p, rs);
-            const Scalar poro = getValue(iq.porosity());
-            // Note that for so = 0 this gives no limits (inf) for the dissolution rate
-            // Also we restrict the effect of convective mixing to positive density differences
-            // i.e. we only allow for fingers moving downward
-            this->convectiveDrs_[compressedDofIdx]
-                = permz * rssat * max(0.0, deltaDensity) * g / (so * visc * distZ * poro);
-        }
-
-        if (active[1]) {
-            const auto& fs = iq.fluidState();
-
-            using FluidState = typename std::decay<decltype(fs)>::type;
-
-            int pvtRegionIdx = this->pvtRegionIndex(compressedDofIdx);
-            const auto& oilVaporizationControl = vanguard.schedule()[episodeIdx].oilvap();
-            if (oilVaporizationControl.getOption(pvtRegionIdx) || fs.saturation(gasPhaseIdx) > freeGasMinSaturation_)
-                this->lastRs_[compressedDofIdx]
-                    = BlackOil::template getRs_<FluidSystem, FluidState, Scalar>(fs, iq.pvtRegionIndex());
-            else
-                this->lastRs_[compressedDofIdx] = std::numeric_limits<Scalar>::infinity();
-        }
-
-        if (active[2]) {
-            const auto& fs = iq.fluidState();
-            using FluidState = typename std::decay<decltype(fs)>::type;
-            this->lastRv_[compressedDofIdx]
-                = BlackOil::template getRv_<FluidSystem, FluidState, Scalar>(fs, iq.pvtRegionIndex());
-        }
     }
 
     bool updateMaxOilSaturation_()
@@ -1924,14 +1857,14 @@ protected:
         const auto& vanguard = simulator.vanguard();
         const auto& eclState = vanguard.eclState();
 
-        size_t numDof = this->model().numGridDof();
+        std::size_t numDof = this->model().numGridDof();
 
         this->referencePorosity_[/*timeIdx=*/0].resize(numDof);
 
         const auto& fp = eclState.fieldProps();
         const std::vector<double> porvData = fp.porv(false);
         const std::vector<int> actnumData = fp.actnum();
-        for (size_t dofIdx = 0; dofIdx < numDof; ++ dofIdx) {
+        for (std::size_t dofIdx = 0; dofIdx < numDof; ++dofIdx) {
             Scalar poreVolume = porvData[dofIdx];
 
             // we define the porosity as the accumulated pore volume divided by the
@@ -1962,8 +1895,8 @@ protected:
                                                            enableMICP);
 
         //initialize min/max values
-        size_t numElems = this->model().numGridDof();
-        for (size_t elemIdx = 0; elemIdx < numElems; ++elemIdx) {
+        std::size_t numElems = this->model().numGridDof();
+        for (std::size_t elemIdx = 0; elemIdx < numElems; ++elemIdx) {
             const auto& fs = initialFluidStates_[elemIdx];
             if (!this->maxWaterSaturation_.empty())
                 this->maxWaterSaturation_[elemIdx] = std::max(this->maxWaterSaturation_[elemIdx], fs.saturation(waterPhaseIdx));
@@ -1984,9 +1917,9 @@ protected:
         using EquilInitializer = EclEquilInitializer<TypeTag>;
         EquilInitializer equilInitializer(simulator, *materialLawManager_);
 
-        size_t numElems = this->model().numGridDof();
+        std::size_t numElems = this->model().numGridDof();
         initialFluidStates_.resize(numElems);
-        for (size_t elemIdx = 0; elemIdx < numElems; ++elemIdx) {
+        for (std::size_t elemIdx = 0; elemIdx < numElems; ++elemIdx) {
             auto& elemFluidState = initialFluidStates_[elemIdx];
             elemFluidState.assign(equilInitializer.initialFluidState(elemIdx));
         }
@@ -2013,7 +1946,7 @@ protected:
         Scalar dt = std::min(eclWriter_->restartTimeStepSize(), simulator.episodeLength());
         simulator.setTimeStepSize(dt);
 
-        size_t numElems = this->model().numGridDof();
+        std::size_t numElems = this->model().numGridDof();
         initialFluidStates_.resize(numElems);
         if constexpr (enableSolvent)
             this->solventSaturation_.resize(numElems, 0.0);
@@ -2033,7 +1966,7 @@ protected:
             this->micp_.resize(numElems);
         }
 
-        for (size_t elemIdx = 0; elemIdx < numElems; ++elemIdx) {
+        for (std::size_t elemIdx = 0; elemIdx < numElems; ++elemIdx) {
             auto& elemFluidState = initialFluidStates_[elemIdx];
             elemFluidState.setPvtRegionIndex(pvtRegionIndex(elemIdx));
             eclWriter_->eclOutputModule().initHysteresisParams(simulator, elemIdx);
@@ -2056,13 +1989,7 @@ protected:
                     this->solventSaturation_[elemIdx] = ssol;
             }
 
-            if (! this->lastRs_.empty()) {
-                this->lastRs_[elemIdx] = elemFluidState.Rs();
-            }
-
-            if (! this->lastRv_.empty()) {
-                this->lastRv_[elemIdx] = elemFluidState.Rv();
-            }
+            this->mixControls_.updateLastValues(elemIdx, elemFluidState.Rs(), elemFluidState.Rv());
 
             if constexpr (enablePolymer)
                  this->polymer_.concentration[elemIdx] = eclWriter_->eclOutputModule().getPolymerConcentration(elemIdx);
@@ -2077,16 +2004,7 @@ protected:
         }
 
         const int episodeIdx = this->episodeIndex();
-        const auto& oilVaporizationControl = simulator.vanguard().schedule()[episodeIdx].oilvap();
-        if (this->drsdtActive_(episodeIdx))
-            // DRSDT is enabled
-            for (size_t pvtRegionIdx = 0; pvtRegionIdx < this->maxDRs_.size(); ++pvtRegionIdx)
-                this->maxDRs_[pvtRegionIdx] = oilVaporizationControl.getMaxDRSDT(pvtRegionIdx)*simulator.timeStepSize();
-
-        if (this->drvdtActive_(episodeIdx))
-            // DRVDT is enabled
-            for (size_t pvtRegionIdx = 0; pvtRegionIdx < this->maxDRv_.size(); ++pvtRegionIdx)
-                this->maxDRv_[pvtRegionIdx] = oilVaporizationControl.getMaxDRVDT(pvtRegionIdx)*simulator.timeStepSize();
+        this->mixControls_.updateMaxValues(episodeIdx, simulator.timeStepSize());
 
         // assign the restart solution to the current solution. note that we still need
         // to compute real initial solution after this because the initial fluid states
@@ -2116,7 +2034,7 @@ protected:
         // this is used to recover some RESTART running with the defaulted single-precision format
         const Scalar smallSaturationTolerance = 1.e-6;
         Scalar sumSaturation = 0.0;
-        for (size_t phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
+        for (std::size_t phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
             if (FluidSystem::phaseIsActive(phaseIdx)) {
                 if (elemFluidState.saturation(phaseIdx) < smallSaturationTolerance)
                     elemFluidState.setSaturation(phaseIdx, 0.0);
@@ -2134,7 +2052,7 @@ protected:
 
         assert(sumSaturation > 0.0);
 
-        for (size_t phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
+        for (std::size_t phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
             if (FluidSystem::phaseIsActive(phaseIdx)) {
                 const Scalar saturation = elemFluidState.saturation(phaseIdx) / sumSaturation;
                 elemFluidState.setSaturation(phaseIdx, saturation);
@@ -2188,7 +2106,7 @@ protected:
             throw std::runtime_error("The ECL input file requires the SALTP keyword to be present if"
                                      " salt precipitation is enabled and the model is initialized explicitly");
 
-        size_t numDof = this->model().numGridDof();
+        std::size_t numDof = this->model().numGridDof();
 
         initialFluidStates_.resize(numDof);
 
@@ -2234,7 +2152,7 @@ protected:
             saltpData = fp.get_double("SALTP");
 
         // calculate the initial fluid states
-        for (size_t dofIdx = 0; dofIdx < numDof; ++dofIdx) {
+        for (std::size_t dofIdx = 0; dofIdx < numDof; ++dofIdx) {
             auto& dofFluidState = initialFluidStates_[dofIdx];
 
             dofFluidState.setPvtRegionIndex(pvtRegionIndex(dofIdx));
@@ -2429,7 +2347,7 @@ private:
         if (bcconfig.size() > 0) {
             nonTrivialBoundaryConditions_ = true;
 
-            size_t numCartDof = vanguard.cartesianSize();
+            std::size_t numCartDof = vanguard.cartesianSize();
             unsigned numElems = vanguard.gridView().size(/*codim=*/0);
             std::vector<int> cartesianToCompressedElemIdx(numCartDof, -1);
 
@@ -2520,7 +2438,7 @@ private:
             }
         }
 
-        size_t numDof = this->model().numGridDof();
+        std::size_t numDof = this->model().numGridDof();
         const auto& comm = this->simulator().vanguard().grid().comm();
         comm.sum(sumInvB.data(),sumInvB.size());
         Scalar numTotalDof = comm.sum(numDof);
@@ -2545,8 +2463,6 @@ private:
 
     std::vector<InitialFluidState> initialFluidStates_;
 
-    constexpr static Scalar freeGasMinSaturation_ = 1e-7;
-
     bool enableDriftCompensation_;
     GlobalEqVector drift_;
 
@@ -2567,7 +2483,7 @@ private:
     {
         std::array<std::vector<T>,6> data;
 
-        void resize(size_t size, T defVal)
+        void resize(std::size_t size, T defVal)
         {
             for (auto& d : data)
                 d.resize(size, defVal);

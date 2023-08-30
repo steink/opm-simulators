@@ -37,6 +37,9 @@
 
 #include <boost/date_time.hpp>
 
+#include <fmt/format.h>
+#include <fmt/ranges.h>
+
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
@@ -51,7 +54,7 @@ int eclPositionalParameter(Dune::ParameterTree& tree,
                            int paramIdx)
 {
     std::string param  = argv[paramIdx];
-    size_t i = param.find('=');
+    std::size_t i = param.find('=');
     if (i != std::string::npos) {
         std::string oldParamName = param.substr(0, i);
         std::string oldParamValue = param.substr(i+1);
@@ -85,6 +88,7 @@ EclGenericProblem(const EclipseState& eclState,
     : eclState_(eclState)
     , schedule_(schedule)
     , gridView_(gridView)
+    , mixControls_(schedule)
 {
 }
 
@@ -103,12 +107,7 @@ serializationTestObject(const EclipseState& eclState,
     result.solventSaturation_ = {15.0};
     result.polymer_ = PolymerSolutionContainer<Scalar>::serializationTestObject();
     result.micp_ = MICPSolutionContainer<Scalar>::serializationTestObject();
-    result.lastRv_ = {21.0};
-    result.maxDRv_ = {22.0, 23.0};
-    result.convectiveDrs_ = {24.0, 25.0, 26.0};
-    result.lastRs_ = {27.0};
-    result.maxDRs_ = {28.0};
-    result.dRsDtOnlyFreeGas_ = {false, true};
+    result.mixControls_ = EclMixingRateControls<FluidSystem,Scalar>::serializationTestObject(schedule);
 
     return result;
 }
@@ -148,7 +147,8 @@ briefDescription()
 
 template<class GridView, class FluidSystem, class Scalar>
 void EclGenericProblem<GridView,FluidSystem,Scalar>::
-readRockParameters_(const std::vector<Scalar>& cellCenterDepths)
+readRockParameters_(const std::vector<Scalar>& cellCenterDepths,
+                    std::function<std::array<int,3>(const unsigned)> ijkIndex)
 {
     const auto& rock_config = eclState_.getSimulationConfig().rock_config();
 
@@ -167,8 +167,26 @@ readRockParameters_(const std::vector<Scalar>& cellCenterDepths)
     if (eclState_.fieldProps().has_int(rock_config.rocknum_property())) {
         rockTableIdx_.resize(numElem);
         const auto& num = eclState_.fieldProps().get_int(rock_config.rocknum_property());
-        for (size_t elemIdx = 0; elemIdx < numElem; ++ elemIdx) {
+        for (std::size_t elemIdx = 0; elemIdx < numElem; ++ elemIdx) {
             rockTableIdx_[elemIdx] = num[elemIdx] - 1;
+            auto fmtError =
+                [&num,elemIdx,&ijkIndex,&rock_config](const char* type, std::size_t size)
+                {
+                    return fmt::format("{} table index {} for elem {} read from {}"
+                                      " is is out of bounds for number of tables {}",
+                                      type, num[elemIdx], ijkIndex(elemIdx),
+                                      rock_config.rocknum_property(), size);
+                };
+            if (!rockCompPoroMult_.empty() &&
+                rockTableIdx_[elemIdx] >= rockCompPoroMult_.size()) {
+                throw std::runtime_error(fmtError("Rock compaction",
+                                                  rockCompPoroMult_.size()));
+            }
+            if (!rockCompPoroMultWc_.empty() &&
+                rockTableIdx_[elemIdx] >= rockCompPoroMultWc_.size()) {
+                throw std::runtime_error(fmtError("Rock water compaction",
+                                                  rockCompPoroMultWc_.size()));
+            }
         }
     }
 
@@ -176,18 +194,18 @@ readRockParameters_(const std::vector<Scalar>& cellCenterDepths)
     const auto& overburdTables = eclState_.getTableManager().getOverburdTables();
     if (!overburdTables.empty()) {
         overburdenPressure_.resize(numElem,0.0);
-        size_t numRocktabTables = rock_config.num_rock_tables();
+        std::size_t numRocktabTables = rock_config.num_rock_tables();
 
         if (overburdTables.size() != numRocktabTables)
             throw std::runtime_error(std::to_string(numRocktabTables) +" OVERBURD tables is expected, but " + std::to_string(overburdTables.size()) +" is provided");
 
         std::vector<Tabulated1DFunction<Scalar>> overburdenTables(numRocktabTables);
-        for (size_t regionIdx = 0; regionIdx < numRocktabTables; ++regionIdx) {
+        for (std::size_t regionIdx = 0; regionIdx < numRocktabTables; ++regionIdx) {
             const OverburdTable& overburdTable =  overburdTables.template getTable<OverburdTable>(regionIdx);
             overburdenTables[regionIdx].setXYContainers(overburdTable.getDepthColumn(),overburdTable.getOverburdenPressureColumn());
         }
 
-        for (size_t elemIdx = 0; elemIdx < numElem; ++ elemIdx) {
+        for (std::size_t elemIdx = 0; elemIdx < numElem; ++ elemIdx) {
             unsigned tableIdx = 0;
             if (!rockTableIdx_.empty()) {
                 tableIdx = rockTableIdx_[elemIdx];
@@ -219,7 +237,7 @@ readRockCompactionParameters_()
         throw std::runtime_error("Not support ROCKOMP hysteresis option ");
     }
 
-    size_t numRocktabTables = rock_config.num_rock_tables();
+    std::size_t numRocktabTables = rock_config.num_rock_tables();
     bool waterCompaction = rock_config.water_compaction();
 
     if (!waterCompaction) {
@@ -230,7 +248,7 @@ readRockCompactionParameters_()
 
         rockCompPoroMult_.resize(numRocktabTables);
         rockCompTransMult_.resize(numRocktabTables);
-        for (size_t regionIdx = 0; regionIdx < numRocktabTables; ++regionIdx) {
+        for (std::size_t regionIdx = 0; regionIdx < numRocktabTables; ++regionIdx) {
             const auto& rocktabTable = rocktabTables.template getTable<RocktabTable>(regionIdx);
             const auto& pressureColumn = rocktabTable.getPressureColumn();
             const auto& poroColumn = rocktabTable.getPoreVolumeMultiplierColumn();
@@ -253,16 +271,16 @@ readRockCompactionParameters_()
                                      +" ROCKWNOD tables is expected, but " + std::to_string(rockwnodTables.size()) +" is provided");
         //TODO check size match
         rockCompPoroMultWc_.resize(numRocktabTables, TabulatedTwoDFunction(TabulatedTwoDFunction::InterpolationPolicy::Vertical));
-        for (size_t regionIdx = 0; regionIdx < numRocktabTables; ++regionIdx) {
+        for (std::size_t regionIdx = 0; regionIdx < numRocktabTables; ++regionIdx) {
             const RockwnodTable& rockwnodTable =  rockwnodTables.template getTable<RockwnodTable>(regionIdx);
             const auto& rock2dTable = rock2dTables[regionIdx];
 
             if (rockwnodTable.getSaturationColumn().size() != rock2dTable.sizeMultValues())
                 throw std::runtime_error("Number of entries in ROCKWNOD and ROCK2D needs to match.");
 
-            for (size_t xIdx = 0; xIdx < rock2dTable.size(); ++xIdx) {
+            for (std::size_t xIdx = 0; xIdx < rock2dTable.size(); ++xIdx) {
                 rockCompPoroMultWc_[regionIdx].appendXPos(rock2dTable.getPressureValue(xIdx));
-                for (size_t yIdx = 0; yIdx < rockwnodTable.getSaturationColumn().size(); ++yIdx)
+                for (std::size_t yIdx = 0; yIdx < rockwnodTable.getSaturationColumn().size(); ++yIdx)
                     rockCompPoroMultWc_[regionIdx].appendSamplePoint(xIdx,
                                                                        rockwnodTable.getSaturationColumn()[yIdx],
                                                                        rock2dTable.getPvmultValue(xIdx, yIdx));
@@ -271,16 +289,16 @@ readRockCompactionParameters_()
 
         if (!rock2dtrTables.empty()) {
             rockCompTransMultWc_.resize(numRocktabTables, TabulatedTwoDFunction(TabulatedTwoDFunction::InterpolationPolicy::Vertical));
-            for (size_t regionIdx = 0; regionIdx < numRocktabTables; ++regionIdx) {
+            for (std::size_t regionIdx = 0; regionIdx < numRocktabTables; ++regionIdx) {
                 const RockwnodTable& rockwnodTable =  rockwnodTables.template getTable<RockwnodTable>(regionIdx);
                 const auto& rock2dtrTable = rock2dtrTables[regionIdx];
 
                 if (rockwnodTable.getSaturationColumn().size() != rock2dtrTable.sizeMultValues())
                     throw std::runtime_error("Number of entries in ROCKWNOD and ROCK2DTR needs to match.");
 
-                for (size_t xIdx = 0; xIdx < rock2dtrTable.size(); ++xIdx) {
+                for (std::size_t xIdx = 0; xIdx < rock2dtrTable.size(); ++xIdx) {
                     rockCompTransMultWc_[regionIdx].appendXPos(rock2dtrTable.getPressureValue(xIdx));
-                    for (size_t yIdx = 0; yIdx < rockwnodTable.getSaturationColumn().size(); ++yIdx)
+                    for (std::size_t yIdx = 0; yIdx < rockwnodTable.getSaturationColumn().size(); ++yIdx)
                         rockCompTransMultWc_[regionIdx].appendSamplePoint(xIdx,
                                                                                  rockwnodTable.getSaturationColumn()[yIdx],
                                                                                  rock2dtrTable.getTransMultValue(xIdx, yIdx));
@@ -342,7 +360,7 @@ rockFraction(unsigned elementIdx, unsigned timeIdx) const
 template<class GridView, class FluidSystem, class Scalar>
 template<class T>
 void EclGenericProblem<GridView,FluidSystem,Scalar>::
-updateNum(const std::string& name, std::vector<T>& numbers, size_t num_regions)
+updateNum(const std::string& name, std::vector<T>& numbers, std::size_t num_regions)
 {
     if (!eclState_.fieldProps().has_int(name))
         return;
@@ -424,36 +442,6 @@ vapparsActive(int episodeIdx) const
 
 template<class GridView, class FluidSystem, class Scalar>
 bool EclGenericProblem<GridView,FluidSystem,Scalar>::
-drsdtActive_(int episodeIdx) const
-{
-    const auto& oilVaporizationControl = schedule_[episodeIdx].oilvap();
-    const bool bothOilGasActive = FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx) &&
-                                  FluidSystem::phaseIsActive(FluidSystem::gasPhaseIdx);
-    return (oilVaporizationControl.drsdtActive() && bothOilGasActive);
-}
-
-template<class GridView, class FluidSystem, class Scalar>
-bool EclGenericProblem<GridView,FluidSystem,Scalar>::
-drvdtActive_(int episodeIdx) const
-{
-    const auto& oilVaporizationControl = schedule_[episodeIdx].oilvap();
-    const bool bothOilGasActive = FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx) &&
-                                  FluidSystem::phaseIsActive(FluidSystem::gasPhaseIdx);
-    return (oilVaporizationControl.drvdtActive() && bothOilGasActive);
-}
-
-template<class GridView, class FluidSystem, class Scalar>
-bool EclGenericProblem<GridView,FluidSystem,Scalar>::
-drsdtConvective_(int episodeIdx) const
-{
-    const auto& oilVaporizationControl = schedule_[episodeIdx].oilvap();
-    const bool bothOilGasActive = FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx) &&
-                                  FluidSystem::phaseIsActive(FluidSystem::gasPhaseIdx);
-    return (oilVaporizationControl.drsdtConvective() && bothOilGasActive);
-}
-
-template<class GridView, class FluidSystem, class Scalar>
-bool EclGenericProblem<GridView,FluidSystem,Scalar>::
 beginEpisode_(bool enableExperiments,
               int episodeIdx)
 {
@@ -483,9 +471,6 @@ beginEpisode_(bool enableExperiments,
         const auto& tuning = sched_state.tuning();
         initialTimeStepSize_ = sched_state.max_next_tstep();
         maxTimeStepAfterWellEvent_ = tuning.TMAXWC;
-        maxTimeStepSize_ = tuning.TSMAXZ;
-        restartShrinkFactor_ = 1./tuning.TSFCNV;
-        minTimeStepSize_ = tuning.TSMINZ;
         return true;
     }
 
@@ -517,16 +502,7 @@ beginTimeStep_(bool enableExperiments,
     }
 
     // update explicit quantities between timesteps.
-    const auto& oilVaporizationControl = schedule_[episodeIdx].oilvap();
-    if (drsdtActive_(episodeIdx))
-        // DRSDT is enabled
-        for (size_t pvtRegionIdx = 0; pvtRegionIdx < maxDRs_.size(); ++pvtRegionIdx)
-            maxDRs_[pvtRegionIdx] = oilVaporizationControl.getMaxDRSDT(pvtRegionIdx)*timeStepSize;
-
-    if (drvdtActive_(episodeIdx))
-        // DRVDT is enabled
-        for (size_t pvtRegionIdx = 0; pvtRegionIdx < maxDRv_.size(); ++pvtRegionIdx)
-            maxDRv_[pvtRegionIdx] = oilVaporizationControl.getMaxDRVDT(pvtRegionIdx)*timeStepSize;
+    this->mixControls_.updateExplicitQuantities(episodeIdx, timeStepSize);
 }
 
 template<class GridView, class FluidSystem, class Scalar>
@@ -538,7 +514,7 @@ initFluidSystem_()
 
 template<class GridView, class FluidSystem, class Scalar>
 void EclGenericProblem<GridView,FluidSystem,Scalar>::
-readBlackoilExtentionsInitialConditions_(size_t numDof,
+readBlackoilExtentionsInitialConditions_(std::size_t numDof,
                                          bool enableSolvent,
                                          bool enablePolymer,
                                          bool enablePolymerMolarWeight,
@@ -593,7 +569,7 @@ readBlackoilExtentionsInitialConditions_(size_t numDof,
         } else {
             micp_.calciteConcentration.resize(numDof, 0.0);
         }
-}
+    }
 }
 
 
@@ -641,15 +617,8 @@ template<class GridView, class FluidSystem, class Scalar>
 Scalar EclGenericProblem<GridView,FluidSystem,Scalar>::
 drsdtcon(unsigned elemIdx, int episodeIdx) const
 {
-    if (convectiveDrs_.empty())
-        return 0;
-
-    // The episode index is set to -1 in the initialization phase.
-    // Output drsdt value for index 0
-    episodeIdx = std::max(episodeIdx, 0);
-    const auto& oilVaporizationControl = schedule_[episodeIdx].oilvap();
-    int pvtRegionIdx = pvtRegionIndex(elemIdx);
-    return oilVaporizationControl.getMaxDRSDT(pvtRegionIdx)*convectiveDrs_[elemIdx];
+    return this->mixControls_.drsdtcon(elemIdx, episodeIdx,
+                                       this->pvtRegionIndex(elemIdx));
 }
 
 template<class GridView, class FluidSystem, class Scalar>
@@ -781,47 +750,16 @@ maxPolymerAdsorption(unsigned elemIdx) const
 }
 
 template<class GridView, class FluidSystem, class Scalar>
-void EclGenericProblem<GridView,FluidSystem,Scalar>::
-initDRSDT_(size_t numDof,
-           int episodeIdx)
-{
-    // deal with DRSDT
-    unsigned ntpvt = eclState_.runspec().tabdims().getNumPVTTables();
-    //TODO We may want to only allocate these properties only if active.
-    //But since they may be activated at later time we need some more
-    //intrastructure to handle it
-    if (FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx) && FluidSystem::phaseIsActive(FluidSystem::gasPhaseIdx)) {
-        maxDRv_.resize(ntpvt, 1e30);
-        lastRv_.resize(numDof, 0.0);
-        maxDRs_.resize(ntpvt, 1e30);
-        dRsDtOnlyFreeGas_.resize(ntpvt, false);
-        lastRs_.resize(numDof, 0.0);
-        maxDRv_.resize(ntpvt, 1e30);
-        lastRv_.resize(numDof, 0.0);
-        maxOilSaturation_.resize(numDof, 0.0);
-        if (drsdtConvective_(episodeIdx)) {
-            convectiveDrs_.resize(numDof, 1.0);
-        }
-    }
-}
-
-template<class GridView, class FluidSystem, class Scalar>
 bool EclGenericProblem<GridView,FluidSystem,Scalar>::
 operator==(const EclGenericProblem& rhs) const
 {
-    return this->maxOilSaturation_ == rhs.maxOilSaturation_ &&
-           this->maxWaterSaturation_ == rhs.maxWaterSaturation_ &&
+    return this->maxWaterSaturation_ == rhs.maxWaterSaturation_ &&
            this->minOilPressure_ == rhs.minOilPressure_ &&
            this->overburdenPressure_ == rhs.overburdenPressure_ &&
            this->solventSaturation_ == rhs.solventSaturation_ &&
            this->polymer_ == rhs.polymer_ &&
            this->micp_ == rhs.micp_ &&
-           this->lastRv_ == rhs.lastRv_ &&
-           this->maxDRv_ == rhs.maxDRv_ &&
-           this->convectiveDrs_ == rhs.convectiveDrs_ &&
-           this->lastRs_ == rhs.lastRs_ &&
-           this->maxDRs_ == rhs.maxDRs_ &&
-           this->dRsDtOnlyFreeGas_ == rhs.dRsDtOnlyFreeGas_;
+           this->mixControls_ == rhs.mixControls_;
 }
 
 } // namespace Opm

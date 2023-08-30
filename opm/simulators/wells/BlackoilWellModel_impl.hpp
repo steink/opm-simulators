@@ -435,13 +435,15 @@ namespace Opm {
         // we need the inj_multiplier from the previous time step
         this->initInjMult();
 
+        const auto& summaryState = ebosSimulator_.vanguard().summaryState();
         if (alternative_well_rate_init_) {
             // Update the well rates of well_state_, if only single-phase rates, to
             // have proper multi-phase rates proportional to rates at bhp zero.
             // This is done only for producers, as injectors will only have a single
             // nonzero phase anyway.
             for (auto& well : well_container_) {
-                if (well->isProducer()) {
+                const bool zero_target = well->stopppedOrZeroRateTarget(summaryState, this->wellState());
+                if (well->isProducer() && !zero_target) {
                     well->updateWellStateRates(ebosSimulator_, this->wellState(), local_deferredLogger);
                 }
             }
@@ -466,7 +468,6 @@ namespace Opm {
 
         //update guide rates
         const auto& comm = ebosSimulator_.vanguard().grid().comm();
-        const auto& summaryState = ebosSimulator_.vanguard().summaryState();
         std::vector<double> pot(numPhases(), 0.0);
         const Group& fieldGroup = schedule().getGroup("FIELD", reportStepIdx);
         WellGroupHelpers::updateGuideRates(fieldGroup, schedule(), summaryState, this->phase_usage_, reportStepIdx, simulationTime,
@@ -1007,9 +1008,9 @@ namespace Opm {
         const double dt = this->ebosSimulator_.timeStepSize();
         // TODO: should we also have the group and network backed-up here in case the solution did not get converged?
         auto& well_state = this->wellState();
-        constexpr size_t max_iter = 100;
+        constexpr std::size_t max_iter = 100;
         bool converged = false;
-        size_t iter = 0;
+        std::size_t iter = 0;
         bool changed_well_group = false;
         do {
             changed_well_group = updateWellControlsAndNetwork(true, dt, deferred_logger);
@@ -1107,9 +1108,9 @@ namespace Opm {
         bool do_network_update = true;
         bool well_group_control_changed = false;
         // after certain number of the iterations, we use relaxed tolerance for the network update
-        const size_t iteration_to_relax = param_.network_max_strict_iterations_;
+        const std::size_t iteration_to_relax = param_.network_max_strict_iterations_;
         // after certain number of the iterations, we terminate
-        const size_t max_iteration = param_.network_max_iterations_;  
+        const std::size_t max_iteration = param_.network_max_iterations_;
         std::size_t network_update_iteration = 0;
         while (do_network_update) {
             if (network_update_iteration == iteration_to_relax) {

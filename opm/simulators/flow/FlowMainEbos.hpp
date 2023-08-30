@@ -37,6 +37,7 @@
 #include <dune/common/parallel/mpihelper.hh>
 #endif
 
+#include <cstddef>
 #include <memory>
 #include <string_view>
 
@@ -163,8 +164,6 @@ void handleExtraConvergenceOutput(SimulatorReport& report,
             EWOMS_HIDE_PARAM(TypeTag, MinTimeStepSize);
             EWOMS_HIDE_PARAM(TypeTag, PredeterminedTimeStepsFile);
 
-            EWOMS_HIDE_PARAM(TypeTag, EclMaxTimeStepSizeAfterWellEvent);
-            EWOMS_HIDE_PARAM(TypeTag, EclRestartShrinkFactor);
             EWOMS_HIDE_PARAM(TypeTag, EclEnableTuning);
 
             // flow also does not use the eWoms Newton method
@@ -415,7 +414,7 @@ void handleExtraConvergenceOutput(SimulatorReport& report,
             // force closing of all log files.
             OpmLog::removeAllBackends();
 
-            if (mpi_rank_ != 0 || mpi_size_ < 2 || !this->output_files_) {
+            if (mpi_rank_ != 0 || mpi_size_ < 2 || !this->output_files_ || !ebosSimulator_) {
                 return;
             }
 
@@ -526,7 +525,7 @@ void handleExtraConvergenceOutput(SimulatorReport& report,
 
             // initialize variables
             const auto& initConfig = eclState().getInitConfig();
-            simtimer_->init(schedule, (size_t)initConfig.getRestartStep());
+            simtimer_->init(schedule, static_cast<std::size_t>(initConfig.getRestartStep()));
 
             if (this->output_cout_) {
                 std::ostringstream oss;

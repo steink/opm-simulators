@@ -40,6 +40,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstddef>
 #include <limits>
 #include <stdexcept>
 
@@ -54,6 +55,8 @@ EclGenericThresholdPressure(const CartesianIndexMapper& cartMapper,
     : cartMapper_(cartMapper)
     , gridView_(gridView)
     , elementMapper_(elementMapper)
+    , lookUpData_(gridView)
+    , lookUpCartesianData_(gridView, cartMapper_)
     , eclState_(eclState)
 {
 }
@@ -67,14 +70,10 @@ thresholdPressure(int elem1Idx, int elem2Idx) const
 
     // threshold pressure accross faults
     if (!thpresftValues_.empty()) {
-        int cartElem1Idx = cartMapper_.cartesianIndex(elem1Idx);
-        int cartElem2Idx = cartMapper_.cartesianIndex(elem2Idx);
 
-        assert(0 <= cartElem1Idx && static_cast<int>(cartElemFaultIdx_.size()) > cartElem1Idx);
-        assert(0 <= cartElem2Idx && static_cast<int>(cartElemFaultIdx_.size()) > cartElem2Idx);
+        int fault1Idx = lookUpCartesianData_(elem1Idx, cartElemFaultIdx_);
+        int fault2Idx = lookUpCartesianData_(elem2Idx, cartElemFaultIdx_);
 
-        int fault1Idx = cartElemFaultIdx_[cartElem1Idx];
-        int fault2Idx = cartElemFaultIdx_[cartElem2Idx];
         if (fault1Idx != -1 && fault1Idx == fault2Idx)
             // inside a fault there's no threshold pressure, even accross EQUIL
             // regions.
@@ -172,11 +171,9 @@ applyExplicitThresholdPressures_()
             const auto& inside = intersection.inside();
             const auto& outside = intersection.outside();
 
-            unsigned insideElemIdx = elementMapper_.index(inside);
-            unsigned outsideElemIdx = elementMapper_.index(outside);
+            auto equilRegionInside = lookUpData_(inside, elemEquilRegion_);
+            auto equilRegionOutside = lookUpData_(outside, elemEquilRegion_);
 
-            auto equilRegionInside = elemEquilRegion_[insideElemIdx];
-            auto equilRegionOutside = elemEquilRegion_[outsideElemIdx];
             if (thpres.hasRegionBarrier(equilRegionInside + 1, equilRegionOutside + 1)) {
                 Scalar pth = 0.0;
                 if (thpres.hasThresholdPressure(equilRegionInside + 1, equilRegionOutside + 1)) {
@@ -217,13 +214,13 @@ configureThpresft_()
     int numCartesianElem = eclState_.getInputGrid().getCartesianSize();
     thpresftValues_.resize(numFaults, -1.0);
     cartElemFaultIdx_.resize(numCartesianElem, -1);
-    for (size_t faultIdx = 0; faultIdx < faults.size(); faultIdx++) {
+    for (std::size_t faultIdx = 0; faultIdx < faults.size(); faultIdx++) {
         auto& fault = faults.getFault(faultIdx);
         thpresftValues_[faultIdx] = thpres.getThresholdPressureFault(faultIdx);
         for (const FaultFace& face : fault)
             // "face" is a misnomer because the object describes a set of cell
             // indices, but we go with the conventions of the parser here...
-            for (size_t cartElemIdx : face)
+            for (std::size_t cartElemIdx : face)
                 cartElemFaultIdx_[cartElemIdx] = faultIdx;
     }
 }

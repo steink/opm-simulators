@@ -169,7 +169,7 @@ void
 BlackoilWellModelGeneric::
 initFromRestartFile(const RestartValue& restartValues,
                     WellTestState wtestState,
-                    const size_t numCells,
+                    const std::size_t numCells,
                     bool handle_ms_well)
 {
     // The restart step value is used to identify wells present at the given
@@ -224,7 +224,7 @@ initFromRestartFile(const RestartValue& restartValues,
 
 void
 BlackoilWellModelGeneric::
-prepareDeserialize(int report_step, const size_t numCells, bool handle_ms_well)
+prepareDeserialize(int report_step, const std::size_t numCells, bool handle_ms_well)
 {
     // wells_ecl_ should only contain wells on this processor.
     wells_ecl_ = getLocalWells(report_step);
@@ -1201,7 +1201,7 @@ updateWellPotentials(const int reportStepIdx,
     const bool write_restart_file = schedule().write_rst_file(reportStepIdx);
     auto exc_type = ExceptionType::NONE;
     std::string exc_msg;
-    size_t widx = 0;
+    std::size_t widx = 0;
     for (const auto& well : well_container_generic_) {
         const bool needed_for_summary =
                 ((summaryConfig.hasSummaryKey( "WWPI:" + well->name()) ||
@@ -1458,17 +1458,20 @@ void BlackoilWellModelGeneric::initInjMult() {
 
 
 void BlackoilWellModelGeneric::updateFiltrationParticleVolume(const double dt,
-                                                              const size_t water_index)
+                                                              const std::size_t water_index)
 {
     for (auto& well : this->well_container_generic_) {
-        if (well->isInjector() && well->wellEcl().getFilterConc() > 0.) {
-            auto fc = this->filter_cake_
-                                      .emplace(std::piecewise_construct,
-                                               std::forward_as_tuple(well->name()),
-                                               std::tuple{});
+        if (well->isInjector()) {
+            const double conc = well->wellEcl().evalFilterConc(this->summaryState_);
+            if (conc > 0.) {
+                auto fc = this->filter_cake_
+                        .emplace(std::piecewise_construct,
+                                 std::forward_as_tuple(well->name()),
+                                 std::tuple{});
 
-            fc.first->second.updateFiltrationParticleVolume(*well, dt, water_index,
-                                                            this->wellState());
+                fc.first->second.updateFiltrationParticleVolume(*well, dt, conc, water_index,
+                                                                this->wellState());
+            }
         }
     }
 }
