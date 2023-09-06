@@ -791,6 +791,25 @@ public:
     }
 
     /*!
+     * give the transmissibility for a face i.e. pair. should be symmetric?
+     */
+    Scalar diffusivity(const unsigned globalCellIn, const unsigned globalCellOut) const{
+        return transmissibilities_.diffusivity(globalCellIn, globalCellOut);
+    }
+
+    /*!
+     * \brief Direct access to a boundary transmissibility.
+     */
+    Scalar thermalTransmissibilityBoundary(const unsigned globalSpaceIdx,
+                                    const unsigned boundaryFaceIdx) const
+    {
+        return transmissibilities_.thermalTransmissibilityBoundary(globalSpaceIdx, boundaryFaceIdx);
+    }
+
+
+
+
+    /*!
      * \copydoc EclTransmissiblity::transmissibilityBoundary
      */
     template <class Context>
@@ -808,6 +827,16 @@ public:
                                     const unsigned boundaryFaceIdx) const
     {
         return transmissibilities_.transmissibilityBoundary(globalSpaceIdx, boundaryFaceIdx);
+    }
+
+
+    /*!
+     * \copydoc EclTransmissiblity::thermalHalfTransmissibility
+     */
+    Scalar thermalHalfTransmissibility(const unsigned globalSpaceIdxIn,
+                                       const unsigned globalSpaceIdxOut) const
+    {
+        return transmissibilities_.thermalHalfTrans(globalSpaceIdxIn,globalSpaceIdxOut);
     }
 
     /*!
@@ -1076,6 +1105,27 @@ public:
         // variable
         unsigned globalDofIdx = context.globalSpaceIndex(spaceIdx, timeIdx);
         return initialFluidStates_[globalDofIdx].temperature(/*phaseIdx=*/0);
+    }
+
+
+    Scalar temperature(unsigned globalDofIdx, unsigned /*timeIdx*/) const
+    {
+        // use the initial temperature of the DOF if temperature is not a primary
+        // variable
+         return initialFluidStates_[globalDofIdx].temperature(/*phaseIdx=*/0);
+    }
+
+    const SolidEnergyLawParams&
+    solidEnergyLawParams(unsigned globalSpaceIdx,
+                         unsigned /*timeIdx*/) const
+    {
+        return this->thermalLawManager_->solidEnergyLawParams(globalSpaceIdx);
+    }
+    const ThermalConductionLawParams &
+    thermalConductionLawParams(unsigned globalSpaceIdx,
+                               unsigned /*timeIdx*/)const
+    {
+        return this->thermalLawManager_->thermalConductionLawParams(globalSpaceIdx);
     }
 
     /*!
@@ -1389,29 +1439,6 @@ public:
             const int pvtRegionIdx = this->pvtRegionIndex(globalDofIdx);
             fluidState.setPvtRegionIndex(pvtRegionIdx);
 
-            double pressure = initialFluidStates_[globalDofIdx].pressure(oilPhaseIdx);
-            const auto pressure_input = bc.pressure;
-            if (pressure_input) {
-                pressure = *pressure_input;
-            }
-
-            std::array<Scalar, numPhases> pc = {0};
-            const auto& matParams = materialLawParams(globalDofIdx);
-            MaterialLaw::capillaryPressures(pc, matParams, fluidState);
-            Valgrind::CheckDefined(pressure);
-            Valgrind::CheckDefined(pc);
-            for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
-                if (!FluidSystem::phaseIsActive(phaseIdx))
-                    continue;
-
-                if (Indices::oilEnabled)
-                    fluidState.setPressure(phaseIdx, pressure + (pc[phaseIdx] - pc[oilPhaseIdx]));
-                else if (Indices::gasEnabled)
-                    fluidState.setPressure(phaseIdx, pressure + (pc[phaseIdx] - pc[gasPhaseIdx]));
-                else if (Indices::waterEnabled)
-                    //single (water) phase
-                    fluidState.setPressure(phaseIdx, pressure);
-            }
             switch (bc.component) {
                 case BCComponent::OIL:
                     if (!FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx))
@@ -1437,14 +1464,53 @@ public:
                     throw std::logic_error("you need to specify a valid component (OIL, WATER or GAS) when DIRICHLET type is set in BC");
                     break;
             }
-            double temperature = initialFluidStates_[globalDofIdx].temperature(oilPhaseIdx);
+            int phaseIndex;
+            if (FluidSystem::phaseIsActive(oilPhaseIdx)) {
+                phaseIndex = oilPhaseIdx;
+            }
+            else if (FluidSystem::phaseIsActive(gasPhaseIdx)) {
+                phaseIndex = gasPhaseIdx;
+            }
+            else {
+                phaseIndex = waterPhaseIdx;
+            }
+            double pressure = initialFluidStates_[globalDofIdx].pressure(phaseIndex);
+            const auto pressure_input = bc.pressure;
+            if (pressure_input) {
+                pressure = *pressure_input;
+            }
+
+            std::array<Scalar, numPhases> pc = {0};
+            const auto& matParams = materialLawParams(globalDofIdx);
+            MaterialLaw::capillaryPressures(pc, matParams, fluidState);
+            Valgrind::CheckDefined(pressure);
+            Valgrind::CheckDefined(pc);
+            for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
+                if (!FluidSystem::phaseIsActive(phaseIdx))
+                    continue;
+
+                if (Indices::oilEnabled)
+                    fluidState.setPressure(phaseIdx, pressure + (pc[phaseIdx] - pc[oilPhaseIdx]));
+                else if (Indices::gasEnabled)
+                    fluidState.setPressure(phaseIdx, pressure + (pc[phaseIdx] - pc[gasPhaseIdx]));
+                else if (Indices::waterEnabled)
+                    //single (water) phase
+                    fluidState.setPressure(phaseIdx, pressure);
+            }
+            
+            double temperature = initialFluidStates_[globalDofIdx].temperature(phaseIndex);
             const auto temperature_input = bc.temperature;
             if(temperature_input)
                 temperature = *temperature_input;
             fluidState.setTemperature(temperature);
-            fluidState.setRs(0.0);
-            fluidState.setRv(0.0);
 
+            if (FluidSystem::enableDissolvedGas()) {
+                fluidState.setRs(0.0);
+                fluidState.setRv(0.0);
+            }
+            if (FluidSystem::enableDissolvedGasInWater()) {
+                fluidState.setRsw(0.0);
+            }
             if (FluidSystem::enableVaporizedWater())
                 fluidState.setRvw(0.0);
 
@@ -1459,6 +1525,7 @@ public:
                 fluidState.setDensity(phaseIdx, rho);
 
             }
+            fluidState.checkDefined();
             return fluidState;
         }
         return initialFluidStates_[globalDofIdx];
@@ -1579,6 +1646,9 @@ public:
         FaceDir::DirEnum dir = FaceDir::FromIntersectionIndex(directionId);
         const auto& schedule = this->simulator().vanguard().schedule();
         if (bcindex_(dir)[globalSpaceIdx] == 0) {
+            return { BCType::NONE, RateVector(0.0) };
+        }
+        if (schedule[this->episodeIndex()].bcprop.size() == 0) {
             return { BCType::NONE, RateVector(0.0) };
         }
         const auto& bc = schedule[this->episodeIndex()].bcprop[bcindex_(dir)[globalSpaceIdx]];
@@ -2386,10 +2456,18 @@ private:
     {
         if constexpr (enableExperiments) {
             const auto& simulator = this->simulator();
+            const auto& schedule = simulator.vanguard().schedule();
             int episodeIdx = simulator.episodeIndex();
 
             // first thing in the morning, limit the time step size to the maximum size
-            dtNext = std::min(dtNext, this->maxTimeStepSize_);
+            Scalar maxTimeStepSize = EWOMS_GET_PARAM(TypeTag, double, SolverMaxTimeStepInDays)*24*60*60;
+            int reportStepIdx = std::max(episodeIdx, 0);
+            if (this->enableTuning_) {
+                const auto& tuning = schedule[reportStepIdx].tuning();
+                maxTimeStepSize = tuning.TSMAXZ;
+            }
+
+            dtNext = std::min(dtNext, maxTimeStepSize);
 
             Scalar remainingEpisodeTime =
                 simulator.episodeStartTime() + simulator.episodeLength()
@@ -2401,12 +2479,11 @@ private:
             if (remainingEpisodeTime/2.0 < dtNext && dtNext < remainingEpisodeTime*(1.0 - 1e-5))
                 // note: limiting to the maximum time step size here is probably not strictly
                 // necessary, but it should not hurt and is more fool-proof
-                dtNext = std::min(this->maxTimeStepSize_, remainingEpisodeTime/2.0);
+                dtNext = std::min(maxTimeStepSize, remainingEpisodeTime/2.0);
 
             if (simulator.episodeStarts()) {
                 // if a well event occurred, respect the limit for the maximum time step after
                 // that, too
-                int reportStepIdx = std::max(episodeIdx, 0);
                 const auto& events = simulator.vanguard().schedule()[reportStepIdx].events();
                 bool wellEventOccured =
                         events.hasEvent(ScheduleEvents::NEW_WELL)
