@@ -321,6 +321,11 @@ namespace Opm
             DeferredLogger& deferred_logger,
             const WellState &well_state) const;
 
+        bool computeWellPotentialsImplicit(const WellState& well_state,
+                                           const Simulator& ebos_simulator,
+                                           std::vector<double>& well_potentials,
+                                           DeferredLogger& deferred_logger) const;   
+
         virtual double getRefDensity() const override;
 
         // get the mobility for specific perforation

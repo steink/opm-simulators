@@ -1537,29 +1537,35 @@ namespace Opm
             return;
         }
 
+        bool converged_implicit = false;
         // does the well have a THP related constraint?
-        const auto& summaryState = ebosSimulator.vanguard().summaryState();
-        if (!Base::wellHasTHPConstraints(summaryState) || bhp_controlled_well) {
-            // get the bhp value based on the bhp constraints
-            double bhp = WellBhpThpCalculator(*this).mostStrictBhpFromBhpLimits(summaryState);
+        if (true){
+            converged_implicit = computeWellPotentialsImplicit(well_state, ebosSimulator, well_potentials, deferred_logger);
+        }
+        if (!converged_implicit) {
+            const auto& summaryState = ebosSimulator.vanguard().summaryState();
+            if (!Base::wellHasTHPConstraints(summaryState) || bhp_controlled_well) {
+                // get the bhp value based on the bhp constraints
+                double bhp = WellBhpThpCalculator(*this).mostStrictBhpFromBhpLimits(summaryState);
 
-            // In some very special cases the bhp pressure target are
-            // temporary violated. This may lead to too small or negative potentials
-            // that could lead to premature shutting of wells.
-            // As a remedy the bhp that gives the largest potential is used.
-            // For converged cases, ws.bhp <=bhp for injectors and ws.bhp >= bhp,
-            // and the potentials will be computed using the limit as expected.
-            const auto& ws = well_state.well(this->index_of_well_);
-            if (this->isInjector())
-                bhp = std::max(ws.bhp, bhp);
-            else
-                bhp = std::min(ws.bhp, bhp);
+                // In some very special cases the bhp pressure target are
+                // temporary violated. This may lead to too small or negative potentials
+                // that could lead to premature shutting of wells.
+                // As a remedy the bhp that gives the largest potential is used.
+                // For converged cases, ws.bhp <=bhp for injectors and ws.bhp >= bhp,
+                // and the potentials will be computed using the limit as expected.
+                const auto& ws = well_state.well(this->index_of_well_);
+                if (this->isInjector())
+                    bhp = std::max(ws.bhp, bhp);
+                else
+                    bhp = std::min(ws.bhp, bhp);
 
-            assert(std::abs(bhp) != std::numeric_limits<double>::max());
-            computeWellRatesWithBhpIterations(ebosSimulator, bhp, well_potentials, deferred_logger);
-        } else {
-            // the well has a THP related constraint
-            well_potentials = computeWellPotentialWithTHP(ebosSimulator, deferred_logger, well_state);
+                assert(std::abs(bhp) != std::numeric_limits<double>::max());
+                computeWellRatesWithBhpIterations(ebosSimulator, bhp, well_potentials, deferred_logger);
+            } else {
+                // the well has a THP related constraint
+                well_potentials = computeWellPotentialWithTHP(ebosSimulator, deferred_logger, well_state);
+            }
         }
 
         this->checkNegativeWellPotentials(well_potentials,
@@ -1568,7 +1574,100 @@ namespace Opm
     }
 
 
+    template<typename TypeTag>
+    bool
+    StandardWell<TypeTag>::
+    computeWellPotentialsImplicit(const WellState& well_state,
+                                  const Simulator& ebos_simulator,
+                                  std::vector<double>& well_potentials,
+                                  DeferredLogger& deferred_logger) const
+    {
+        // creating a copy of the well itself, to avoid messing up the explicit information
+        // during this copy, the only information not copied properly is the well controls
+        StandardWell<TypeTag> well_copy(*this);
+        //well_copy.debug_cost_counter_ = 0;
 
+        // store a copy of the well state, we don't want to update the real well state
+        WellState well_state_copy = ebos_simulator.problem().wellModel().wellState();
+        const auto& group_state = ebos_simulator.problem().wellModel().groupState();
+        auto& ws = well_state_copy.well(this->index_of_well_);
+
+        // Get the current controls.
+        const auto& summary_state = ebos_simulator.vanguard().summaryState();
+        auto inj_controls = well_copy.well_ecl_.isInjector()
+            ? well_copy.well_ecl_.injectionControls(summary_state)
+            : Well::InjectionControls(0);
+        auto prod_controls = well_copy.well_ecl_.isProducer()
+            ? well_copy.well_ecl_.productionControls(summary_state) :
+            Well::ProductionControls(0);
+
+        const bool hasThp = this->wellHasTHPConstraints(summary_state);
+
+        //  Modify control (only pressure constraints) and set new target if needed.
+        if (well_copy.well_ecl_.isInjector()) {
+            inj_controls.clearControls();
+            inj_controls.addControl(Well::InjectorCMode::BHP);
+            if (hasThp){
+                inj_controls.addControl(Well::InjectorCMode::THP);
+            }
+            if (!(ws.injection_cmode == Well::InjectorCMode::BHP)){
+                if (hasThp){
+                    ws.injection_cmode = Well::InjectorCMode::THP;
+                } else {
+                    ws.injection_cmode = Well::InjectorCMode::BHP;
+                }
+            } 
+        } else {
+            prod_controls.clearControls();
+            prod_controls.addControl(Well::ProducerCMode::BHP);
+            if (hasThp){
+                prod_controls.addControl(Well::ProducerCMode::THP);
+            }
+            if (!(ws.production_cmode == Well::ProducerCMode::BHP)){
+                if (hasThp){
+                    ws.production_cmode = Well::ProducerCMode::THP;
+                } else {
+                    ws.production_cmode = Well::ProducerCMode::BHP;
+                }
+            } 
+        }
+
+        //ws.thp = thp;
+        //ws.bhp = prod_controls.bhp_limit;
+        //well_copy.scaleSegmentPressuresWithBhp(well_state_copy);
+
+        // initialized the well rates with the potentials i.e. the well rates based on bhp
+        const int np = this->number_of_phases_;
+        bool trivial = true;
+        for (int phase = 0; phase < np; ++phase){
+            trivial = trivial && (ws.well_potentials[phase] == 0.0) ;
+        }
+        if (!trivial) {
+            const double sign = well_copy.well_ecl_.isInjector() ? 1.0 : -1.0;
+            for (int phase = 0; phase < np; ++phase) {
+                ws.surface_rates[phase] = sign * ws.well_potentials[phase];
+            }
+        }
+        //well_copy.scaleSegmentRatesWithWellRates(this->segments_.inlets(),
+        //                                         this->segments_.perforations(),
+        //                                         well_state_copy);
+
+        well_copy.calculateExplicitQuantities(ebos_simulator, well_state_copy, deferred_logger);
+        const double dt = ebos_simulator.timeStepSize();
+        // iterate to get a solution at the given bhp.
+        const bool converged = well_copy.iterateWellEqWithSwitching(ebos_simulator, dt, inj_controls, prod_controls, well_state_copy, group_state,
+                                           deferred_logger);
+
+        // compute the potential and store in the flux vector.
+        well_potentials.clear();
+        well_potentials.resize(np, 0.0);
+        for (int compIdx = 0; compIdx < this->num_components_; ++compIdx) {
+            const EvalWell rate = well_copy.primary_variables_.getQs(compIdx);
+            well_potentials[this->ebosCompIdxToFlowCompIdx(compIdx)] = rate.value();
+        }
+        //debug_cost_counter_ += well_copy.debug_cost_counter_;
+        return converged;
+    }
 
 
 
