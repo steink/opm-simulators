@@ -1545,33 +1545,35 @@ namespace Opm
             return;
         }
 
-        bool converged_implicit = false;
+ 
+        const auto& summaryState = ebosSimulator.vanguard().summaryState();
         // does the well have a THP related constraint?
-        if (true){
-            converged_implicit = computeWellPotentialsImplicit(well_state, ebosSimulator, well_potentials, deferred_logger);
-        }
-        if (!converged_implicit) {
-            const auto& summaryState = ebosSimulator.vanguard().summaryState();
-            if (!Base::wellHasTHPConstraints(summaryState) || bhp_controlled_well) {
-                // get the bhp value based on the bhp constraints
-                double bhp = WellBhpThpCalculator(*this).mostStrictBhpFromBhpLimits(summaryState);
+        if (!Base::wellHasTHPConstraints(summaryState) || bhp_controlled_well) {
+            // get the bhp value based on the bhp constraints
+            double bhp = WellBhpThpCalculator(*this).mostStrictBhpFromBhpLimits(summaryState);
 
-                // In some very special cases the bhp pressure target are
-                // temporary violated. This may lead to too small or negative potentials
-                // that could lead to premature shutting of wells.
-                // As a remedy the bhp that gives the largest potential is used.
-                // For converged cases, ws.bhp <=bhp for injectors and ws.bhp >= bhp,
-                // and the potentials will be computed using the limit as expected.
-                const auto& ws = well_state.well(this->index_of_well_);
-                if (this->isInjector())
-                    bhp = std::max(ws.bhp, bhp);
-                else
-                    bhp = std::min(ws.bhp, bhp);
+            // In some very special cases the bhp pressure target are
+            // temporary violated. This may lead to too small or negative potentials
+            // that could lead to premature shutting of wells.
+            // As a remedy the bhp that gives the largest potential is used.
+            // For converged cases, ws.bhp <=bhp for injectors and ws.bhp >= bhp,
+            // and the potentials will be computed using the limit as expected.
+            const auto& ws = well_state.well(this->index_of_well_);
+            if (this->isInjector())
+                bhp = std::max(ws.bhp, bhp);
+            else
+                bhp = std::min(ws.bhp, bhp);
 
-                assert(std::abs(bhp) != std::numeric_limits<double>::max());
-                computeWellRatesWithBhpIterations(ebosSimulator, bhp, well_potentials, deferred_logger);
-            } else {
-                // the well has a THP related constraint
+            assert(std::abs(bhp) != std::numeric_limits<double>::max());
+            computeWellRatesWithBhpIterations(ebosSimulator, bhp, well_potentials, deferred_logger);
+        } else {
+            // the well has a THP related constraint
+            bool converged_implicit = false;
+            if (true){
+                converged_implicit = computeWellPotentialsImplicit(well_state, ebosSimulator, well_potentials, deferred_logger);
+            }
+            if (!converged_implicit) {
+                std::cout << "Potential calulation for :" << this->name() << "failed. Reverting to standard." << std::endl; 
                 well_potentials = computeWellPotentialWithTHP(ebosSimulator, deferred_logger, well_state);
             }
         }

@@ -292,6 +292,7 @@ namespace Opm
             converged_implicit = computeWellPotentialsImplicit(well_state, ebosSimulator, well_potentials, deferred_logger);
         }
         if (!converged_implicit) {
+            std::cout << "Potential calulation for :" << this->name() << "failed. Reverting to standard." << std::endl; 
             const auto& summaryState = ebosSimulator.vanguard().summaryState();
             if (!Base::wellHasTHPConstraints(summaryState) || bhp_controlled_well) {
                 computeWellRatesAtBhpLimit(ebosSimulator, well_potentials, deferred_logger);
