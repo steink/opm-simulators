@@ -41,7 +41,6 @@ list (APPEND MAIN_SOURCE_FILES
   opm/core/props/satfunc/RelpermDiagnostics.cpp
   opm/simulators/timestepping/SimulatorReport.cpp
   opm/simulators/flow/Banners.cpp
-  opm/simulators/flow/countGlobalCells.cpp
   opm/simulators/flow/ConvergenceOutputConfiguration.cpp
   opm/simulators/flow/EclActionHandler.cpp
   opm/simulators/flow/EclInterRegFlows.cpp
@@ -518,7 +517,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/utils/moduleVersion.hpp
   opm/simulators/utils/ParallelEclipseState.hpp
   opm/simulators/utils/ParallelRestart.hpp
-  opm/simulators/utils/PropsCentroidsDataHandle.hpp
+  opm/simulators/utils/PropsDataHandle.hpp
   opm/simulators/utils/SerializationPackers.hpp
   opm/simulators/utils/VectorVectorDataHandle.hpp
   opm/simulators/utils/PressureAverage.hpp

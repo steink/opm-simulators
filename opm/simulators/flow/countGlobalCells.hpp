@@ -28,82 +28,55 @@
 
 #include <dune/grid/common/gridview.hh>
 
-#include <any>
+#include <algorithm>
 #include <vector>
 
 namespace Opm {
 namespace detail {
 
-
-    std::vector<int> buildAllCells(const int nc);
-
-
-
-    template <class PU>
-    std::vector<bool>
-    activePhases(const PU& pu)
-    {
-        const int maxnp = BlackoilPhases::MaxNumPhases;
-        std::vector<bool> active(maxnp, false);
-
-        for (int p = 0; p < pu.MaxNumPhases; ++p) {
-            active[ p ] = pu.phase_used[ p ] != 0;
-        }
-
-        return active;
-    }
-
-
-
-    template <class PU>
-    std::vector<int>
-    active2Canonical(const PU& pu)
-    {
-        const int maxnp = BlackoilPhases::MaxNumPhases;
-        std::vector<int> act2can(maxnp, -1);
-
-        for (int phase = 0; phase < maxnp; ++phase) {
-            if (pu.phase_used[ phase ]) {
-                act2can[ pu.phase_pos[ phase ] ] = phase;
+        /// \brief Get the number of local interior cells in a grid view.
+        ///
+        /// \tparam GridView Type of DUNE grid view.
+        ///
+        /// \param[in] gridView Grid view for which to count the number of
+        ///    interior cells.
+        ///
+        /// \return The number of interior cell in the partition of the grid
+        ///    stored on this process.
+        template <class GridView>
+        std::size_t countLocalInteriorCellsGridView(const GridView& gridView)
+        {
+            if (gridView.comm().size() == 1) {
+                return gridView.size(0);
             }
+
+            return std::distance(gridView.template begin<0, Dune::Interior_Partition>(),
+                                 gridView.template end<0, Dune::Interior_Partition>());
         }
-
-        return act2can;
-    }
-
-
-
-    double getGravity(const double* g, const int dim);
 
         /// \brief Get the number of local interior cells in a grid.
-        /// \tparam The type of the DUNE grid.
-        /// \param grid The grid which cells we count
-        /// \return The number of interior cell in the partition of the
-        /// grid stored on this process.
+        ///
+        /// \tparam Grid Type of DUNE grid.
+        ///
+        /// \param[in] grid Grid for which to count interior cells.
+        ///
+        /// \return The number of interior cells in the partition of the
+        ///    grid stored on this process.
         template<class Grid>
         std::size_t countLocalInteriorCells(const Grid& grid)
         {
-            if ( grid.comm().size() == 1)
-            {
-                return grid.size(0);
-            }
-            std::size_t count = 0;
-            const auto& gridView = grid.leafGridView();
-            for(auto cell = gridView.template begin<0, Dune::Interior_Partition>(),
-                    endCell = gridView.template end<0, Dune::Interior_Partition>();
-                cell != endCell; ++cell)
-            {
-                    ++count;
-            }
-            return count;
+            return countLocalInteriorCellsGridView(grid.leafGridView());
         }
 
         /// \brief Get the number of cells of a global grid.
         ///
         /// In a parallel run this is the number of cells that a grid would
         /// have if the whole grid was stored on one process only.
-        /// \tparam The type of the DUNE grid.
-        /// \param grid The grid which cells we count
+        ///
+        /// \tparam Grid Type of DUNE grid.
+        ///
+        /// \param[in] grid Grid for which to count global cells.
+        ///
         /// \return The global number of cells.
         template<class Grid>
         std::size_t countGlobalCells(const Grid& grid)
@@ -112,7 +85,7 @@ namespace detail {
             {
                 return grid.size(0);
             }
-            std::size_t count = countLocalInteriorCells(grid);
+            const std::size_t count = countLocalInteriorCellsGridView(grid.leafGridView());
             return grid.comm().sum(count);
         }
 
