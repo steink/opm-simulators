@@ -246,6 +246,10 @@ namespace Opm
                                  const Simulator& ebos_simulator,
                                  DeferredLogger& deferred_logger) const;
 
+        bool computeWellPotentialsImplicit(const Simulator& ebos_simulator,
+                                           std::vector<double>& well_potentials,
+                                           DeferredLogger& deferred_logger) const;                                      
+
         virtual double getRefDensity() const override;
 
         virtual bool iterateWellEqWithControl(const Simulator& ebosSimulator,
