@@ -763,7 +763,7 @@ prepareForPotentialCalculations(const SummaryState& summary_state,
         if (!(ws.injection_cmode == Well::InjectorCMode::BHP)){
             if (has_thp){
                 ws.injection_cmode = Well::InjectorCMode::THP;
-                ws.thp = inj_controls.thp_limit;
+                ws.thp = this->getTHPConstraint(summary_state);
             } else {
                 ws.injection_cmode = Well::InjectorCMode::BHP;
                 ws.bhp = inj_controls.bhp_limit;
@@ -778,7 +778,7 @@ prepareForPotentialCalculations(const SummaryState& summary_state,
         if (!(ws.production_cmode == Well::ProducerCMode::BHP)){
             if (has_thp){
                 ws.production_cmode = Well::ProducerCMode::THP;
-                ws.thp = prod_controls.thp_limit;
+                ws.thp = this->getTHPConstraint(summary_state);
             } else {
                 ws.production_cmode = Well::ProducerCMode::BHP;
                 ws.bhp = prod_controls.bhp_limit;
