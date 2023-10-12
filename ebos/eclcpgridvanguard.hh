@@ -35,6 +35,7 @@
 #include <opm/common/TimingMacros.hpp>
 
 #include <opm/models/common/multiphasebaseproperties.hh>
+#include <opm/models/blackoil/blackoilproperties.hh>
 
 #include <array>
 #include <functional>
@@ -100,7 +101,10 @@ public:
     using GridView = GetPropType<TypeTag, Properties::GridView>;
     using TransmissibilityType = EclTransmissibility<Grid, GridView, ElementMapper, CartesianIndexMapper, Scalar>;
     static constexpr int dimensionworld = Grid::dimensionworld;
-
+    using Indices = GetPropType<TypeTag, Properties::Indices>;
+    static constexpr bool waterEnabled = Indices::waterEnabled;
+    static constexpr bool gasEnabled = Indices::gasEnabled;
+    static constexpr bool oilEnabled = Indices::oilEnabled;
 private:
     using Element = typename GridView::template Codim<0>::Entity;
 
@@ -108,7 +112,87 @@ public:
     EclCpGridVanguard(Simulator& simulator)
         : EclBaseVanguard<TypeTag>(simulator)
     {
+        this->checkConsistency();
         this->callImplementationInit();
+    }
+
+    /*!
+     * Checking consistency of simulator
+     */
+    void checkConsistency()
+    {
+        const auto& runspec = this->eclState().runspec();
+        const auto& config = this->eclState().getSimulationConfig();
+        const auto& phases = runspec.phases();
+
+        // check for correct module setup
+        if (config.isThermal()) {
+            if (getPropValue<TypeTag, Properties::EnableEnergy>() == false) {
+                throw std::runtime_error("Input specifies energy while simulator has disabled it, try xxx_energy");
+            }
+        } else {
+            if (getPropValue<TypeTag, Properties::EnableEnergy>() == true) {
+                throw std::runtime_error("Input specifies no energy while simulator has energy, try run without _energy");
+            }
+        }
+
+        if (config.isDiffusive()) {
+            if (getPropValue<TypeTag, Properties::EnableDiffusion>() == false) {
+                throw std::runtime_error("Input specifies diffusion while simulator has disabled it, try xxx_diffusion");
+            }
+        }
+
+        if (runspec.micp()) {
+            if (getPropValue<TypeTag, Properties::EnableMICP>() == false) {
+                throw std::runtime_error("Input specifies MICP while simulator has it disabled");
+            }
+        }
+
+        if (phases.active(Phase::BRINE)) {
+            if (getPropValue<TypeTag, Properties::EnableBrine>() == false) {
+                throw std::runtime_error("Input specifies Brine while simulator has it disabled");
+            }
+        }
+
+        if (phases.active(Phase::POLYMER)) {
+            if (getPropValue<TypeTag, Properties::EnablePolymer>() == false) {
+                throw std::runtime_error("Input specifies Polymer while simulator has it disabled");
+            }
+        }
+
+        // checking for correct phases is more difficult TODO!
+        if (phases.active(Phase::ZFRACTION)) {
+            if (getPropValue<TypeTag, Properties::EnableExtbo>() == false) {
+                throw std::runtime_error("Input specifies ExBo while simulator has it disabled");
+            }
+        }
+        if (phases.active(Phase::FOAM)) {
+            if (getPropValue<TypeTag, Properties::EnableFoam>() == false) {
+                throw std::runtime_error("Input specifies Foam while simulator has it disabled");
+            }
+        }
+
+        if (phases.active(Phase::SOLVENT)) {
+            if (getPropValue<TypeTag, Properties::EnableSolvent>() == false) {
+                throw std::runtime_error("Input specifies Solvent while simulator has it disabled");
+            }
+        }
+        if(phases.active(Phase::WATER)){
+            if(waterEnabled == false){
+                throw std::runtime_error("Input specifies water while simulator has it disabled");
+            }
+        }
+        if(phases.active(Phase::GAS)){
+            if(gasEnabled == false){
+                throw std::runtime_error("Input specifies gas while simulator has it disabled");
+            }
+        }
+        if(phases.active(Phase::OIL)){
+            if(oilEnabled == false){
+                throw std::runtime_error("Input specifies oil while simulator has it disabled");
+            }
+        }
+
     }
 
     /*!
@@ -143,8 +227,8 @@ public:
         this->doLoadBalance_(this->edgeWeightsMethod(), this->ownersFirst(),
                              this->serialPartitioning(), this->enableDistributedWells(),
                              this->zoltanImbalanceTol(), this->gridView(),
-                             this->schedule(), this->centroids_,
-                             this->eclState(), this->parallelWells_, this->numJacobiBlocks());
+                             this->schedule(), this->eclState(),
+                             this->parallelWells_, this->numJacobiBlocks());
 #endif
 
         this->updateGridView_();
@@ -160,7 +244,7 @@ public:
     unsigned int gridEquilIdxToGridIdx(unsigned int elemIndex) const {
          return elemIndex;
      }
- 
+
     unsigned int gridIdxToEquilGridIdx(unsigned int elemIndex) const {
         return elemIndex;
     }
@@ -174,7 +258,7 @@ public:
     std::function<std::array<double,dimensionworld>(int)>
     cellCentroids() const
     {
-        return this->cellCentroids_(this->cartesianIndexMapper());
+        return this->cellCentroids_(this->cartesianIndexMapper(), true);
     }
 
     const std::vector<int>& globalCell()

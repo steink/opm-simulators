@@ -174,6 +174,10 @@ template<class TypeTag, class MyTypeTag>
 struct UseAverageDensityMsWells {
     using type = UndefinedProperty;
 };
+template<class TypeTag, class MyTypeTag>
+struct LocalWellSolveControlSwitching {
+    using type = UndefinedProperty;
+};
 // Network solver parameters
 template<class TypeTag, class MyTypeTag>
 struct NetworkMaxStrictIterations {
@@ -201,6 +205,10 @@ struct LocalToleranceScalingMb {
 };
 template<class TypeTag, class MyTypeTag>
 struct LocalToleranceScalingCnv {
+    using type = UndefinedProperty;
+};
+template<class TypeTag, class MyTypeTag>
+struct NlddNumInitialNewtonIter {
     using type = UndefinedProperty;
 };
 template<class TypeTag, class MyTypeTag>
@@ -366,6 +374,11 @@ template<class TypeTag>
 struct UseAverageDensityMsWells<TypeTag, TTag::FlowModelParameters> {
     static constexpr bool value = false;
 };
+template<class TypeTag>
+struct LocalWellSolveControlSwitching<TypeTag, TTag::FlowModelParameters> {
+    static constexpr bool value = false;
+};
+
 // Network solver parameters
 template<class TypeTag>
 struct NetworkMaxStrictIterations<TypeTag, TTag::FlowModelParameters> {
@@ -396,6 +409,11 @@ template<class TypeTag>
 struct LocalToleranceScalingCnv<TypeTag, TTag::FlowModelParameters> {
     using type = GetPropType<TypeTag, Scalar>;
     static constexpr type value = 0.01;
+};
+template<class TypeTag>
+struct NlddNumInitialNewtonIter<TypeTag, TTag::FlowModelParameters> {
+    using type = int;
+    static constexpr auto value = type{1};
 };
 template<class TypeTag>
 struct NumLocalDomains<TypeTag, TTag::FlowModelParameters> {
@@ -530,6 +548,9 @@ namespace Opm
         /// Whether to approximate segment densities by averaging over segment and its outlet 
         bool use_average_density_ms_wells_;
 
+        /// Whether to allow control switching during local well solutions 
+        bool local_well_solver_control_switching_;
+
         /// Maximum number of iterations in the network solver before relaxing tolerance
         int network_max_strict_iterations_;
         
@@ -546,6 +567,7 @@ namespace Opm
         double local_tolerance_scaling_mb_;
         double local_tolerance_scaling_cnv_;
 
+        int nldd_num_initial_newton_iter_{1};
         int num_local_domains_{0};
         double local_domain_partition_imbalance_{1.03};
         std::string local_domain_partition_method_;
@@ -586,6 +608,7 @@ namespace Opm
             check_well_operability_iter_ = EWOMS_GET_PARAM(TypeTag, bool, EnableWellOperabilityCheckIter);
             max_number_of_well_switches_ = EWOMS_GET_PARAM(TypeTag, int, MaximumNumberOfWellSwitches);
             use_average_density_ms_wells_ = EWOMS_GET_PARAM(TypeTag, bool, UseAverageDensityMsWells);
+            local_well_solver_control_switching_ = EWOMS_GET_PARAM(TypeTag, bool, LocalWellSolveControlSwitching);
             nonlinear_solver_ = EWOMS_GET_PARAM(TypeTag, std::string, NonlinearSolver);
             std::string approach = EWOMS_GET_PARAM(TypeTag, std::string, LocalSolveApproach);
             if (approach == "jacobi") {
@@ -599,6 +622,7 @@ namespace Opm
             max_local_solve_iterations_ = EWOMS_GET_PARAM(TypeTag, int, MaxLocalSolveIterations);
             local_tolerance_scaling_mb_ = EWOMS_GET_PARAM(TypeTag, double, LocalToleranceScalingMb);
             local_tolerance_scaling_cnv_ = EWOMS_GET_PARAM(TypeTag, double, LocalToleranceScalingCnv);
+            nldd_num_initial_newton_iter_ = EWOMS_GET_PARAM(TypeTag, int, NlddNumInitialNewtonIter);
             num_local_domains_ = EWOMS_GET_PARAM(TypeTag, int, NumLocalDomains);
             local_domain_partition_imbalance_ = std::max(1.0, EWOMS_GET_PARAM(TypeTag, double, LocalDomainsPartitioningImbalance));
             local_domain_partition_method_ = EWOMS_GET_PARAM(TypeTag, std::string, LocalDomainsPartitioningMethod);
@@ -651,6 +675,7 @@ namespace Opm
             EWOMS_REGISTER_PARAM(TypeTag, bool, EnableWellOperabilityCheckIter, "Enable the well operability checking during iterations");
             EWOMS_REGISTER_PARAM(TypeTag, int, MaximumNumberOfWellSwitches, "Maximum number of times a well can switch to the same control");
             EWOMS_REGISTER_PARAM(TypeTag, bool, UseAverageDensityMsWells, "Approximate segment densitities by averaging over segment and its outlet");
+            EWOMS_REGISTER_PARAM(TypeTag, bool, LocalWellSolveControlSwitching, "Allow control switching during local well solutions");
             EWOMS_REGISTER_PARAM(TypeTag, int, NetworkMaxStrictIterations, "Maximum iterations in network solver before relaxing tolerance");
             EWOMS_REGISTER_PARAM(TypeTag, int, NetworkMaxIterations, "Maximum number of iterations in the network solver before giving up");
             EWOMS_REGISTER_PARAM(TypeTag, std::string, NonlinearSolver, "Choose nonlinear solver. Valid choices are newton or nldd.");
@@ -658,6 +683,7 @@ namespace Opm
             EWOMS_REGISTER_PARAM(TypeTag, int, MaxLocalSolveIterations, "Max iterations for local solves with NLDD nonlinear solver.");
             EWOMS_REGISTER_PARAM(TypeTag, Scalar, LocalToleranceScalingMb, "Set lower than 1.0 to use stricter convergence tolerance for local solves.");
             EWOMS_REGISTER_PARAM(TypeTag, Scalar, LocalToleranceScalingCnv, "Set lower than 1.0 to use stricter convergence tolerance for local solves.");
+            EWOMS_REGISTER_PARAM(TypeTag, int, NlddNumInitialNewtonIter, "Number of initial global Newton iterations when running the NLDD nonlinear solver.");
             EWOMS_REGISTER_PARAM(TypeTag, int, NumLocalDomains, "Number of local domains for NLDD nonlinear solver.");
             EWOMS_REGISTER_PARAM(TypeTag, Scalar, LocalDomainsPartitioningImbalance, "Subdomain partitioning imbalance tolerance. 1.03 is 3 percent imbalance.");
             EWOMS_REGISTER_PARAM(TypeTag, std::string, LocalDomainsPartitioningMethod, "Subdomain partitioning method. "

@@ -41,7 +41,6 @@ list (APPEND MAIN_SOURCE_FILES
   opm/core/props/satfunc/RelpermDiagnostics.cpp
   opm/simulators/timestepping/SimulatorReport.cpp
   opm/simulators/flow/Banners.cpp
-  opm/simulators/flow/countGlobalCells.cpp
   opm/simulators/flow/ConvergenceOutputConfiguration.cpp
   opm/simulators/flow/EclActionHandler.cpp
   opm/simulators/flow/EclInterRegFlows.cpp
@@ -94,11 +93,13 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/wells/BlackoilWellModelGeneric.cpp
   opm/simulators/wells/BlackoilWellModelGuideRates.cpp
   opm/simulators/wells/BlackoilWellModelRestart.cpp
+  opm/simulators/wells/ConnFiltrateData.cpp
   opm/simulators/wells/GasLiftCommon.cpp
   opm/simulators/wells/GasLiftGroupInfo.cpp
   opm/simulators/wells/GasLiftSingleWellGeneric.cpp
   opm/simulators/wells/GasLiftStage2.cpp
   opm/simulators/wells/GlobalWellInfo.cpp
+  opm/simulators/wells/GroupEconomicLimitsChecker.cpp
   opm/simulators/wells/GroupState.cpp
   opm/simulators/wells/MSWellHelpers.cpp
   opm/simulators/wells/MultisegmentWellAssemble.cpp
@@ -144,7 +145,7 @@ list (APPEND MAIN_SOURCE_FILES
   )
 
 
-if (DAMARIS_FOUND AND MPI_FOUND)
+if (Damaris_FOUND AND MPI_FOUND)
   list (APPEND MAIN_SOURCE_FILES opm/simulators/utils/DamarisOutputModule.cpp)
   list (APPEND MAIN_SOURCE_FILES opm/simulators/utils/DamarisKeywords.cpp)
   list (APPEND MAIN_SOURCE_FILES opm/simulators/utils/initDamarisXmlFile.cpp)
@@ -262,6 +263,7 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_parallelwellinfo.cpp
   tests/test_partitionCells.cpp
   tests/test_preconditionerfactory.cpp
+  tests/test_privarspacking.cpp
   tests/test_relpermdiagnostics.cpp
   tests/test_RestartSerialization.cpp
   tests/test_stoppedwells.cpp
@@ -406,6 +408,7 @@ list (APPEND PUBLIC_HEADER_FILES
   ebos/eclproblem.hh
   ebos/eclproblem_properties.hh
   ebos/eclsolutioncontainers.hh
+  ebos/ecltimesteppingparams.hh
   ebos/eclthresholdpressure.hh
   ebos/ecltracermodel.hh
   ebos/ecltransmissibility.hh
@@ -415,6 +418,7 @@ list (APPEND PUBLIC_HEADER_FILES
   ebos/hdf5serializer.hh
   ebos/vtkecltracermodule.hh
   opm/simulators/flow/countGlobalCells.hpp
+  opm/simulators/flow/priVarsPacking.hpp
   opm/simulators/flow/BlackoilModelEbos.hpp
   opm/simulators/flow/BlackoilModelEbosNldd.hpp
   opm/simulators/flow/BlackoilModelParametersEbos.hpp
@@ -513,7 +517,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/utils/moduleVersion.hpp
   opm/simulators/utils/ParallelEclipseState.hpp
   opm/simulators/utils/ParallelRestart.hpp
-  opm/simulators/utils/PropsCentroidsDataHandle.hpp
+  opm/simulators/utils/PropsDataHandle.hpp
   opm/simulators/utils/SerializationPackers.hpp
   opm/simulators/utils/VectorVectorDataHandle.hpp
   opm/simulators/utils/PressureAverage.hpp
@@ -525,6 +529,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/BlackoilWellModelGeneric.hpp
   opm/simulators/wells/BlackoilWellModelGuideRates.hpp
   opm/simulators/wells/BlackoilWellModelRestart.hpp
+  opm/simulators/wells/ConnFiltrateData.hpp
   opm/simulators/wells/GasLiftCommon.hpp
   opm/simulators/wells/GasLiftGroupInfo.hpp
   opm/simulators/wells/GasLiftSingleWellGeneric.hpp
@@ -533,6 +538,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/GasLiftStage2.hpp
   opm/simulators/wells/GasLiftWellState.hpp
   opm/simulators/wells/GlobalWellInfo.hpp
+  opm/simulators/wells/GroupEconomicLimitsChecker.hpp
   opm/simulators/wells/GroupState.hpp
   opm/simulators/wells/MSWellHelpers.hpp
   opm/simulators/wells/MultisegmentWell.hpp
@@ -583,6 +589,10 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/WellTest.hpp
   opm/simulators/wells/WGState.hpp
   )
+
+if (Damaris_FOUND AND MPI_FOUND)
+  list (APPEND PUBLIC_HEADER_FILES ebos/damariswriter.hh)
+endif()
 
 if(HDF5_FOUND)
   list(APPEND PUBLIC_HEADER_FILES

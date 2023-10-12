@@ -519,6 +519,41 @@ add_test_compareECLFiles(CASENAME udq_in_actionx
                          REL_TOL ${rel_tol}
                          DIR udq_actionx)
 
+add_test_compareECLFiles(CASENAME cskin-01
+                         FILENAME CSKIN-01
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR cskin)
+
+add_test_compareECLFiles(CASENAME cskin-02
+                         FILENAME CSKIN-02
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR cskin)
+
+add_test_compareECLFiles(CASENAME cskin-03
+                         FILENAME CSKIN-03
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR cskin)
+
+add_test_compareECLFiles(CASENAME cskin-04
+                         FILENAME CSKIN-04
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR cskin)
+
+add_test_compareECLFiles(CASENAME cskin-05
+                         FILENAME CSKIN-05
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR cskin)
+
 add_test_compareECLFiles(CASENAME co2store
                          FILENAME CO2STORE
                          SIMULATOR flow
@@ -528,6 +563,13 @@ add_test_compareECLFiles(CASENAME co2store
 
 add_test_compareECLFiles(CASENAME co2store_gw
                          FILENAME CO2STORE_GW
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR co2store)
+
+add_test_compareECLFiles(CASENAME co2store_gw_dirichlet
+                         FILENAME CO2STORE_GW_DIRICHLET
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
@@ -568,6 +610,41 @@ add_test_compareECLFiles(CASENAME co2store_energy
                          REL_TOL ${rel_tol}
                          DIR co2store)
 
+add_test_compareECLFiles(CASENAME h2store
+                         FILENAME H2STORE
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR h2store)
+
+add_test_compareECLFiles(CASENAME h2store_gw
+                         FILENAME H2STORE_GW
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR h2store)
+
+add_test_compareECLFiles(CASENAME h2store_gaswat
+                         FILENAME H2STORE_GASWAT
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR h2store)
+
+add_test_compareECLFiles(CASENAME h2store_diffusive
+                         FILENAME H2STORE_DIFFUSIVE
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR h2store)
+
+add_test_compareECLFiles(CASENAME h2store_energy
+                         FILENAME H2STORE_ENERGY
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR h2store)
+
 if (opm-common_EMBEDDED_PYTHON)
   add_test_compareECLFiles(CASENAME udq_pyaction
                            FILENAME PYACTION_WCONPROD
@@ -589,7 +666,8 @@ add_test_compareECLFiles(CASENAME multflt_model2
 			  SIMULATOR flow
 			  ABS_TOL ${abs_tol}
 			  REL_TOL ${rel_tol}
-			  DIR model2)
+			  DIR model2
+			  TEST_ARGS --solver-max-time-step-in-days=10)
 
 add_test_compareECLFiles(CASENAME multflt_sched_model2
 			  FILENAME 3_A_MPI_MULTFLT_SCHED_MODEL2
@@ -603,7 +681,8 @@ add_test_compareECLFiles(CASENAME multpvv_model2
 			  SIMULATOR flow
 			  ABS_TOL ${abs_tol}
 			  REL_TOL ${rel_tol}
-			  DIR model2)
+			  DIR model2
+			  TEST_ARGS --solver-max-time-step-in-days=10)
 
 add_test_compareECLFiles(CASENAME swatinit_model2
 			  FILENAME 5_SWATINIT_MODEL2
@@ -867,6 +946,13 @@ add_test_compareECLFiles(CASENAME wsegvalv
 			  SIMULATOR flow
 			  ABS_TOL ${abs_tol}
 			  REL_TOL ${rel_tol})
+
+add_test_compareECLFiles(CASENAME wsegvalv_2d_vert
+                         FILENAME  MSW-2D-VERT-02
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR msw)
 
 add_test_compareECLFiles(CASENAME nnc
                          FILENAME NNC_AND_EDITNNC

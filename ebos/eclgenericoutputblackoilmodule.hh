@@ -56,11 +56,11 @@ public:
      Scalar* getPRESSURE_ptr(void) {
         return (this->fluidPressure_.data()) ;
     };
-    
+
     int  getPRESSURE_size( void ) {
         return (this->fluidPressure_.size()) ;
     };
-    
+
     // write cumulative production and injection reports to output
     void outputCumLog(std::size_t reportStepNum,
                       const bool substep,
@@ -207,6 +207,11 @@ public:
         return enableFlows_;
     }
 
+    bool hasBlockFlows() const
+    {
+        return blockFlows_;
+    }
+
     bool anyFlows() const
     {
         return anyFlows_;
@@ -286,6 +291,7 @@ protected:
                                    const SummaryState& summaryState,
                                    bool enableEnergy,
                                    bool enableTemperature,
+                                   bool enableMech,
                                    bool enableSolvent,
                                    bool enablePolymer,
                                    bool enableFoam,
@@ -347,6 +353,7 @@ protected:
 
     bool enableEnergy_;
     bool enableTemperature_;
+    bool enableMech_;
 
     bool enableSolvent_;
     bool enablePolymer_;
@@ -363,6 +370,7 @@ protected:
 
     bool anyFlows_;
     bool anyFlores_;
+    bool blockFlows_;
     bool enableFlows_;
     bool enableFlores_;
     bool enableFlowsn_;
@@ -426,6 +434,33 @@ protected:
     ScalarBuffer cCalcite_;
     ScalarBuffer pcow_;
     ScalarBuffer pcog_;
+
+    // buffers for mechanical output
+    ScalarBuffer mechPotentialForce_;
+    ScalarBuffer mechPotentialPressForce_;
+    ScalarBuffer mechPotentialTempForce_;
+
+    ScalarBuffer dispX_;
+    ScalarBuffer dispY_;
+    ScalarBuffer dispZ_;
+    ScalarBuffer stressXX_;
+    ScalarBuffer stressYY_;
+    ScalarBuffer stressZZ_;
+    ScalarBuffer stressXY_;
+    ScalarBuffer stressXZ_;
+    ScalarBuffer stressYZ_;
+    ScalarBuffer delstressXX_;
+    ScalarBuffer delstressYY_;
+    ScalarBuffer delstressZZ_;
+    ScalarBuffer delstressXY_;
+    ScalarBuffer delstressXZ_;
+    ScalarBuffer delstressYZ_;
+    ScalarBuffer strainXX_;
+    ScalarBuffer strainYY_;
+    ScalarBuffer strainZZ_;
+    ScalarBuffer strainXY_;
+    ScalarBuffer strainXZ_;
+    ScalarBuffer strainYZ_;
 
     std::array<ScalarBuffer, numPhases> saturation_;
     std::array<ScalarBuffer, numPhases> invB_;

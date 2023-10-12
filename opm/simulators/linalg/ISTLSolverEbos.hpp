@@ -103,6 +103,7 @@ struct FlexibleSolverInfo
                 const PropertyTree& prm,
                 std::size_t pressureIndex,
                 std::function<Vector()> trueFunc,
+                const bool forceSerial,
                 Comm& comm);
 
     std::unique_ptr<AbstractSolverType> solver_;
@@ -177,13 +178,16 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
         /// \param[in] simulator   The opm-models simulator object
         /// \param[in] parameters  Explicit parameters for solver setup, do not
         ///                        read them from command line parameters.
-        ISTLSolverEbos(const Simulator& simulator, const FlowLinearSolverParameters& parameters)
+        /// \param[in] forceSerial If true, will set up a serial linear solver only,
+        ///                        local to the current rank, instead of creating a
+        ///                        parallel (MPI distributed) linear solver.
+        ISTLSolverEbos(const Simulator& simulator, const FlowLinearSolverParameters& parameters, bool forceSerial = false)
             : simulator_(simulator),
               iterations_( 0 ),
-              calls_( 0 ),
               converged_(false),
               matrix_(nullptr),
-              parameters_(parameters)
+              parameters_{parameters},
+              forceSerial_(forceSerial)
         {
             initialize();
         }
@@ -193,20 +197,54 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
         explicit ISTLSolverEbos(const Simulator& simulator)
             : simulator_(simulator),
               iterations_( 0 ),
-              calls_( 0 ),
+              solveCount_(0),
               converged_(false),
               matrix_(nullptr)
         {
-            parameters_.template init<TypeTag>(simulator_.vanguard().eclState().getSimulationConfig().useCPR());
+            parameters_.resize(1);
+            parameters_[0].template init<TypeTag>(simulator_.vanguard().eclState().getSimulationConfig().useCPR());
             initialize();
         }
 
-        void initialize(bool have_gpu = false)
+        void initialize()
         {
             OPM_TIMEBLOCK(IstlSolverEbos);
-            prm_ = setupPropertyTree(parameters_,
-                                     EWOMS_PARAM_IS_SET(TypeTag, int, LinearSolverMaxIter),
-                                     EWOMS_PARAM_IS_SET(TypeTag, double, LinearSolverReduction));
+
+            if (parameters_[0].linsolver_ == "hybrid") {
+                // Experimental hybrid configuration.
+                // When chosen, will set up two solvers, one with CPRW
+                // and the other with ILU0 preconditioner. More general
+                // options may be added later.
+                prm_.clear();
+                parameters_.clear();
+                {
+                    FlowLinearSolverParameters para;
+                    para.init<TypeTag>(false);
+                    para.linsolver_ = "cprw";
+                    parameters_.push_back(para);
+                    prm_.push_back(setupPropertyTree(parameters_[0],
+                                                     EWOMS_PARAM_IS_SET(TypeTag, int, LinearSolverMaxIter),
+                                                     EWOMS_PARAM_IS_SET(TypeTag, double, LinearSolverReduction)));
+                }
+                {
+                    FlowLinearSolverParameters para;
+                    para.init<TypeTag>(false);
+                    para.linsolver_ = "ilu0";
+                    parameters_.push_back(para);
+                    prm_.push_back(setupPropertyTree(parameters_[1],
+                                                     EWOMS_PARAM_IS_SET(TypeTag, int, LinearSolverMaxIter),
+                                                     EWOMS_PARAM_IS_SET(TypeTag, double, LinearSolverReduction)));
+                }
+                // ------------
+            } else {
+                // Do a normal linear solver setup.
+                assert(parameters_.size() == 1);
+                assert(prm_.empty());
+                prm_.push_back(setupPropertyTree(parameters_[0],
+                                                 EWOMS_PARAM_IS_SET(TypeTag, int, LinearSolverMaxIter),
+                                                 EWOMS_PARAM_IS_SET(TypeTag, double, LinearSolverReduction)));
+            }
+            flexibleSolver_.resize(prm_.size());
 
             const bool on_io_rank = (simulator_.gridView().comm().rank() == 0);
 #if HAVE_MPI
@@ -229,26 +267,44 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
                 OPM_THROW_NOLOG(std::runtime_error, msg);
             }
 
-            flexibleSolver_.interiorCellNum_ = detail::numMatrixRowsToUseInSolver(simulator_.vanguard().grid(), true);
+            const int interiorCellNum_ = detail::numMatrixRowsToUseInSolver(simulator_.vanguard().grid(), true);
+            for (auto& f : flexibleSolver_) {
+                f.interiorCellNum_ = interiorCellNum_;
+            }
 
             // Print parameters to PRT/DBG logs.
-            if (on_io_rank && parameters_.linear_solver_print_json_definition_) {
+            if (on_io_rank && parameters_[activeSolverNum_].linear_solver_print_json_definition_) {
                 std::ostringstream os;
-                os << "Property tree for linear solver:\n";
-                prm_.write_json(os, true);
+                os << "Property tree for linear solvers:\n";
+                for (std::size_t i = 0; i<prm_.size(); i++) {
+                    prm_[i].write_json(os, true);
+                    std::cerr<< "debug: ["<<i<<"] : " << os.str() <<std::endl;
+                }
                 OpmLog::note(os.str());
             }
-            if(have_gpu){
-                if (EWOMS_GET_PARAM(TypeTag, std::string, AcceleratorMode) != "none") {
-                    OPM_THROW(std::logic_error,"Cannot use accelerated solver since CUDA, OpenCL and amgcl were not found by cmake");
-                }
-            }
-
         }
 
         // nothing to clean here
         void eraseMatrix()
         {
+        }
+
+        void setActiveSolver(const int num)
+        {
+            if (num > static_cast<int>(prm_.size()) - 1) {
+                OPM_THROW(std::logic_error, "Solver number " + std::to_string(num) + " not available.");
+            }
+            activeSolverNum_ = num;
+            auto cc = Dune::MPIHelper::getCollectiveCommunication();
+            if (cc.rank() == 0) {
+                OpmLog::debug("Active solver = " + std::to_string(activeSolverNum_)
+                              + " (" + parameters_[activeSolverNum_].linsolver_ + ")");
+            }
+        }
+
+        int numAvailableSolvers()
+        {
+            return flexibleSolver_.size();
         }
 
         void prepare(const SparseMatrixAdapter& M, Vector& b)
@@ -261,7 +317,7 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
             OPM_TIMEBLOCK(istlSolverEbosPrepare);
             const bool firstcall = (matrix_ == nullptr);
 #if HAVE_MPI
-            if (firstcall) {
+            if (firstcall && isParallel()) {
                 const std::size_t size = M.N();
                 detail::copyParValues(parallelInformation_, size, *comm_);
             }
@@ -285,7 +341,8 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
             }
             rhs_ = &b;
 
-            if (isParallel() && prm_.get<std::string>("preconditioner.type") != "ParOverILU0") {
+            // TODO: check all solvers, not just one.
+            if (isParallel() && prm_[activeSolverNum_].template get<std::string>("preconditioner.type") != "ParOverILU0") {
                 detail::makeOverlapRowsInvalid(getMatrix(), overlapRows_);
             }
             prepareFlexibleSolver();
@@ -307,12 +364,20 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
             // matrix_ = &M.istlMatrix(); // Must be handled in prepare() instead.
         }
 
+        int getSolveCount() const {
+            return solveCount_;
+        }
+
+        void resetSolveCount() {
+            solveCount_ = 0;
+        }
+
         bool solve(Vector& x)
         {
             OPM_TIMEBLOCK(istlSolverEbosSolve);
-            calls_ += 1;
+            ++solveCount_;
             // Write linear system if asked for.
-            const int verbosity = prm_.get<int>("verbosity", 0);
+            const int verbosity = prm_[activeSolverNum_].get("verbosity", 0);
             const bool write_matrix = verbosity > 10;
             if (write_matrix) {
                 Helper::writeSystem(simulator_, //simulator is only used to get names
@@ -325,8 +390,8 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
             Dune::InverseOperatorResult result;
             {
                 OPM_TIMEBLOCK(flexibleSolverApply);
-                assert(flexibleSolver_.solver_);
-                flexibleSolver_.solver_->apply(x, *rhs_, result);
+                assert(flexibleSolver_[activeSolverNum_].solver_);
+                flexibleSolver_[activeSolverNum_].solver_->apply(x, *rhs_, result);
             }
 
             // Check convergence, iterations etc.
@@ -348,6 +413,8 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
         /// \copydoc NewtonIterationBlackoilInterface::parallelInformation
         const std::any& parallelInformation() const { return parallelInformation_; }
 
+        const CommunicationType* comm() const { return comm_.get(); }
+
     protected:
 #if HAVE_MPI
         using Comm = Dune::OwnerOverlapCopyCommunication<int, int>;
@@ -359,7 +426,7 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
             iterations_ = result.iterations;
             converged_ = result.converged;
             if(!converged_){
-                if(result.reduction < parameters_.relaxed_linear_solver_reduction_){
+                if(result.reduction < parameters_[activeSolverNum_].relaxed_linear_solver_reduction_){
                     std::stringstream ss;
                     ss<< "Full linear solver tolerance not achived. The reduction is:" << result.reduction
                       << " after " << result.iterations << " iterations ";
@@ -368,7 +435,7 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
                 }
             }
             // Check for failure of linear solver.
-            if (!parameters_.ignoreConvergenceFailure_ && !converged_) {
+            if (!parameters_[activeSolverNum_].ignoreConvergenceFailure_ && !converged_) {
                 const std::string msg("Convergence failure for linear solver.");
                 OPM_THROW_NOLOG(NumericalProblem, msg);
             }
@@ -377,7 +444,7 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
 
         bool isParallel() const {
 #if HAVE_MPI
-            return comm_->communicator().size() > 1;
+            return !forceSerial_ && comm_->communicator().size() > 1;
 #else
             return false;
 #endif
@@ -395,20 +462,21 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
 
                 if (!useWellConn_) {
                     auto wellOp = std::make_unique<WellModelOperator>(simulator_.problem().wellModel());
-                    flexibleSolver_.wellOperator_ = std::move(wellOp);
+                    flexibleSolver_[activeSolverNum_].wellOperator_ = std::move(wellOp);
                 }
                 OPM_TIMEBLOCK(flexibleSolverCreate);
-                flexibleSolver_.create(getMatrix(),
-                                       isParallel(),
-                                       prm_,
-                                       pressureIndex,
-                                       trueFunc,
-                                       *comm_);
+                flexibleSolver_[activeSolverNum_].create(getMatrix(),
+                                                         isParallel(),
+                                                         prm_[activeSolverNum_],
+                                                         pressureIndex,
+                                                         trueFunc,
+                                                         forceSerial_,
+                                                         *comm_);
             }
             else
             {
                 OPM_TIMEBLOCK(flexibleSolverUpdate);
-                flexibleSolver_.pre_->update();
+                flexibleSolver_[activeSolverNum_].pre_->update();
             }
         }
 
@@ -419,36 +487,39 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
         {
             // Decide if we should recreate the solver or just do
             // a minimal preconditioner update.
-            if (!flexibleSolver_.solver_) {
+            if (flexibleSolver_.empty()) {
                 return true;
             }
-            if (this->parameters_.cpr_reuse_setup_ == 0) {
+            if (!flexibleSolver_[activeSolverNum_].solver_) {
+                return true;
+            }
+            if (this->parameters_[activeSolverNum_].cpr_reuse_setup_ == 0) {
                 // Always recreate solver.
                 return true;
             }
-            if (this->parameters_.cpr_reuse_setup_ == 1) {
+            if (this->parameters_[activeSolverNum_].cpr_reuse_setup_ == 1) {
                 // Recreate solver on the first iteration of every timestep.
                 const int newton_iteration = this->simulator_.model().newtonMethod().numIterations();
                 return newton_iteration == 0;
             }
-            if (this->parameters_.cpr_reuse_setup_ == 2) {
+            if (this->parameters_[activeSolverNum_].cpr_reuse_setup_ == 2) {
                 // Recreate solver if the last solve used more than 10 iterations.
                 return this->iterations() > 10;
             }
-            if (this->parameters_.cpr_reuse_setup_ == 3) {
+            if (this->parameters_[activeSolverNum_].cpr_reuse_setup_ == 3) {
                 // Recreate solver if the last solve used more than 10 iterations.
                 return false;
             }
-            if (this->parameters_.cpr_reuse_setup_ == 4) {
+            if (this->parameters_[activeSolverNum_].cpr_reuse_setup_ == 4) {
                 // Recreate solver every 'step' solve calls.
-                const int step = this->parameters_.cpr_reuse_interval_;
-                const bool create = ((calls_ % step) == 0);
+                const int step = this->parameters_[activeSolverNum_].cpr_reuse_interval_;
+                const bool create = ((solveCount_ % step) == 0);
                 return create;
             }
 
             // If here, we have an invalid parameter.
             const bool on_io_rank = (simulator_.gridView().comm().rank() == 0);
-            std::string msg = "Invalid value: " + std::to_string(this->parameters_.cpr_reuse_setup_)
+            std::string msg = "Invalid value: " + std::to_string(this->parameters_[activeSolverNum_].cpr_reuse_setup_)
                 + " for --cpr-reuse-setup parameter, run with --help to see allowed values.";
             if (on_io_rank) {
                 OpmLog::error(msg);
@@ -487,7 +558,7 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
 
         const Simulator& simulator_;
         mutable int iterations_;
-        mutable int calls_;
+        mutable int solveCount_;
         mutable bool converged_;
         std::any parallelInformation_;
 
@@ -495,14 +566,16 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
         Matrix* matrix_;
         Vector *rhs_;
 
-        detail::FlexibleSolverInfo<Matrix,Vector,CommunicationType> flexibleSolver_;
+        int activeSolverNum_ = 0;
+        std::vector<detail::FlexibleSolverInfo<Matrix,Vector,CommunicationType>> flexibleSolver_;
         std::vector<int> overlapRows_;
         std::vector<int> interiorRows_;
 
         bool useWellConn_;
 
-        FlowLinearSolverParameters parameters_;
-        PropertyTree prm_;
+        std::vector<FlowLinearSolverParameters> parameters_;
+        bool forceSerial_ = false;
+        std::vector<PropertyTree> prm_;
 
         std::shared_ptr< CommunicationType > comm_;
     }; // end ISTLSolver

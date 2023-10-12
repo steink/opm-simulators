@@ -33,6 +33,7 @@
 
 #include <opm/input/eclipse/EclipseState/EclipseState.hpp>
 #include <opm/input/eclipse/Schedule/Group/GConSale.hpp>
+#include <opm/input/eclipse/Schedule/Group/GroupEconProductionLimits.hpp>
 #include <opm/input/eclipse/Schedule/Group/GConSump.hpp>
 #include <opm/input/eclipse/Schedule/Group/GuideRateConfig.hpp>
 #include <opm/input/eclipse/Schedule/Group/GuideRate.hpp>
@@ -49,6 +50,7 @@
 #include <opm/simulators/wells/BlackoilWellModelGuideRates.hpp>
 #include <opm/simulators/wells/BlackoilWellModelRestart.hpp>
 #include <opm/simulators/wells/GasLiftStage2.hpp>
+#include <opm/simulators/wells/GroupEconomicLimitsChecker.hpp>
 #include <opm/simulators/wells/ParallelWBPCalculation.hpp>
 #include <opm/simulators/wells/VFPProperties.hpp>
 #include <opm/simulators/wells/WellFilterCake.hpp>
@@ -373,6 +375,41 @@ initializeWellPerfData()
         parallelWellInfo.communicateFirstPerforation(hasFirstConnection);
 
         ++well_index;
+    }
+}
+
+void
+BlackoilWellModelGeneric::
+checkGEconLimits(
+        const Group& group,
+        const double simulation_time,
+        const int report_step_idx,
+        DeferredLogger& deferred_logger)
+{
+     // call recursively down the group hiearchy
+    for (const std::string& group_name : group.groups()) {
+        checkGEconLimits( schedule().getGroup(group_name, report_step_idx),
+                          simulation_time, report_step_idx, deferred_logger);
+    }
+
+    // check if gecon is used for this group
+    if (!schedule()[report_step_idx].gecon().has_group(group.name())) {
+        return;
+    }
+
+    GroupEconomicLimitsChecker checker {
+        *this, wellTestState(), group, simulation_time, report_step_idx, deferred_logger
+    };
+    if (checker.minOilRate() || checker.minGasRate()) {
+        checker.closeWells();
+    }
+    else if (checker.waterCut() || checker.GOR() || checker.WGR()) {
+        checker.doWorkOver();
+    }
+    if (checker.endRun() && (checker.numProducersOpenInitially() >= 1)
+                             && (checker.numProducersOpen() == 0))
+    {
+        checker.activateEndRun();
     }
 }
 
@@ -910,7 +947,7 @@ updateAndCommunicateGroupData(const int reportStepIdx,
     std::vector<double> groupTargetReductionInj(numPhases(), 0.0);
     WellGroupHelpers::updateGroupTargetReduction(fieldGroup, schedule(), reportStepIdx, /*isInjector*/ true, phase_usage_, guideRate_, well_state, this->groupState(), groupTargetReductionInj);
 
-    WellGroupHelpers::updateREINForGroups(fieldGroup, schedule(), reportStepIdx, phase_usage_, summaryState_, well_state_nupcol, this->groupState());
+    WellGroupHelpers::updateREINForGroups(fieldGroup, schedule(), reportStepIdx, phase_usage_, summaryState_, well_state_nupcol, this->groupState(), comm_.rank()==0);
     WellGroupHelpers::updateVREPForGroups(fieldGroup, schedule(), reportStepIdx, well_state_nupcol, this->groupState());
 
     WellGroupHelpers::updateReservoirRatesInjectionGroups(fieldGroup, schedule(), reportStepIdx, well_state_nupcol, this->groupState());
@@ -1253,27 +1290,27 @@ updateWellPotentials(const int reportStepIdx,
 
 void
 BlackoilWellModelGeneric::
-runWellPIScaling(const int timeStepIdx,
+runWellPIScaling(const int reportStepIdx,
                  DeferredLogger& local_deferredLogger)
 {
-    if (this->last_run_wellpi_.has_value() && (*this->last_run_wellpi_ == timeStepIdx)) {
+    if (this->last_run_wellpi_.has_value() && (*this->last_run_wellpi_ == reportStepIdx)) {
         // We've already run WELPI scaling for this report step.  Most
         // common for the very first report step.  Don't redo WELPI scaling.
         return;
     }
 
-    auto hasWellPIEvent = [this, timeStepIdx](const int well_index) -> bool
+    auto hasWellPIEvent = [this, reportStepIdx](const int well_index) -> bool
     {
-        return this->schedule()[timeStepIdx].wellgroup_events()
+        return this->schedule()[reportStepIdx].wellgroup_events()
             .hasEvent(this->wells_ecl_[well_index].name(),
                       ScheduleEvents::Events::WELL_PRODUCTIVITY_INDEX);
     };
 
-    auto updateEclWell = [this, timeStepIdx](const int well_index) -> void
+    auto updateEclWell = [this, reportStepIdx](const int well_index) -> void
     {
         const auto& schedule = this->schedule();
         const auto& wname = this->wells_ecl_[well_index].name();
-        this->wells_ecl_[well_index] = schedule.getWell(wname, timeStepIdx);
+        this->wells_ecl_[well_index] = schedule.getWell(wname, reportStepIdx);
 
         const auto& well = this->wells_ecl_[well_index];
         auto& pd     = this->well_perf_data_[well_index];
@@ -1291,12 +1328,12 @@ runWellPIScaling(const int timeStepIdx,
 
 
     auto rescaleWellPI =
-        [this, timeStepIdx](const int    well_index,
-                            const double newWellPI) -> void
+        [this, reportStepIdx](const int    well_index,
+                              const double newWellPI) -> void
     {
         const auto& wname = this->wells_ecl_[well_index].name();
 
-        schedule_.applyWellProdIndexScaling(wname, timeStepIdx, newWellPI);
+        schedule_.applyWellProdIndexScaling(wname, reportStepIdx, newWellPI);
     };
 
     // Minimal well setup to compute PI/II values
@@ -1304,13 +1341,13 @@ runWellPIScaling(const int timeStepIdx,
         auto saved_previous_wgstate = this->prevWGState();
         this->commitWGState();
 
-        this->createWellContainer(timeStepIdx);
+        this->createWellContainer(reportStepIdx);
         this->inferLocalShutWells();
 
-        this->initWellContainer(timeStepIdx);
+        this->initWellContainer(reportStepIdx);
 
         this->calculateProductivityIndexValues(local_deferredLogger);
-        this->calculateProductivityIndexValuesShutWells(timeStepIdx, local_deferredLogger);
+        this->calculateProductivityIndexValuesShutWells(reportStepIdx, local_deferredLogger);
 
         this->commitWGState(std::move(saved_previous_wgstate));
     }
@@ -1323,7 +1360,7 @@ runWellPIScaling(const int timeStepIdx,
         }
     }
 
-    this->last_run_wellpi_ = timeStepIdx;
+    this->last_run_wellpi_ = reportStepIdx;
 }
 
 bool
@@ -1491,7 +1528,7 @@ void BlackoilWellModelGeneric::updateInjFCMult(DeferredLogger& deferred_logger)
         if (well->isInjector()) {
             const auto it = filter_cake_.find(well->name());
             if (it != filter_cake_.end()) {
-                it->second.updateInjFCMult(*well, deferred_logger);
+                it->second.updateInjFCMult(*well, this->wellState(), deferred_logger);
                 well->updateFilterCakeMultipliers(it->second.multipliers());
             }
         }

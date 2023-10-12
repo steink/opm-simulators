@@ -166,6 +166,17 @@ double SingleWellState::sum_solvent_rates() const {
     return this->sum_connection_rates(this->perf_data.solvent_rates);
 }
 
+double SingleWellState::sum_filtrate_rate() const {
+    if (this->producer) return 0.;
+
+    return this->sum_connection_rates(this->perf_data.filtrate_data.rates);
+}
+
+double SingleWellState::sum_filtrate_total() const {
+    if (this->producer) return 0.;
+
+    return this->sum_connection_rates(this->perf_data.filtrate_data.total);
+}
 
 void SingleWellState::update_producer_targets(const Well& ecl_well, const SummaryState& st) {
     const double bhp_safety_factor = 0.99;
@@ -245,31 +256,28 @@ void SingleWellState::update_injector_targets(const Well& ecl_well, const Summar
         return;
     }
 
-
-    if (inj_controls.cmode == Well::InjectorCMode::GRUP) {
-        this->bhp = this->perf_data.pressure_first_connection * bhp_safety_factor;
-        return;
+    // we initialize all open wells with a rate to avoid singularities
+    double inj_surf_rate = 10.0 * Opm::unit::cubic(Opm::unit::meter) / Opm::unit::day;
+    if (inj_controls.cmode == Well::InjectorCMode::RATE) {
+        inj_surf_rate = inj_controls.surface_rate;
     }
 
-    if (inj_controls.cmode == Well::InjectorCMode::RATE) {
-        auto inj_surf_rate = inj_controls.surface_rate;
-        switch (inj_controls.injector_type) {
-        case InjectorType::WATER:
-            assert(pu.phase_used[BlackoilPhases::Aqua]);
-            this->surface_rates[pu.phase_pos[BlackoilPhases::Aqua]] = inj_surf_rate;
-            break;
-        case InjectorType::GAS:
-            assert(pu.phase_used[BlackoilPhases::Vapour]);
-            this->surface_rates[pu.phase_pos[BlackoilPhases::Vapour]] = inj_surf_rate;
-            break;
-        case InjectorType::OIL:
-            assert(pu.phase_used[BlackoilPhases::Liquid]);
-            this->surface_rates[pu.phase_pos[BlackoilPhases::Liquid]] = inj_surf_rate;
-            break;
-        case InjectorType::MULTI:
-            // Not currently handled, keep zero init.
-            break;
-        }
+    switch (inj_controls.injector_type) {
+    case InjectorType::WATER:
+        assert(pu.phase_used[BlackoilPhases::Aqua]);
+        this->surface_rates[pu.phase_pos[BlackoilPhases::Aqua]] = inj_surf_rate;
+        break;
+    case InjectorType::GAS:
+        assert(pu.phase_used[BlackoilPhases::Vapour]);
+        this->surface_rates[pu.phase_pos[BlackoilPhases::Vapour]] = inj_surf_rate;
+        break;
+    case InjectorType::OIL:
+        assert(pu.phase_used[BlackoilPhases::Liquid]);
+        this->surface_rates[pu.phase_pos[BlackoilPhases::Liquid]] = inj_surf_rate;
+        break;
+    case InjectorType::MULTI:
+        // Not currently handled, keep zero init.
+        break;
     }
 
     if (cmode_is_bhp)
@@ -300,6 +308,7 @@ bool SingleWellState::operator==(const SingleWellState& rhs) const
            this->reservoir_rates == rhs.reservoir_rates &&
            this->prev_surface_rates == rhs.prev_surface_rates &&
            this->perf_data == rhs.perf_data &&
+           this->filtrate_conc == rhs.filtrate_conc &&
            this->trivial_target == rhs.trivial_target &&
            this->segments == rhs.segments &&
            this->events == rhs.events &&

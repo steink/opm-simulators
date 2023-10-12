@@ -29,6 +29,7 @@
 #define EBOS_HH
 
 #include <ebos/eclproblem.hh>
+#include <ebos/ecltimesteppingparams.hh>
 
 #include <opm/models/utils/start.hh>
 
@@ -45,7 +46,7 @@ namespace Opm::Properties {
 
 namespace TTag {
 struct EbosTypeTag {
-    using InheritsFrom = std::tuple<FlowModelParameters, EclBaseProblem, BlackOilModel>;
+    using InheritsFrom = std::tuple<FlowModelParameters, EclBaseProblem, BlackOilModel, EclTimeSteppingParameters>;
 };
 }
 
@@ -110,6 +111,11 @@ struct EclAquiferModel<TypeTag, TTag::EbosTypeTag> {
 template<class TypeTag>
 struct LinearSolverSplice<TypeTag, TTag::EbosTypeTag> {
     using type = TTag::FlowIstlSolver;
+};
+
+template<>
+struct LinearSolverBackend<TTag::EbosTypeTag, TTag::FlowIstlSolverParams> {
+    using type = ISTLSolverEbos<TTag::EbosTypeTag>;
 };
 
 // the default for the allowed volumetric error for oil per second

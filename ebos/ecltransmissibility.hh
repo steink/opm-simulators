@@ -119,15 +119,27 @@ public:
      * either but at least it seems to be much better.
      */
     void finishInit(const std::function<unsigned int(unsigned int)>& map = {})
-    { update(true,map); }
+    {
+        this->update(true, map, /*applyNncMultRegT = */ true);
+    }
 
     /*!
      * \brief Compute all transmissibilities
      *
-     * \param global If true, update is called on all processes
-     * Also, this updates the "thermal half transmissibilities" if energy is enabled.
+     * \param[in] global Whether or not to call \c update() on all
+     *   processes.  Also, this updates the "thermal half
+     *   transmissibilities" if energy is enabled.
+     *
+     * \param[in] map Undocumented.
+     *
+     * \param[in] applyNncMultRegT Whether or not to apply regional
+     *   multipliers to explicit NNCs.  Explicit NNCs are those entered
+     *   directly in the input data, e.g., through the NNC/EDITNNC/EDITNNCR
+     *   keywords, or the result of generating connections to or within
+     *   numerical aquifers.  Default value: \c false, meaning do not apply
+     *   regional multipliers to explicit NNCs.
      */
-    void update(bool global, const std::function<unsigned int(unsigned int)>& map = {});
+    void update(bool global, const std::function<unsigned int(unsigned int)>& map = {}, bool applyNncMultRegT = false);
 
 protected:
     void updateFromEclState_(bool global);
@@ -202,15 +214,17 @@ protected:
     /// \brief Resets the grid transmissibilities according to EDITNNCR.
     void applyEditNncrToGridTrans_(const std::unordered_map<std::size_t,int>& globalToLocal);
 
+    void applyNncMultreg_(const std::unordered_map<std::size_t,int>& globalToLocal);
+
     void applyEditNncToGridTransHelper_(const std::unordered_map<std::size_t,int>& globalToLocal,
                                         const std::string& keyword, const std::vector<NNCdata>& nncs,
                                         const std::function<KeywordLocation(const NNCdata&)>& getLocation,
                                         const std::function<void(double&, const double&)>& apply);
 
     void extractPermeability_();
-        
+
     void extractPermeability_(const std::function<unsigned int(unsigned int)>& map);
-    
+
     void extractPorosity_();
 
     void computeHalfTrans_(Scalar& halfTrans,
@@ -252,7 +266,7 @@ protected:
     std::map<std::pair<unsigned, unsigned>, Scalar> thermalHalfTransBoundary_;
     bool enableEnergy_;
     bool enableDiffusivity_;
-    std::unordered_map<std::uint64_t, Scalar> thermalHalfTrans_;
+    std::unordered_map<std::uint64_t, Scalar> thermalHalfTrans_; //NB this is based on direction map size is ca 2*trans_ (diffusivity_)
     std::unordered_map<std::uint64_t, Scalar> diffusivity_;
 };
 

@@ -40,11 +40,18 @@
 #include <fmt/format.h>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <initializer_list>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -140,7 +147,7 @@ diffusivity(unsigned elemIdx1, unsigned elemIdx2) const
 
 template<class Grid, class GridView, class ElementMapper, class CartesianIndexMapper, class Scalar>
 void EclTransmissibility<Grid,GridView,ElementMapper,CartesianIndexMapper,Scalar>::
-update(bool global, const std::function<unsigned int(unsigned int)>& map)
+update(bool global, const std::function<unsigned int(unsigned int)>& map, const bool applyNncMultregT)
 {
     const auto& cartDims = cartMapper_.cartesianDimensions();
     const auto& transMult = eclState_.getTransMult();
@@ -204,12 +211,15 @@ update(bool global, const std::function<unsigned int(unsigned int)>& map)
     // Then the smallest multiplier is applied.
     // Default is to apply the top and bottom multiplier
     bool useSmallestMultiplier;
+    bool pinchActive;
     if (comm.rank() == 0) {
         const auto& eclGrid = eclState_.getInputGrid();
+        pinchActive = eclGrid.isPinchActive();
         useSmallestMultiplier = eclGrid.getMultzOption() == PinchMode::ALL;
     }
     if (global && comm.size() > 1) {
         comm.broadcast(&useSmallestMultiplier, 1, 0);
+        comm.broadcast(&pinchActive, 1, 0);
     }
 
     // compute the transmissibilities for all intersections
@@ -294,6 +304,14 @@ update(bool global, const std::function<unsigned int(unsigned int)>& map)
                 // *added to* by applyNncToGridTrans_() later.
                 assert(outsideFaceIdx == -1);
                 trans_[isId(elemIdx, outsideElemIdx)] = 0.0;
+                if (enableEnergy_){
+                    thermalHalfTrans_[directionalIsId(elemIdx, outsideElemIdx)] = 0.0;
+                    thermalHalfTrans_[directionalIsId(outsideElemIdx, elemIdx)] = 0.0;
+                }
+
+                if (updateDiffusivity) {
+                    diffusivity_[isId(elemIdx, outsideElemIdx)] = 0.0;
+                }
                 continue;
             }
 
@@ -346,6 +364,21 @@ update(bool global, const std::function<unsigned int(unsigned int)>& map)
 
             // apply the full face transmissibility multipliers
             // for the inside ...
+            if(!pinchActive){
+                if (insideFaceIdx > 3){// top or bottom
+                     auto find_layer = [&cartDims](std::size_t cell){
+                        cell /= cartDims[0];
+                        auto k = cell / cartDims[1];
+                        return k;
+                    };
+                    int kup = find_layer(insideCartElemIdx);
+                    int kdown=find_layer(outsideCartElemIdx);
+                    assert(kup != kdown);
+                    if(std::abs(kup -kdown) > 1){
+                        trans = 0.0;
+                    }
+                }
+            }
 
             if (useSmallestMultiplier)
             {
@@ -453,24 +486,29 @@ update(bool global, const std::function<unsigned int(unsigned int)>& map)
         }
     }
 
-    // potentially overwrite and/or modify  transmissibilities based on input from deck
-    updateFromEclState_(global);
+    // Potentially overwrite and/or modify transmissibilities based on input from deck
+    this->updateFromEclState_(global);
 
     // Create mapping from global to local index
     std::unordered_map<std::size_t,int> globalToLocal;
 
-    // loop over all elements (global grid) and store Cartesian index
+    // Loop over all elements (global grid) and store Cartesian index
     for (const auto& elem : elements(grid_.leafGridView())) {
         int elemIdx = elemMapper.index(elem);
         int cartElemIdx = cartMapper_.cartesianIndex(elemIdx);
         globalToLocal[cartElemIdx] = elemIdx;
     }
-    applyEditNncToGridTrans_(globalToLocal);
-    applyNncToGridTrans_(globalToLocal);
-    applyEditNncrToGridTrans_(globalToLocal);
 
-    //remove very small non-neighbouring transmissibilities
-    removeSmallNonCartesianTransmissibilities_();
+    this->applyEditNncToGridTrans_(globalToLocal);
+    this->applyNncToGridTrans_(globalToLocal);
+    this->applyEditNncrToGridTrans_(globalToLocal);
+
+    if (applyNncMultregT) {
+        this->applyNncMultreg_(globalToLocal);
+    }
+
+    // Remove very small non-neighbouring transmissibilities.
+    this->removeSmallNonCartesianTransmissibilities_();
 }
 
 template<class Grid, class GridView, class ElementMapper, class CartesianIndexMapper, class Scalar>
@@ -854,13 +892,40 @@ applyNncToGridTrans_(const std::unordered_map<std::size_t,int>& cartesianToCompr
             continue;
         }
 
-        auto candidate = trans_.find(isId(low, high));
-        if (candidate != trans_.end()) {
-            // NNC is represented by the grid and might be a neighboring connection
-            // In this case the transmissibilty is added to the value already
-            // set or computed.
-            candidate->second += nncEntry.trans;
+        {
+            auto candidate = trans_.find(isId(low, high));
+            if (candidate != trans_.end()) {
+                // NNC is represented by the grid and might be a neighboring connection
+                // In this case the transmissibilty is added to the value already
+                // set or computed.
+                candidate->second += nncEntry.trans;
+            }
         }
+        // if (enableEnergy_) {
+        //     auto candidate = thermalHalfTrans_.find(directionalIsId(low, high));
+        //     if (candidate != trans_.end()) {
+        //         // NNC is represented by the grid and might be a neighboring connection
+        //         // In this case the transmissibilty is added to the value already
+        //         // set or computed.
+        //         candidate->second += nncEntry.transEnergy1;
+        //     }
+        //     auto candidate = thermalHalfTrans_.find(directionalIsId(high, low));
+        //     if (candidate != trans_.end()) {
+        //         // NNC is represented by the grid and might be a neighboring connection
+        //         // In this case the transmissibilty is added to the value already
+        //         // set or computed.
+        //         candidate->second += nncEntry.transEnergy2;
+        //     }
+        // }
+        // if (enableDiffusivity_) {
+        //     auto candidate = diffusivity_.find(isId(low, high));
+        //     if (candidate != trans_.end()) {
+        //         // NNC is represented by the grid and might be a neighboring connection
+        //         // In this case the transmissibilty is added to the value already
+        //         // set or computed.
+        //         candidate->second += nncEntry.transDiffusion;
+        //     }
+        // }
     }
 }
 
@@ -962,6 +1027,55 @@ applyEditNncToGridTransHelper_(const std::unordered_map<std::size_t,int>& global
         auto warning = fmt::format("Problems with {} keyword\n"
                                    "A total of {} connections not defined in grid", keyword, warning_count);
         OpmLog::warning(warning);
+    }
+}
+
+template<class Grid, class GridView, class ElementMapper, class CartesianIndexMapper, class Scalar>
+void
+EclTransmissibility<Grid,GridView,ElementMapper,CartesianIndexMapper,Scalar>::
+applyNncMultreg_(const std::unordered_map<std::size_t,int>& cartesianToCompressed)
+{
+    const auto& inputNNC = this->eclState_.getInputNNC();
+    const auto& transMult = this->eclState_.getTransMult();
+
+    auto compressedIdx = [&cartesianToCompressed](const std::size_t globIdx)
+    {
+        auto ixPos = cartesianToCompressed.find(globIdx);
+        return (ixPos == cartesianToCompressed.end()) ? -1 : ixPos->second;
+    };
+
+    // Apply region-based transmissibility multipliers (i.e., the MULTREGT
+    // keyword) to those transmissibilities that are directly assigned from
+    // the input.
+    //
+    //  * NNC::input() covers the NNC keyword and any numerical aquifers
+    //  * NNC::editr() covers the EDITNNCR keyword
+    //
+    // Note: We do not apply MULTREGT to the entries in NNC::edit() since
+    // those act as regular multipliers and have already been fully
+    // accounted for in the multiplier part of the main loop of update() and
+    // the applyEditNncToGridTrans_() member function.
+    for (const auto& nncList : { &NNC::input, &NNC::editr }) {
+        for (const auto& nncEntry : (inputNNC.*nncList)()) {
+            const auto c1 = nncEntry.cell1;
+            const auto c2 = nncEntry.cell2;
+
+            auto low = compressedIdx(c1);
+            auto high = compressedIdx(c2);
+
+            if ((low == -1) || (high == -1)) {
+                continue;
+            }
+
+            if (low > high) {
+                std::swap(low, high);
+            }
+
+            auto candidate = this->trans_.find(isId(low, high));
+            if (candidate != this->trans_.end()) {
+                candidate->second *= transMult.getRegionMultiplierNNC(c1, c2);
+            }
+        }
     }
 }
 

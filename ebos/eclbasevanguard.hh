@@ -31,7 +31,7 @@
 
 #include <opm/grid/common/GridEnums.hpp>
 #include <opm/grid/common/CartesianIndexMapper.hpp>
-
+#include <opm/grid/LookUpCellCentroid.hh>
 #include <opm/input/eclipse/EclipseState/Aquifer/NumericalAquifer/NumericalAquiferCell.hpp>
 #include <opm/input/eclipse/EclipseState/EclipseState.hpp>
 
@@ -42,6 +42,8 @@
 
 #include <opm/simulators/flow/BlackoilModelParametersEbos.hpp>
 
+
+
 #include <array>
 #include <cstddef>
 #include <optional>
@@ -51,6 +53,7 @@
 namespace Opm {
 template <class TypeTag>
 class EclBaseVanguard;
+template<typename Grid, typename GridView> struct LookUpCellCentroid;
 }
 
 namespace Opm::Properties {
@@ -89,12 +92,12 @@ struct EdgeWeightsMethod {
     using type = UndefinedProperty;
 };
 
-#if HAVE_OPENCL
+#if HAVE_OPENCL || HAVE_ROCSPARSE
 template<class TypeTag, class MyTypeTag>
 struct NumJacobiBlocks {
     using type = UndefinedProperty;
 };
-#endif  // HAVE_OPENCL
+#endif  // HAVE_OPENCL || HAVE_ROCSPARSE
 
 template<class TypeTag, class MyTypeTag>
 struct OwnerCellsFirst {
@@ -150,12 +153,12 @@ struct EdgeWeightsMethod<TypeTag, TTag::EclBaseVanguard> {
     static constexpr int value = 1;
 };
 
-#if HAVE_OPENCL
+#if HAVE_OPENCL || HAVE_ROCSPARSE
 template<class TypeTag>
 struct NumJacobiBlocks<TypeTag, TTag::EclBaseVanguard> {
     static constexpr int value = 0;
 };
-#endif // HAVE_OPENCL
+#endif // HAVE_OPENCL || HAVE_ROCSPARSE
 
 template<class TypeTag>
 struct OwnerCellsFirst<TypeTag, TTag::EclBaseVanguard> {
@@ -245,7 +248,7 @@ public:
         EWOMS_REGISTER_PARAM(TypeTag, int, EdgeWeightsMethod,
                              "Choose edge-weighing strategy: 0=uniform, 1=trans, 2=log(trans).");
 
-#if HAVE_OPENCL
+#if HAVE_OPENCL || HAVE_ROCSPARSE
         EWOMS_REGISTER_PARAM(TypeTag, int, NumJacobiBlocks,
                              "Number of blocks to be created for the Block-Jacobi preconditioner.");
 #endif
@@ -285,7 +288,7 @@ public:
         fileName_ = EWOMS_GET_PARAM(TypeTag, std::string, EclDeckFileName);
         edgeWeightsMethod_   = Dune::EdgeWeightMethod(EWOMS_GET_PARAM(TypeTag, int, EdgeWeightsMethod));
 
-#if HAVE_OPENCL
+#if HAVE_OPENCL || HAVE_ROCSPARSE
         numJacobiBlocks_ = EWOMS_GET_PARAM(TypeTag, int, NumJacobiBlocks);
 #endif
 
@@ -473,23 +476,24 @@ protected:
      */
     template<class CartMapper>
     std::function<std::array<double,dimensionworld>(int)>
-    cellCentroids_(const CartMapper& cartMapper) const
+    cellCentroids_(const CartMapper& cartMapper, const bool& isCpGrid) const
     {
-        return [this, cartMapper](int elemIdx) {
-                   const auto& centroids = this->centroids_;
-                   auto rank = this->gridView().comm().rank();
-                   std::array<double,dimensionworld> centroid;
-                   if (rank == 0) {
-                       unsigned cartesianCellIdx = cartMapper.cartesianIndex(elemIdx);
-                       centroid = this->eclState().getInputGrid().getCellCenter(cartesianCellIdx);
-                   } else
-                   {
-                       std::copy(centroids.begin() + elemIdx * dimensionworld,
-                                 centroids.begin() + (elemIdx + 1) * dimensionworld,
-                                 centroid.begin());
-                   }
-                   return centroid;
-               };
+        return [this, cartMapper, isCpGrid](int elemIdx) {
+            std::array<double,dimensionworld> centroid;
+            const auto rank = this->gridView().comm().rank();
+            const auto maxLevel = this->gridView().grid().maxLevel();
+            bool useEclipse = !isCpGrid || (isCpGrid && (rank == 0) && (maxLevel == 0));
+            if (useEclipse)
+            {
+                centroid =  this->eclState().getInputGrid().getCellCenter(cartMapper.cartesianIndex(elemIdx));
+            }
+            else
+            {
+                LookUpCellCentroid<Grid,GridView> lookUpCellCentroid(this->gridView(), cartMapper, nullptr);
+                centroid = lookUpCellCentroid(elemIdx);
+            }
+            return centroid;
+        };
     }
 
     void callImplementationInit()
@@ -506,7 +510,7 @@ protected:
     {
         std::size_t num_cells = asImp_().grid().leafGridView().size(0);
         is_interior_.resize(num_cells);
-        
+
         ElementMapper elemMapper(this->gridView(), Dune::mcmgElementLayout());
         for (const auto& element : elements(this->gridView()))
         {
@@ -578,7 +582,7 @@ private:
 
         return zz/Scalar(corners);
     }
-    
+
     Scalar computeCellThickness(const typename GridView::template Codim<0>::Entity& element) const
     {
         typedef typename Element::Geometry Geometry;
@@ -609,11 +613,6 @@ private:
     { return *static_cast<const Implementation*>(this); }
 
 protected:
-    /*! \brief The cell centroids after loadbalance was called.
-     * Empty otherwise. Used by EclTransmissibilty.
-     */
-    std::vector<double> centroids_;
-
     /*! \brief Mapping between cartesian and compressed cells.
      *  It is initialized the first time it is called
      */

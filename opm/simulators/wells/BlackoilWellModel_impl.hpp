@@ -657,6 +657,8 @@ namespace Opm {
 
         // check group sales limits at the end of the timestep
         const Group& fieldGroup = schedule_.getGroup("FIELD", reportStepIdx);
+        checkGEconLimits(
+            fieldGroup, simulationTime, ebosSimulator_.episodeIndex(), local_deferredLogger);
         checkGconsaleLimits(fieldGroup, this->wellState(),
                             ebosSimulator_.episodeIndex(), local_deferredLogger);
 
@@ -752,7 +754,7 @@ namespace Opm {
     template<typename TypeTag>
     void
     BlackoilWellModel<TypeTag>::
-    createWellContainer(const int time_step)
+    createWellContainer(const int report_step)
     {
         DeferredLogger local_deferredLogger;
 
@@ -773,7 +775,7 @@ namespace Opm {
 
                 const std::string& well_name = well_ecl.name();
                 const auto well_status = this->schedule()
-                    .getWell(well_name, time_step).getStatus();
+                    .getWell(well_name, report_step).getStatus();
 
                 if ((well_ecl.getStatus() == Well::Status::SHUT) ||
                     (well_status          == Well::Status::SHUT))
@@ -879,7 +881,7 @@ namespace Opm {
                     wellIsStopped = true;
                 }
 
-                well_container_.emplace_back(this->createWellPointer(w, time_step));
+                well_container_.emplace_back(this->createWellPointer(w, report_step));
 
                 if (wellIsStopped)
                     well_container_.back()->stopWell();
@@ -898,7 +900,7 @@ namespace Opm {
         for (auto& w : well_container_)
             well_container_generic_.push_back(w.get());
 
-        const auto& network = schedule()[time_step].network();
+        const auto& network = schedule()[report_step].network();
         if (network.active() && !this->node_pressures_.empty()) {
             for (auto& well: well_container_generic_) {
                 // Producers only, since we so far only support the
@@ -926,15 +928,15 @@ namespace Opm {
     template <typename TypeTag>
     typename BlackoilWellModel<TypeTag>::WellInterfacePtr
     BlackoilWellModel<TypeTag>::
-    createWellPointer(const int wellID, const int time_step) const
+    createWellPointer(const int wellID, const int report_step) const
     {
         const auto is_multiseg = this->wells_ecl_[wellID].isMultiSegment();
 
         if (! (this->param_.use_multisegment_well_ && is_multiseg)) {
-            return this->template createTypedWellPointer<StandardWell<TypeTag>>(wellID, time_step);
+            return this->template createTypedWellPointer<StandardWell<TypeTag>>(wellID, report_step);
         }
         else {
-            return this->template createTypedWellPointer<MultisegmentWell<TypeTag>>(wellID, time_step);
+            return this->template createTypedWellPointer<MultisegmentWell<TypeTag>>(wellID, report_step);
         }
     }
 
@@ -1113,16 +1115,19 @@ namespace Opm {
         const std::size_t max_iteration = param_.network_max_iterations_;
         std::size_t network_update_iteration = 0;
         while (do_network_update) {
-            if (network_update_iteration == iteration_to_relax) {
+            if (terminal_output_ && (network_update_iteration == iteration_to_relax) ) {
                 local_deferredLogger.info(" we begin using relaxed tolerance for network update now after " + std::to_string(iteration_to_relax) + " iterations ");
             }
             const bool relax_network_balance = network_update_iteration >= iteration_to_relax;
             std::tie(do_network_update, well_group_control_changed) =
                     updateWellControlsAndNetworkIteration(mandatory_network_balance, relax_network_balance, dt,local_deferredLogger);
             ++network_update_iteration;
-            if (network_update_iteration >= max_iteration) {
-                local_deferredLogger.info("maximum of " + std::to_string(max_iteration) + " iterations has been used, we stop the network update now, "
-                                                                                          "the simulation will continue with unconvergeed network results");
+
+            if (network_update_iteration >= max_iteration ) {
+                if (terminal_output_) {
+                    local_deferredLogger.info("maximum of " + std::to_string(max_iteration) + " iterations has been used, we stop the network update now. "
+                                              "The simulation will continue with unconverged network results");
+                }
                 break;
             }
         }
@@ -2256,6 +2261,9 @@ namespace Opm {
                     deferred_logger.warning("WELL_INITIAL_SOLVE_FAILED", msg);
                 }
             }
+            // If we're using local well solves that include control switches, they also update
+            // operability, so reset before main iterations begin
+            well->resetWellOperability();
         }
         updatePrimaryVariables(deferred_logger);
 
@@ -2454,21 +2462,16 @@ namespace Opm {
             if (well.isInjector())
                 continue;
 
-            int connpos = 0;
-            for (int i = 0; i < wellID; ++i) {
-                connpos += well_perf_data_[i].size();
-            }
-            connpos *= np;
             std::array<double,2> weighted{0.0,0.0};
             auto& [weighted_temperature, total_weight] = weighted;
 
             auto& well_info = local_parallel_well_info_[wellID].get();
-            const int num_perf_this_well = well_info.communication().sum(well_perf_data_[wellID].size());
             auto& ws = this->wellState().well(wellID);
             auto& perf_data = ws.perf_data;
             auto& perf_phase_rate = perf_data.phase_rates;
 
-            for (int perf = 0; perf < num_perf_this_well; ++perf) {
+            using int_type = decltype(well_perf_data_[wellID].size());
+            for (int_type perf = 0, end_perf = well_perf_data_[wellID].size(); perf < end_perf; ++perf) {
                 const int cell_idx = well_perf_data_[wellID][perf].cell_index;
                 const auto& intQuants = ebosSimulator_.model().intensiveQuantities(cell_idx, /*timeIdx=*/0);
                 const auto& fs = intQuants.fluidState();

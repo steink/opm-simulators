@@ -182,6 +182,8 @@ public:
 
     const Parallel::Communication& comm() const { return comm_; }
 
+    const EclipseState& eclipseState() const { return eclState_; }
+
     const SummaryState& summaryState() const { return summaryState_; }
 
     const GuideRate& guideRate() const { return guideRate_; }
@@ -190,6 +192,10 @@ public:
 
     bool shouldBalanceNetwork(const int reportStepIndex,
                               const int iterationIdx) const;
+
+    void updateClosedWellsThisStep(const std::string& well_name) const {
+        this->closed_this_step_.insert(well_name);
+    }
 
     template<class Serializer>
     void serializeOp(Serializer& serializer)
@@ -345,6 +351,11 @@ protected:
                              const int reportStepIdx,
                              DeferredLogger& deferred_logger);
 
+    void checkGEconLimits(const Group& group,
+                          const double simulation_time,
+                          const int report_step_idx,
+                          DeferredLogger& deferred_logger);
+
     bool checkGroupHigherConstraints(const Group& group,
                                      DeferredLogger& deferred_logger,
                                      const int reportStepIdx);
@@ -396,7 +407,7 @@ protected:
                                                            DeferredLogger& deferred_logger) = 0;
     virtual void calculateProductivityIndexValues(DeferredLogger& deferred_logger) = 0;
 
-    void runWellPIScaling(const int timeStepIdx,
+    void runWellPIScaling(const int reportStepIdx,
                           DeferredLogger& local_deferredLogger);
 
     /// \brief get compressed index for interior cells (-1, otherwise

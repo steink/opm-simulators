@@ -58,10 +58,12 @@ public:
         : BlackOilModel<TypeTag>(simulator)
     {
     }
+
     void invalidateAndUpdateIntensiveQuantities(unsigned timeIdx) const
     {
-        this->invalidateIntensiveQuantitiesCache(timeIdx);
 
+        this->invalidateIntensiveQuantitiesCache(timeIdx);
+        OPM_BEGIN_PARALLEL_TRY_CATCH()
         // loop over all elements...
         ThreadedEntityIterator<GridView, /*codim=*/0> threadedElemIt(this->gridView_);
 #ifdef _OPENMP
@@ -76,19 +78,49 @@ public:
                 elemCtx.updatePrimaryIntensiveQuantities(timeIdx);
             }
         }
+        OPM_END_PARALLEL_TRY_CATCH("InvalideAndUpdateIntensiveQuantities: state error", this->simulator_.vanguard().grid().comm());
+    }
+
+    void invalidateAndUpdateIntensiveQuantitiesOverlap(unsigned timeIdx) const
+    {
+        // loop over all elements
+        ThreadedEntityIterator<GridView, /*codim=*/0> threadedElemIt(this->gridView_);
+        OPM_BEGIN_PARALLEL_TRY_CATCH()
+#ifdef _OPENMP
+#pragma omp parallel
+#endif
+        {
+            ElementContext elemCtx(this->simulator_);
+            auto elemIt = threadedElemIt.beginParallel();
+            for (; !threadedElemIt.isFinished(elemIt); elemIt = threadedElemIt.increment()) {
+                if (elemIt->partitionType() != Dune::OverlapEntity) {
+                    continue;
+                }
+                const Element& elem = *elemIt;
+                elemCtx.updatePrimaryStencil(elem);
+                // Mark cache for this element as invalid.
+                const std::size_t numPrimaryDof = elemCtx.numPrimaryDof(timeIdx);
+                for (unsigned dofIdx = 0; dofIdx < numPrimaryDof; ++dofIdx) {
+                    const unsigned globalIndex = elemCtx.globalSpaceIndex(dofIdx, timeIdx);
+                    this->setIntensiveQuantitiesCacheEntryValidity(globalIndex, timeIdx, false);
+                }
+                // Update for this element.
+                elemCtx.updatePrimaryIntensiveQuantities(/*timeIdx=*/0);
+            }
+        }
+        OPM_END_PARALLEL_TRY_CATCH("InvalideAndUpdateIntensiveQuantitiesOverlap: state error", this->simulator_.vanguard().grid().comm());
     }
 
     template <class GridSubDomain>
     void invalidateAndUpdateIntensiveQuantities(unsigned timeIdx, const GridSubDomain& gridSubDomain) const
     {
-        // loop over all elements...
+        // loop over all elements in the subdomain
         using GridViewType = decltype(gridSubDomain.view);
         ThreadedEntityIterator<GridViewType, /*codim=*/0> threadedElemIt(gridSubDomain.view);
 #ifdef _OPENMP
 #pragma omp parallel
 #endif
         {
-
             ElementContext elemCtx(this->simulator_);
             auto elemIt = threadedElemIt.beginParallel();
             for (; !threadedElemIt.isFinished(elemIt); elemIt = threadedElemIt.increment()) {
