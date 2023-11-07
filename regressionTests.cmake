@@ -119,7 +119,7 @@ add_test_compareECLFiles(CASENAME gasoil_precsalt
                          FILENAME GASCONDENSATE_VAPWAT_PRECSALT_REGRESSION
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
-                         REL_TOL ${rel_tol}                         
+                         REL_TOL ${rel_tol}
                          DIR spe1_precsalt
                          TEST_ARGS --solver-max-time-step-in-days=0.05)
 
@@ -498,6 +498,25 @@ foreach(pinch_case ${_pinch_cases})
     DIR pinch)
 endforeach()
 
+set(_udt_cases
+  1D-01B
+  1D-01
+  1D-02
+  1D-03
+)
+
+foreach(udt_case ${_udt_cases})
+  string(TOLOWER ${udt_case} udt_test)
+  add_test_compareECLFiles(CASENAME udt_${udt_test}
+    FILENAME UDT-${udt_case}
+    SIMULATOR flow
+    ABS_TOL ${abs_tol}
+    REL_TOL ${rel_tol}
+    TEST_ARGS --enable-tuning=true
+    DIR udt)
+endforeach()
+
+
 add_test_compareECLFiles(CASENAME udq_uadd
                          FILENAME UDQ_M1
                          SIMULATOR flow
@@ -714,6 +733,13 @@ add_test_compareECLFiles(CASENAME multiply_tranxyz_model2
 
 add_test_compareECLFiles(CASENAME editnnc_model2
 			  FILENAME 9_EDITNNC_MODEL2
+			  SIMULATOR flow
+			  ABS_TOL ${abs_tol}
+			  REL_TOL ${rel_tol}
+			  DIR model2)
+
+add_test_compareECLFiles(CASENAME fbhpdef_model2
+			  FILENAME 0C_BASE_FBHPDEF
 			  SIMULATOR flow
 			  ABS_TOL ${abs_tol}
 			  REL_TOL ${rel_tol}
@@ -1075,84 +1101,96 @@ add_test_compareECLFiles(CASENAME min_bhp_1
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/bhp_min )
+                         DIR wtest/bhp_min
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME min_bhp_2
                          FILENAME MIN_BHP_2
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/bhp_min )
+                         DIR wtest/bhp_min
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME min_bhp_3
                          FILENAME MIN_BHP_3
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/bhp_min )
+                         DIR wtest/bhp_min
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME min_thp_1
                          FILENAME MIN_THP_1
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/thp_min )
+                         DIR wtest/thp_min
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME max_gor_1
                          FILENAME MAX_GOR_1
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/wecon_gor_max )
+                         DIR wtest/wecon_gor_max
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME min_gasrate_1
                          FILENAME MIN_GASRATE_1
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/wecon_qg_min )
+                         DIR wtest/wecon_qg_min
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME min_qoil_1
                          FILENAME MIN_QOIL_1
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/wecon_qo_min )
+                         DIR wtest/wecon_qo_min
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME max_watercut_1
                          FILENAME MAX_WATERCUT_1
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/wecon_wct_max )
+                         DIR wtest/wecon_wct_max
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME max_watercut_2
                          FILENAME MAX_WATERCUT_2
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/wecon_wct_max )
+                         DIR wtest/wecon_wct_max
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME max_watercut_3
                          FILENAME MAX_WATERCUT_3
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/wecon_wct_max )
+                         DIR wtest/wecon_wct_max
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME max_watercut_4
                          FILENAME MAX_WATERCUT_4
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/wecon_wct_max )
+                         DIR wtest/wecon_wct_max
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME max_wgr_1
                          FILENAME MAX_WGR_1
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/wecon_wgr_max )
+                         DIR wtest/wecon_wgr_max
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME rxft_smry
                          FILENAME TEST_RXFT
