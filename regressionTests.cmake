@@ -108,6 +108,22 @@ add_test_compareECLFiles(CASENAME network_standard
 		                 DIR network
 		                 TEST_ARGS --enable-tuning=true)
 
+add_test_compareECLFiles(CASENAME network_01_reroute
+		                 FILENAME NETWORK-01-REROUTE
+		                 SIMULATOR flow
+		                 ABS_TOL ${abs_tol}
+		                 REL_TOL ${rel_tol}
+		                 DIR network
+		                 TEST_ARGS --enable-tuning=true --local-well-solve-control-switching=true)
+
+add_test_compareECLFiles(CASENAME network_01_reroute_std
+		                 FILENAME NETWORK-01-REROUTE_STD
+		                 SIMULATOR flow
+		                 ABS_TOL ${abs_tol}
+		                 REL_TOL ${rel_tol}
+		                 DIR network
+		                 TEST_ARGS --enable-tuning=true --local-well-solve-control-switching=true)
+
 add_test_compareECLFiles(CASENAME gas_precsalt
                          FILENAME GASWATER_VAPWAT_PRECSALT
                          SIMULATOR flow
@@ -430,7 +446,7 @@ add_test_compareECLFiles(CASENAME actionx_m1
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
                          DIR udq_actionx
-                         TEST_ARGS --solver-max-time-step-in-days=1)
+                         TEST_ARGS --solver-max-time-step-in-days=0.2)
 
 add_test_compareECLFiles(CASENAME pinch_multz_all
                          FILENAME PINCH_MULTZ_ALL
