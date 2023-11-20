@@ -190,7 +190,7 @@ namespace Opm
         template<class Value>
         void computePerfRate(const IntensiveQuantities& int_quants,
                              const std::vector<Value>& mob_perfcells,
-                             const double Tw,
+                             const std::vector<Scalar>& Tw,
                              const int seg,
                              const int perf,
                              const Value& segment_pressure,
@@ -206,7 +206,7 @@ namespace Opm
                         const Value& rv,
                         const std::vector<Value>& b_perfcells,
                         const std::vector<Value>& mob_perfcells,
-                        const double Tw,
+                        const std::vector<Scalar>& Tw,
                         const int perf,
                         const Value& segment_pressure,
                         const Value& segment_density,

@@ -117,6 +117,10 @@ template<class TypeTag, class MyTypeTag>
 struct EnableWellOperabilityCheckIter {
     using type = UndefinedProperty;
 };
+template<class TypeTag, class MyTypeTag>
+struct DebugEmitCellPartition {
+    using type = UndefinedProperty;
+};
 // parameters for multisegment wells
 template<class TypeTag, class MyTypeTag>
 struct TolerancePressureMsWells {
@@ -361,6 +365,10 @@ struct EnableWellOperabilityCheckIter<TypeTag, TTag::FlowModelParameters> {
     static constexpr bool value = false;
 };
 template<class TypeTag>
+struct DebugEmitCellPartition<TypeTag, TTag::FlowModelParameters> {
+    static constexpr bool value = false;
+};
+template<class TypeTag>
 struct RelaxedWellFlowTol<TypeTag, TTag::FlowModelParameters> {
     using type = GetPropType<TypeTag, Scalar>;
     static constexpr type value = 1e-3;
@@ -584,6 +592,8 @@ namespace Opm
         std::string local_domain_partition_method_;
         DomainOrderingMeasure local_domain_ordering_{DomainOrderingMeasure::AveragePressure};
 
+        bool write_partitions_{false};
+
         /// Construct from user parameters or defaults.
         BlackoilModelParametersEbos()
         {
@@ -649,6 +659,8 @@ namespace Opm
             } else {
                 throw std::runtime_error("Invalid domain ordering '" + measure + "' specified.");
             }
+
+            write_partitions_ = EWOMS_GET_PARAM(TypeTag, bool, DebugEmitCellPartition);
         }
 
         static void registerParameters()
@@ -703,6 +715,10 @@ namespace Opm
                                  "Allowed values are 'zoltan', 'simple', and the name of a partition file ending with '.partition'.");
             EWOMS_REGISTER_PARAM(TypeTag, std::string, LocalDomainsOrderingMeasure, "Subdomain ordering measure. "
                                  "Allowed values are 'pressure' and  'residual'.");
+
+            EWOMS_REGISTER_PARAM(TypeTag, bool, DebugEmitCellPartition, "Whether or not to emit cell partitions as a debugging aid.");
+
+            EWOMS_HIDE_PARAM(TypeTag, DebugEmitCellPartition);
         }
     };
 } // namespace Opm

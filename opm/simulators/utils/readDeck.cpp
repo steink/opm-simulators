@@ -154,6 +154,11 @@ namespace {
                  std::move(python), outputInterval, init_state);
         }
 
+        // Read network pressures from restart
+        if (rst_state.network.isActive()) {
+            eclipseState.loadRestartNetworkPressures(rst_state.network);
+        }
+
         udqState = std::make_unique<Opm::UDQState>
             ((*schedule)[0].udq().params().undefinedValue());
         udqState->load_rst(rst_state);
@@ -527,6 +532,9 @@ void Opm::readDeck(Opm::Parallel::Communication    comm,
         const bool treatCriticalAsNonCritical = (parsingStrictness == "low");
         try {
             auto parseContext = setupParseContext(exitOnAllErrors);
+            if (treatCriticalAsNonCritical) { // Continue with invalid names if parsing strictness is set to low
+                parseContext->update(ParseContext::SCHEDULE_INVALID_NAME, InputErrorAction::WARN);
+            }
             readOnIORank(comm, deckFilename, parseContext.get(),
                          eclipseState, schedule, udqState, actionState, wtestState,
                          summaryConfig, std::move(python), initFromRestart,

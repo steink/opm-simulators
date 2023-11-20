@@ -59,6 +59,8 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <ios>
 #include <limits>
@@ -131,6 +133,10 @@ struct EnableSaltPrecipitation<TypeTag, TTag::EclFlowProblem> {
 };
 template<class TypeTag>
 struct EnableMICP<TypeTag, TTag::EclFlowProblem> {
+    static constexpr bool value = false;
+};
+template<class TypeTag>
+struct EnableDispersion<TypeTag, TTag::EclFlowProblem> {
     static constexpr bool value = false;
 };
 
@@ -1025,6 +1031,29 @@ namespace Opm {
         const std::vector<StepReport>& stepReports() const
         {
             return convergence_reports_;
+        }
+
+        void writePartitions(const std::filesystem::path& odir) const
+        {
+            if (this->nlddSolver_ != nullptr) {
+                this->nlddSolver_->writePartitions(odir);
+                return;
+            }
+
+            const auto& elementMapper = this->ebosSimulator().model().elementMapper();
+            const auto& cartMapper = this->ebosSimulator().vanguard().cartesianIndexMapper();
+
+            const auto& grid = this->ebosSimulator().vanguard().grid();
+            const auto& comm = grid.comm();
+            const auto nDigit = 1 + static_cast<int>(std::floor(std::log10(comm.size())));
+
+            std::ofstream pfile { odir / fmt::format("{1:0>{0}}", nDigit, comm.rank()) };
+
+            for (const auto& cell : elements(grid.leafGridView(), Dune::Partitions::interior)) {
+                pfile << comm.rank() << ' '
+                      << cartMapper.cartesianIndex(elementMapper.index(cell)) << ' '
+                      << comm.rank() << '\n';
+            }
         }
 
     protected:

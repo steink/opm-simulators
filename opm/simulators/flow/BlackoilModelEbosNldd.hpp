@@ -54,12 +54,16 @@
 #include <cassert>
 #include <cmath>
 #include <cstddef>
+#include <filesystem>
+#include <fstream>
+#include <functional>
 #include <iomanip>
 #include <ios>
 #include <memory>
 #include <numeric>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -93,16 +97,8 @@ public:
     BlackoilModelEbosNldd(BlackoilModelEbos<TypeTag>& model)
         : model_(model)
     {
-        const auto& grid = model_.ebosSimulator().vanguard().grid();
-        const auto& schedule = model_.ebosSimulator().vanguard().schedule();
-
         // Create partitions.
-        const auto& [partition_vector, num_domains] =
-            partitionCells(grid,
-                           schedule.getWellsatEnd(),
-                           model_.param().local_domain_partition_method_,
-                           model_.param().num_local_domains_,
-                           model_.param().local_domain_partition_imbalance_);
+        const auto& [partition_vector, num_domains] = this->partitionCells();
 
         // Scan through partitioning to get correct size for each.
         std::vector<int> sizes(num_domains, 0);
@@ -121,6 +117,8 @@ public:
 
         // Iterate through grid once, setting the seeds of all partitions.
         // Note: owned cells only!
+        const auto& grid = model_.ebosSimulator().vanguard().grid();
+
         std::vector<int> count(num_domains, 0);
         const auto& gridView = grid.leafGridView();
         const auto beg = gridView.template begin<0, Dune::Interior_Partition>();
@@ -305,6 +303,26 @@ public:
     const SimulatorReportSingle& localAccumulatedReports() const
     {
         return local_reports_accumulated_;
+    }
+
+    void writePartitions(const std::filesystem::path& odir) const
+    {
+        const auto& elementMapper = this->model_.ebosSimulator().model().elementMapper();
+        const auto& cartMapper = this->model_.ebosSimulator().vanguard().cartesianIndexMapper();
+
+        const auto& grid = this->model_.ebosSimulator().vanguard().grid();
+        const auto& comm = grid.comm();
+        const auto nDigit = 1 + static_cast<int>(std::floor(std::log10(comm.size())));
+
+        std::ofstream pfile { odir / fmt::format("{1:0>{0}}", nDigit, comm.rank()) };
+
+        const auto p = this->reconstitutePartitionVector();
+        auto i = 0;
+        for (const auto& cell : elements(grid.leafGridView(), Dune::Partitions::interior)) {
+            pfile << comm.rank() << ' '
+                  << cartMapper.cartesianIndex(elementMapper.index(cell)) << ' '
+                  << p[i++] << '\n';
+        }
     }
 
 private:
@@ -833,6 +851,69 @@ private:
             }
         }
         return errorPV;
+    }
+
+    decltype(auto) partitionCells() const
+    {
+        const auto& grid = this->model_.ebosSimulator().vanguard().grid();
+
+        using GridView = std::remove_cv_t<std::remove_reference_t<decltype(grid.leafGridView())>>;
+        using Element = std::remove_cv_t<std::remove_reference_t<typename GridView::template Codim<0>::Entity>>;
+
+        const auto& param = this->model_.param();
+
+        auto zoltan_ctrl = ZoltanPartitioningControl<Element>{};
+        zoltan_ctrl.domain_imbalance = param.local_domain_partition_imbalance_;
+        zoltan_ctrl.index =
+            [elementMapper = &this->model_.ebosSimulator().model().elementMapper()]
+            (const Element& element)
+        {
+            return elementMapper->index(element);
+        };
+        zoltan_ctrl.local_to_global =
+            [cartMapper = &this->model_.ebosSimulator().vanguard().cartesianIndexMapper()]
+            (const int elemIdx)
+        {
+            return cartMapper->cartesianIndex(elemIdx);
+        };
+
+        // Forming the list of wells is expensive, so do this only if needed.
+        const auto need_wells = param.local_domain_partition_method_ == "zoltan";
+        const auto wells = need_wells
+            ? this->model_.ebosSimulator().vanguard().schedule().getWellsatEnd()
+            : std::vector<Well>{};
+
+        return ::Opm::partitionCells(param.local_domain_partition_method_,
+                                     param.num_local_domains_,
+                                     grid.leafGridView(), wells, zoltan_ctrl);
+    }
+
+    std::vector<int> reconstitutePartitionVector() const
+    {
+        const auto& grid = this->model_.ebosSimulator().vanguard().grid();
+
+        auto numD = std::vector<int>(grid.comm().size() + 1, 0);
+        numD[grid.comm().rank() + 1] = static_cast<int>(this->domains_.size());
+        grid.comm().sum(numD.data(), numD.size());
+        std::partial_sum(numD.begin(), numD.end(), numD.begin());
+
+        auto p = std::vector<int>(grid.size(0));
+        auto maxCellIdx = std::numeric_limits<int>::min();
+
+        auto d = numD[grid.comm().rank()];
+        for (const auto& domain : this->domains_) {
+            for (const auto& cell : domain.cells) {
+                p[cell] = d;
+                if (cell > maxCellIdx) {
+                    maxCellIdx = cell;
+                }
+            }
+
+            ++d;
+        }
+
+        p.erase(p.begin() + maxCellIdx + 1, p.end());
+        return p;
     }
 
     BlackoilModelEbos<TypeTag>& model_; //!< Reference to model

@@ -49,12 +49,15 @@ template<class TypeTag>
 struct EnableDiffusion<TypeTag, TTag::EclFlowGasWaterDissolutionDiffuseProblem> { static constexpr bool value = true; };
 
 template<class TypeTag>
+struct EnableDispersion<TypeTag, TTag::EclFlowGasWaterDissolutionDiffuseProblem> { static constexpr bool value = true; };
+
+template<class TypeTag>
 struct EnableDisgasInWater<TypeTag, TTag::EclFlowGasWaterDissolutionDiffuseProblem> {
     static constexpr bool value = true;
 };
 
 template<class TypeTag>
-struct EnableEvaporation<TypeTag, TTag::EclFlowGasWaterDissolutionDiffuseProblem> {
+struct EnableVapwat<TypeTag, TTag::EclFlowGasWaterDissolutionDiffuseProblem> {
     static constexpr bool value = true;
 };
 

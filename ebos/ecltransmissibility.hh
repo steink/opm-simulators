@@ -32,6 +32,8 @@
 #include <dune/common/fmatrix.hh>
 
 #include <opm/grid/common/CartesianIndexMapper.hpp>
+#include <opm/grid/LookUpData.hh>
+
 
 #include <array>
 #include <functional>
@@ -48,6 +50,7 @@ class EclipseState;
 struct NNCdata;
 class TransMult;
 
+
 template<class Grid, class GridView, class ElementMapper, class CartesianIndexMapper, class Scalar>
 class EclTransmissibility {
     // Grid and world dimension
@@ -63,7 +66,8 @@ public:
                         const Grid& grid,
                         std::function<std::array<double,dimWorld>(int)> centroids,
                         bool enableEnergy,
-                        bool enableDiffusivity);
+                        bool enableDiffusivity,
+                        bool enableDispersivity);
 
     /*!
      * \brief Return the permeability for an element.
@@ -103,6 +107,11 @@ public:
      * \brief Return the diffusivity for the intersection between two elements.
      */
     Scalar diffusivity(unsigned elemIdx1, unsigned elemIdx2) const;
+
+    /*!
+     * \brief Return the dispersivity for the intersection between two elements.
+     */
+    Scalar dispersivity(unsigned elemIdx1, unsigned elemIdx2) const;
 
     /*!
      * \brief Actually compute the transmissibility over a face as a pre-compute step.
@@ -227,6 +236,8 @@ protected:
 
     void extractPorosity_();
 
+    void extractDispersion_();
+
     void computeHalfTrans_(Scalar& halfTrans,
                            const DimVector& areaNormal,
                            int faceIdx, // in the reference element that contains the intersection
@@ -255,6 +266,7 @@ protected:
 
     std::vector<DimMatrix> permeability_;
     std::vector<Scalar> porosity_;
+    std::vector<Scalar> dispersion_;
     std::unordered_map<std::uint64_t, Scalar> trans_;
     const EclipseState& eclState_;
     const GridView& gridView_;
@@ -266,8 +278,13 @@ protected:
     std::map<std::pair<unsigned, unsigned>, Scalar> thermalHalfTransBoundary_;
     bool enableEnergy_;
     bool enableDiffusivity_;
+    bool enableDispersivity_;
     std::unordered_map<std::uint64_t, Scalar> thermalHalfTrans_; //NB this is based on direction map size is ca 2*trans_ (diffusivity_)
     std::unordered_map<std::uint64_t, Scalar> diffusivity_;
+    std::unordered_map<std::uint64_t, Scalar> dispersivity_;
+
+    const LookUpData<Grid,GridView> lookUpData_;
+    const LookUpCartesianData<Grid,GridView> lookUpCartesianData_;
 };
 
 } // namespace Opm
