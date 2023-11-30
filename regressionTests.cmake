@@ -108,6 +108,22 @@ add_test_compareECLFiles(CASENAME network_standard
 		                 DIR network
 		                 TEST_ARGS --enable-tuning=true)
 
+add_test_compareECLFiles(CASENAME network_01_reroute
+		                 FILENAME NETWORK-01-REROUTE
+		                 SIMULATOR flow
+		                 ABS_TOL ${abs_tol}
+		                 REL_TOL ${rel_tol}
+		                 DIR network
+		                 TEST_ARGS --enable-tuning=true --local-well-solve-control-switching=true)
+
+add_test_compareECLFiles(CASENAME network_01_reroute_std
+		                 FILENAME NETWORK-01-REROUTE_STD
+		                 SIMULATOR flow
+		                 ABS_TOL ${abs_tol}
+		                 REL_TOL ${rel_tol}
+		                 DIR network
+		                 TEST_ARGS --enable-tuning=true --local-well-solve-control-switching=true)
+
 add_test_compareECLFiles(CASENAME gas_precsalt
                          FILENAME GASWATER_VAPWAT_PRECSALT
                          SIMULATOR flow
@@ -119,7 +135,7 @@ add_test_compareECLFiles(CASENAME gasoil_precsalt
                          FILENAME GASCONDENSATE_VAPWAT_PRECSALT_REGRESSION
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
-                         REL_TOL ${rel_tol}                         
+                         REL_TOL ${rel_tol}
                          DIR spe1_precsalt
                          TEST_ARGS --solver-max-time-step-in-days=0.05)
 
@@ -269,7 +285,7 @@ add_test_compareECLFiles(CASENAME polymer_oilwater
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         TEST_ARGS --tolerance-mb=1.e-7)
+                         TEST_ARGS --solver-max-time-step-in-days=10 --tolerance-mb=1.e-7)
 
 add_test_compareECLFiles(CASENAME polymer_injectivity
                          FILENAME 2D_POLYMER_INJECTIVITY
@@ -343,6 +359,14 @@ add_test_compareECLFiles(CASENAME base_model2_welpi
                          DIR model2
                          TEST_ARGS --enable-tuning=true)
 
+add_test_compareECLFiles(CASENAME base_model2_let
+                         FILENAME 0_BASE_MODEL2_LET
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR model2
+                         TEST_ARGS)
+
 add_test_compareECLFiles(CASENAME 0a1_grpctl_stw_model2
                          FILENAME 0A1_GRCTRL_LRAT_ORAT_BASE_MODEL2_STW
                          SIMULATOR flow
@@ -415,7 +439,8 @@ add_test_compareECLFiles(CASENAME udq_actionx
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR udq_actionx)
+                         DIR udq_actionx
+                         TEST_ARGS --solver-max-time-step-in-days=5)
 
 add_test_compareECLFiles(CASENAME udq_wconprod
                          FILENAME UDQ_WCONPROD
@@ -430,7 +455,7 @@ add_test_compareECLFiles(CASENAME actionx_m1
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
                          DIR udq_actionx
-                         TEST_ARGS --solver-max-time-step-in-days=1)
+                         TEST_ARGS --solver-max-time-step-in-days=0.2)
 
 add_test_compareECLFiles(CASENAME pinch_multz_all
                          FILENAME PINCH_MULTZ_ALL
@@ -474,6 +499,13 @@ add_test_compareECLFiles(CASENAME waghyst2
                          REL_TOL ${rel_tol}
                          DIR waghystr)
 
+add_test_compareECLFiles(CASENAME gpmaint11
+                         FILENAME GPMAINT-11
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR gpmaint)
+
 set(_pinch_cases
   T1A_GAP T1A_NOGAP T1A_NOPINCH
   T1A1_NOGAP
@@ -497,6 +529,25 @@ foreach(pinch_case ${_pinch_cases})
     REL_TOL ${rel_tol}
     DIR pinch)
 endforeach()
+
+set(_udt_cases
+  1D-01B
+  1D-01
+  1D-02
+  1D-03
+)
+
+foreach(udt_case ${_udt_cases})
+  string(TOLOWER ${udt_case} udt_test)
+  add_test_compareECLFiles(CASENAME udt_${udt_test}
+    FILENAME UDT-${udt_case}
+    SIMULATOR flow
+    ABS_TOL ${abs_tol}
+    REL_TOL ${rel_tol}
+    TEST_ARGS --enable-tuning=true
+    DIR udt)
+endforeach()
+
 
 add_test_compareECLFiles(CASENAME udq_uadd
                          FILENAME UDQ_M1
@@ -714,6 +765,13 @@ add_test_compareECLFiles(CASENAME multiply_tranxyz_model2
 
 add_test_compareECLFiles(CASENAME editnnc_model2
 			  FILENAME 9_EDITNNC_MODEL2
+			  SIMULATOR flow
+			  ABS_TOL ${abs_tol}
+			  REL_TOL ${rel_tol}
+			  DIR model2)
+
+add_test_compareECLFiles(CASENAME fbhpdef_model2
+			  FILENAME 0C_BASE_FBHPDEF
 			  SIMULATOR flow
 			  ABS_TOL ${abs_tol}
 			  REL_TOL ${rel_tol}
@@ -1075,91 +1133,104 @@ add_test_compareECLFiles(CASENAME min_bhp_1
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/bhp_min )
+                         DIR wtest/bhp_min
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME min_bhp_2
                          FILENAME MIN_BHP_2
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/bhp_min )
+                         DIR wtest/bhp_min
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME min_bhp_3
                          FILENAME MIN_BHP_3
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/bhp_min )
+                         DIR wtest/bhp_min
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME min_thp_1
                          FILENAME MIN_THP_1
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/thp_min )
+                         DIR wtest/thp_min
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME max_gor_1
                          FILENAME MAX_GOR_1
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/wecon_gor_max )
+                         DIR wtest/wecon_gor_max
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME min_gasrate_1
                          FILENAME MIN_GASRATE_1
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/wecon_qg_min )
+                         DIR wtest/wecon_qg_min
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME min_qoil_1
                          FILENAME MIN_QOIL_1
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/wecon_qo_min )
+                         DIR wtest/wecon_qo_min
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME max_watercut_1
                          FILENAME MAX_WATERCUT_1
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/wecon_wct_max )
+                         DIR wtest/wecon_wct_max
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME max_watercut_2
                          FILENAME MAX_WATERCUT_2
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/wecon_wct_max )
+                         DIR wtest/wecon_wct_max
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME max_watercut_3
                          FILENAME MAX_WATERCUT_3
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/wecon_wct_max )
+                         DIR wtest/wecon_wct_max
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME max_watercut_4
                          FILENAME MAX_WATERCUT_4
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/wecon_wct_max )
+                         DIR wtest/wecon_wct_max
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME max_wgr_1
                          FILENAME MAX_WGR_1
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR wtest/wecon_wgr_max )
+                         DIR wtest/wecon_wgr_max
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME rxft_smry
                          FILENAME TEST_RXFT
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR rxft_smry )
+                         DIR rxft_smry
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME bo_diffusion
                          FILENAME BO_DIFFUSE_CASE1
@@ -1180,7 +1251,8 @@ add_test_compareECLFiles(CASENAME actionx_wpimult
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR actionx)
+                         DIR actionx
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME wvfpexp_02
                          FILENAME WVFPEXP-02

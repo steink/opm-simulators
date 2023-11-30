@@ -272,6 +272,8 @@ namespace Opm {
         // Store the current well and group states in order to recover in
         // the case of failed iterations
         this->commitWGState();
+
+        this->wellStructureChangedDynamically_ = false;
     }
 
 
@@ -371,16 +373,46 @@ namespace Opm {
     beginTimeStep()
     {
         OPM_TIMEBLOCK(beginTimeStep);
-        updateAverageFormationFactor();
+
+        this->updateAverageFormationFactor();
+
         DeferredLogger local_deferredLogger;
-        switched_prod_groups_.clear();
-        switched_inj_groups_.clear();
+
+        this->switched_prod_groups_.clear();
+        this->switched_inj_groups_.clear();
+
+        if (this->wellStructureChangedDynamically_) {
+            // Something altered the well structure/topology.  Possibly
+            // WELSPECS/COMPDAT and/or WELOPEN run from an ACTIONX block.
+            // Reconstruct the local wells to account for the new well
+            // structure.
+            const auto reportStepIdx =
+                this->ebosSimulator_.episodeIndex();
+
+            // Disable WELPI scaling when well structure is updated in the
+            // middle of a report step.
+            const auto enableWellPIScaling = false;
+
+            this->initializeLocalWellStructure(reportStepIdx, enableWellPIScaling);
+            this->initializeGroupStructure(reportStepIdx);
+
+            this->commitWGState();
+
+            // Reset topology flag to signal that we've handled this
+            // structure change.  That way we don't end up here in
+            // subsequent calls to beginTimeStep() unless there's a new
+            // dynamic change to the well structure during a report step.
+            this->wellStructureChangedDynamically_ = false;
+        }
 
         this->resetWGState();
+
         const int reportStepIdx = ebosSimulator_.episodeIndex();
         updateAndCommunicateGroupData(reportStepIdx,
                                       ebosSimulator_.model().newtonMethod().numIterations());
+
         this->wellState().gliftTimeStepInit();
+
         const double simulationTime = ebosSimulator_.time();
         OPM_BEGIN_PARALLEL_TRY_CATCH();
         {
@@ -544,6 +576,14 @@ namespace Opm {
             well->setVFPProperties(vfp_properties_.get());
             well->setGuideRate(&guideRate_);
 
+            // initialize rates/previous rates to prevent zero fractions in vfp-interpolation
+            if (well->isProducer()) {
+                well->updateWellStateRates(ebosSimulator_, this->wellState(), deferred_logger);
+            }
+            if (well->isVFPActive(deferred_logger)) {
+                well->setPrevSurfaceRates(this->wellState(), this->prevWellState());
+            }
+
             well->wellTesting(ebosSimulator_, simulationTime, this->wellState(), this->groupState(), wellTestState(), deferred_logger);
         }
     }
@@ -596,6 +636,11 @@ namespace Opm {
             if (getPropValue<TypeTag, Properties::EnablePolymerMW>() && well->isInjector()) {
                 well->updateWaterThroughput(dt, this->wellState());
             }
+        }
+        // update connection transmissibility factor and d factor (if applicable) in the wellstate
+        for (const auto& well : well_container_) {
+            well->updateConnectionTransmissibilityFactor(ebosSimulator_, this->wellState().well(well->indexOfWell()));
+            well->updateConnectionDFactor(ebosSimulator_, this->wellState().well(well->indexOfWell()));
         }
 
         if (Indices::waterEnabled) {
@@ -665,7 +710,7 @@ namespace Opm {
         this->calculateProductivityIndexValues(local_deferredLogger);
 
         this->commitWGState();
- 
+
         const Opm::Parallel::Communication& comm = grid().comm();
         DeferredLogger global_deferredLogger = gatherDeferredLogger(local_deferredLogger, comm);
         if (terminal_output_) {
@@ -791,20 +836,24 @@ namespace Opm {
 
                 // A new WCON keywords can re-open a well that was closed/shut due to Physical limit
                 if (this->wellTestState().well_is_closed(well_name)) {
+                    // The well was shut this timestep, we are most likely retrying
+                    // a timestep without the well in question, after it caused
+                    // repeated timestep cuts. It should therefore not be opened,
+                    // even if it was new or received new targets this report step.
+                    const bool closed_this_step = (wellTestState().lastTestTime(well_name) == ebosSimulator_.time());
+                    // Always check if wells on historic controls can be opened
+                    if (!closed_this_step && !well_ecl.predictionMode()) {
+                        wellTestState().open_well(well_name);
+                    }
                     // TODO: more checking here, to make sure this standard more specific and complete
                     // maybe there is some WCON keywords will not open the well
                     auto& events = this->wellState().well(w).events;
-                    if (events.hasEvent(WellState::event_mask)) {
-                        if (wellTestState().lastTestTime(well_name) == ebosSimulator_.time()) {
-                            // The well was shut this timestep, we are most likely retrying
-                            // a timestep without the well in question, after it caused
-                            // repeated timestep cuts. It should therefore not be opened,
-                            // even if it was new or received new targets this report step.
-                            events.clearEvent(WellState::event_mask);
-                        } else {
+                    if (events.hasEvent(ScheduleEvents::REQUEST_OPEN_WELL)) {
+                        if (!closed_this_step) {
                             wellTestState().open_well(well_name);
                             wellTestState().open_completions(well_name);
                         }
+                        events.clearEvent(ScheduleEvents::REQUEST_OPEN_WELL);
                     }
                 }
 
@@ -889,7 +938,7 @@ namespace Opm {
         }
 
         // Collect log messages and print.
-        
+
         const Opm::Parallel::Communication& comm = grid().comm();
         DeferredLogger global_deferredLogger = gatherDeferredLogger(local_deferredLogger, comm);
         if (terminal_output_) {
@@ -1006,11 +1055,11 @@ namespace Opm {
     template<typename TypeTag>
     void
     BlackoilWellModel<TypeTag>::
-    balanceNetwork(DeferredLogger& deferred_logger) {
+    doPreStepNetworkRebalance(DeferredLogger& deferred_logger) {
         const double dt = this->ebosSimulator_.timeStepSize();
         // TODO: should we also have the group and network backed-up here in case the solution did not get converged?
         auto& well_state = this->wellState();
-        constexpr std::size_t max_iter = 100;
+        const std::size_t max_iter = param_.network_max_iterations_;
         bool converged = false;
         std::size_t iter = 0;
         bool changed_well_group = false;
@@ -1030,11 +1079,11 @@ namespace Opm {
         } while (iter < max_iter);
 
         if (!converged) {
-            const std::string msg = fmt::format("balanceNetwork did not get converged with {} iterations, and unconverged "
-                                                "network balance result will be used", max_iter);
+            const std::string msg = fmt::format("Initial (pre-step) network balance did not get converged with {} iterations, "
+                                                "unconverged network balance result will be used", max_iter);
             deferred_logger.warning(msg);
         } else {
-            const std::string msg = fmt::format("balanceNetwork get converged with {} iterations", iter);
+            const std::string msg = fmt::format("Initial (pre-step) network balance converged with {} iterations", iter);
             deferred_logger.debug(msg);
         }
     }
@@ -1565,7 +1614,7 @@ namespace Opm {
         int nw =  this->numLocalWellsEnd();
         int rdofs = local_num_cells_;
         for ( int i = 0; i < nw; i++ ){
-            int wdof = rdofs + i; 
+            int wdof = rdofs + i;
             jacobian[wdof][wdof] = 1.0;// better scaling ?
         }
 
@@ -1611,14 +1660,14 @@ namespace Opm {
         int nw =  this->numLocalWellsEnd();
         int rdofs = local_num_cells_;
         for(int i=0; i < nw; i++){
-            int wdof = rdofs + i; 
+            int wdof = rdofs + i;
             jacobian.entry(wdof,wdof) = 1.0;// better scaling ?
         }
         std::vector<std::vector<int>> wellconnections = getMaxWellConnections();
         for(int i=0; i < nw; i++){
             const auto& perfcells = wellconnections[i];
             for(int perfcell : perfcells){
-                int wdof = rdofs + i; 
+                int wdof = rdofs + i;
                 jacobian.entry(wdof,perfcell) = 0.0;
                 jacobian.entry(perfcell, wdof) = 0.0;
             }
@@ -1853,7 +1902,7 @@ namespace Opm {
             const auto& balance = schedule()[episodeIdx].network_balance();
             constexpr double relaxtion_factor = 10.0;
             const double tolerance = relax_network_tolerance ? relaxtion_factor * balance.pressure_tolerance() : balance.pressure_tolerance();
-            more_network_update = network_imbalance > tolerance;
+            more_network_update = this->networkActive() && network_imbalance > tolerance;
         }
 
         bool changed_well_group = false;
@@ -1867,15 +1916,22 @@ namespace Opm {
         }
         // Check wells' group constraints and communicate.
         bool changed_well_to_group = false;
-        for (const auto& well : well_container_) {
-            const auto mode = WellInterface<TypeTag>::IndividualOrGroup::Group;
-            const bool changed_well = well->updateWellControl(ebosSimulator_, mode, this->wellState(), this->groupState(), deferred_logger);
-            if (changed_well) {
-                changed_well_to_group = changed_well || changed_well_to_group;
-            }
+        {
+            // For MS Wells a linear solve is performed below and the matrix might be singular.
+            // We need to communicate the exception thrown to the others and rethrow.
+            OPM_BEGIN_PARALLEL_TRY_CATCH()
+                for (const auto& well : well_container_) {
+                    const auto mode = WellInterface<TypeTag>::IndividualOrGroup::Group;
+                    const bool changed_well = well->updateWellControl(ebosSimulator_, mode, this->wellState(), this->groupState(), deferred_logger);
+                    if (changed_well) {
+                        changed_well_to_group = changed_well || changed_well_to_group;
+                    }
+                }
+            OPM_END_PARALLEL_TRY_CATCH("BlackoilWellModel: updating well controls failed: ",
+                                       ebosSimulator_.gridView().comm());
         }
 
-        changed_well_to_group = comm.sum(changed_well_to_group);
+        changed_well_to_group = comm.sum(static_cast<int>(changed_well_to_group));
         if (changed_well_to_group) {
             updateAndCommunicate(episodeIdx, iterationIdx, deferred_logger);
             changed_well_group = true;
@@ -1883,14 +1939,22 @@ namespace Opm {
 
         // Check individual well constraints and communicate.
         bool changed_well_individual = false;
-        for (const auto& well : well_container_) {
-            const auto mode = WellInterface<TypeTag>::IndividualOrGroup::Individual;
-            const bool changed_well = well->updateWellControl(ebosSimulator_, mode, this->wellState(), this->groupState(), deferred_logger);
-            if (changed_well) {
-                changed_well_individual = changed_well || changed_well_individual;
-            }
+        {
+            // For MS Wells a linear solve is performed below and the matrix might be singular.
+            // We need to communicate the exception thrown to the others and rethrow.
+            OPM_BEGIN_PARALLEL_TRY_CATCH()
+                for (const auto& well : well_container_) {
+                    const auto mode = WellInterface<TypeTag>::IndividualOrGroup::Individual;
+                    const bool changed_well = well->updateWellControl(ebosSimulator_, mode, this->wellState(), this->groupState(), deferred_logger);
+                    if (changed_well) {
+                        changed_well_individual = changed_well || changed_well_individual;
+                    }
+                }
+            OPM_END_PARALLEL_TRY_CATCH("BlackoilWellModel: updating well controls failed: ",
+                                       ebosSimulator_.gridView().comm());
         }
-        changed_well_individual = comm.sum(changed_well_individual);
+
+        changed_well_individual = comm.sum(static_cast<int>(changed_well_individual));
         if (changed_well_individual) {
             updateAndCommunicate(episodeIdx, iterationIdx, deferred_logger);
             changed_well_group = true;
@@ -2138,7 +2202,7 @@ namespace Opm {
                 this->closed_this_step_.insert(wname);
             }
         }
-               
+
         const Opm::Parallel::Communication comm = grid().comm();
         DeferredLogger global_deferredLogger = gatherDeferredLogger(local_deferredLogger, comm);
         if (terminal_output_) {
@@ -2239,7 +2303,13 @@ namespace Opm {
     BlackoilWellModel<TypeTag>::
     prepareTimeStep(DeferredLogger& deferred_logger)
     {
-        const bool network_rebalance_necessary = this->needRebalanceNetwork(ebosSimulator_.episodeIndex());
+        // Check if there is a network with active prediction wells at this time step.
+        const auto episodeIdx = ebosSimulator_.episodeIndex();
+        this->updateNetworkActiveState(episodeIdx);
+
+        // Rebalance the network initially if any wells in the network have status changes
+        // (Need to check this before clearing events)
+        const bool do_prestep_network_rebalance = this->needPreStepNetworkRebalance(episodeIdx);
 
         for (const auto& well : well_container_) {
             auto& events = this->wellState().well(well->indexOfWell()).events;
@@ -2252,12 +2322,16 @@ namespace Opm {
                 // so next time step, the well does not consider to have effective events anymore.
                 events.clearEvent(WellState::event_mask);
             }
+            // these events only work for the first time step within the report step
+            if (events.hasEvent(ScheduleEvents::REQUEST_OPEN_WELL)) {
+                events.clearEvent(ScheduleEvents::REQUEST_OPEN_WELL);
+            }
             // solve the well equation initially to improve the initial solution of the well model
             if (param_.solve_welleq_initially_ && well->isOperableAndSolvable()) {
                 try {
                     well->solveWellEquation(ebosSimulator_, this->wellState(), this->groupState(), deferred_logger);
                 } catch (const std::exception& e) {
-                    const std::string msg = "Compute initial well solution for " + well->name() + " initially failed. Continue with the privious rates";
+                    const std::string msg = "Compute initial well solution for " + well->name() + " initially failed. Continue with the previous rates";
                     deferred_logger.warning("WELL_INITIAL_SOLVE_FAILED", msg);
                 }
             }
@@ -2267,10 +2341,8 @@ namespace Opm {
         }
         updatePrimaryVariables(deferred_logger);
 
-        if (network_rebalance_necessary) {
-            // this is to obtain good network solution
-            balanceNetwork(deferred_logger);
-        }
+        // Actually do the pre-step network rebalance, using the updated well states and initial solutions
+        if (do_prestep_network_rebalance) doPreStepNetworkRebalance(deferred_logger);
     }
 
     template<typename TypeTag>
@@ -2559,22 +2631,30 @@ namespace Opm {
     setupDomains(const std::vector<Domain>& domains)
     {
         OPM_BEGIN_PARALLEL_TRY_CATCH();
-        // TODO: This loop nest may be slow for very large numbers
-        // of domains and wells, but that has not been observed on
-        // tests so far. Using the partition vector instead would
-        // be faster if we need to change.
+        // TODO: This loop nest may be slow for very large numbers of
+        // domains and wells, but that has not been observed on tests so
+        // far.  Using the partition vector instead would be faster if we
+        // need to change.
         for (const auto& wellPtr : this->well_container_) {
-            const int first_well_cell = wellPtr->cells()[0];
+            const int first_well_cell = wellPtr->cells().front();
             for (const auto& domain : domains) {
-                const bool found = std::binary_search(domain.cells.begin(), domain.cells.end(), first_well_cell);
-                if (found) {
+                auto cell_present = [&domain](const auto cell)
+                {
+                    return std::binary_search(domain.cells.begin(),
+                                              domain.cells.end(), cell);
+                };
+
+                if (cell_present(first_well_cell)) {
                     // Assuming that if the first well cell is found in a domain,
                     // then all of that well's cells are in that same domain.
                     well_domain_[wellPtr->name()] = domain.index;
+
                     // Verify that all of that well's cells are in that same domain.
                     for (int well_cell : wellPtr->cells()) {
-                        if (!std::binary_search(domain.cells.begin(), domain.cells.end(), well_cell)) {
-                            OPM_THROW(std::runtime_error, "Well found on multiple domains.");
+                        if (! cell_present(well_cell)) {
+                            OPM_THROW(std::runtime_error,
+                                      fmt::format("Well '{}' found on multiple domains.",
+                                                  wellPtr->name()));
                         }
                     }
                 }

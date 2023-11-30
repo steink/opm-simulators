@@ -79,6 +79,7 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/timestepping/SimulatorTimerInterface.cpp
   opm/simulators/timestepping/gatherConvergenceReport.cpp
   opm/simulators/utils/ComponentName.cpp
+  opm/simulators/utils/compressPartition.cpp
   opm/simulators/utils/DeferredLogger.cpp
   opm/simulators/utils/gatherDeferredLogger.cpp
   opm/simulators/utils/ParallelFileMerger.cpp
@@ -151,27 +152,26 @@ if (Damaris_FOUND AND MPI_FOUND)
   list (APPEND MAIN_SOURCE_FILES opm/simulators/utils/initDamarisXmlFile.cpp)
 endif()
 if(CUDA_FOUND)
-  if(USE_BDA_BRIDGE)
-    list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/bda/cuda/cusparseSolverBackend.cu)
-    list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/bda/cuda/cuWellContributions.cu)
-  endif()
-
   # CUISTL SOURCE
   list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/detail/CuBlasHandle.cpp)
+  list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/detail/cusparse_matrix_operations.cu)
   list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/detail/CuSparseHandle.cpp)
   list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/CuVector.cpp)
   list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/detail/vector_operations.cu)
   list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/CuSparseMatrix.cpp)
+  list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/CuJac.cpp)
   list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/CuSeqILU0.cpp)
   list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/set_device.cpp)
 
   # CUISTL HEADERS
   list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/cuda_safe_call.hpp)
+  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/cusparse_matrix_operations.hpp)
   list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/cusparse_safe_call.hpp)
   list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/cublas_safe_call.hpp)
   list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/cuda_check_last_error.hpp)
   list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/CuBlasHandle.hpp)
   list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/CuSparseHandle.hpp)
+  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/CuJac.hpp)
   list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/CuVector.hpp)
   list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/CuSparseMatrix.hpp)
   list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/CuMatrixDescription.hpp)
@@ -195,6 +195,7 @@ if(CUDA_FOUND)
   list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/set_device.hpp)
 
 endif()
+
 if(USE_BDA_BRIDGE)
   list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/bda/BdaBridge.cpp
                                  opm/simulators/linalg/bda/WellContributions.cpp
@@ -219,6 +220,11 @@ if(USE_BDA_BRIDGE)
   endif()
   if(rocsparse_FOUND AND rocblas_FOUND)
     list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/bda/rocsparseSolverBackend.cpp)
+    list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/bda/rocsparseWellContributions.cpp)
+  endif()
+  if(CUDA_FOUND)
+    list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/bda/cuda/cusparseSolverBackend.cu)
+    list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/bda/cuda/cuWellContributions.cu)
   endif()
   if(amgcl_FOUND)
     list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/bda/amgclSolverBackend.cpp)
@@ -230,6 +236,7 @@ endif()
 if(MPI_FOUND)
   list(APPEND MAIN_SOURCE_FILES opm/simulators/utils/MPIPacker.cpp
                                 opm/simulators/utils/ParallelEclipseState.cpp
+                                opm/simulators/utils/ParallelNLDDPartitioningZoltan.cpp
                                 opm/simulators/utils/ParallelSerialization.cpp
                                 opm/simulators/utils/SetupZoltanParams.cpp)
 endif()
@@ -246,6 +253,7 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_convergenceoutputconfiguration.cpp
   tests/test_convergencereport.cpp
   tests/test_deferredlogger.cpp
+  tests/test_dilu.cpp
   tests/test_eclinterregflows.cpp
   tests/test_equil.cc
   tests/test_extractMatrix.cpp
@@ -283,18 +291,21 @@ if(CUDA_FOUND)
   if(USE_BDA_BRIDGE)
     list(APPEND TEST_SOURCE_FILES tests/test_cusparseSolver.cpp)
   endif()
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cusparse_safe_call.cpp)
+  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_converttofloatadapter.cpp)
+  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cublas_handle.cpp)
   list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cublas_safe_call.cpp)
+  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cusparse_safe_call.cpp)
   list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cuda_safe_call.cpp)
   list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cuda_check_last_error.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cublas_handle.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cusparse_handle.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cuvector.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cusparsematrix.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_safe_conversion.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cuseqilu0.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_converttofloatadapter.cpp)
+  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cujac.cpp)
   list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cuowneroverlapcopy.cpp)
+  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cuseqilu0.cpp)
+  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cusparse_handle.cpp)
+  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cuSparse_matrix_operations.cpp)
+  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cusparsematrix.cpp)
+  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cuvector.cpp)
+  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cuVector_operations.cpp)
+  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_safe_conversion.cpp)
   list(APPEND TEST_SOURCE_FILES tests/cuistl/test_solver_adapter.cpp)
 
 
@@ -473,10 +484,13 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/linalg/bda/MultisegmentWellContribution.hpp
   opm/simulators/linalg/bda/rocalutionSolverBackend.hpp
   opm/simulators/linalg/bda/rocsparseSolverBackend.hpp
+  opm/simulators/linalg/bda/rocsparseWellContributions.hpp
   opm/simulators/linalg/bda/WellContributions.hpp
   opm/simulators/linalg/amgcpr.hh
+  opm/simulators/linalg/DILU.hpp
   opm/simulators/linalg/twolevelmethodcpr.hh
   opm/simulators/linalg/ExtractParallelGridInformationToISTL.hpp
+  opm/simulators/linalg/ExtraSmoothers.hpp
   opm/simulators/linalg/FlexibleSolver.hpp
   opm/simulators/linalg/FlexibleSolver_impl.hpp
   opm/simulators/linalg/FlowLinearSolverParameters.hpp
@@ -510,12 +524,14 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/timestepping/SimulatorTimerInterface.hpp
   opm/simulators/timestepping/gatherConvergenceReport.hpp
   opm/simulators/utils/ComponentName.hpp
+  opm/simulators/utils/compressPartition.hpp
   opm/simulators/utils/ParallelFileMerger.hpp
   opm/simulators/utils/DeferredLoggingErrorHelpers.hpp
   opm/simulators/utils/DeferredLogger.hpp
   opm/simulators/utils/gatherDeferredLogger.hpp
   opm/simulators/utils/moduleVersion.hpp
   opm/simulators/utils/ParallelEclipseState.hpp
+  opm/simulators/utils/ParallelNLDDPartitioningZoltan.hpp
   opm/simulators/utils/ParallelRestart.hpp
   opm/simulators/utils/PropsDataHandle.hpp
   opm/simulators/utils/SerializationPackers.hpp

@@ -32,6 +32,9 @@
 #include <opm/output/eclipse/RestartValue.hpp>
 
 #include <opm/input/eclipse/EclipseState/EclipseState.hpp>
+#include <opm/input/eclipse/EclipseState/SummaryConfig/SummaryConfig.hpp>
+
+#include <opm/input/eclipse/Schedule/Action/SimulatorUpdate.hpp>
 #include <opm/input/eclipse/Schedule/Group/GConSale.hpp>
 #include <opm/input/eclipse/Schedule/Group/GroupEconProductionLimits.hpp>
 #include <opm/input/eclipse/Schedule/Group/GConSump.hpp>
@@ -42,7 +45,7 @@
 #include <opm/input/eclipse/Schedule/Schedule.hpp>
 #include <opm/input/eclipse/Schedule/Well/WellConnections.hpp>
 #include <opm/input/eclipse/Schedule/Well/WellTestConfig.hpp>
-#include <opm/input/eclipse/EclipseState/SummaryConfig/SummaryConfig.hpp>
+
 #include <opm/input/eclipse/Units/Units.hpp>
 
 #include <opm/simulators/utils/DeferredLogger.hpp>
@@ -91,20 +94,25 @@ BlackoilWellModelGeneric(Schedule& schedule,
     , nupcol_wgstate_(phase_usage)
 {
 
-  const auto numProcs = comm_.size();
-  this->not_on_process_ = [this, numProcs](const Well& well) {
-      if (numProcs == decltype(numProcs){1})
-          return false;
+    const auto numProcs = comm_.size();
+    this->not_on_process_ = [this, numProcs](const Well& well) {
+        if (numProcs == decltype(numProcs){1})
+            return false;
 
-      // Recall: false indicates NOT active!
-      const auto value = std::make_pair(well.name(), true);
-      auto candidate = std::lower_bound(this->parallel_well_info_.begin(),
-                                        this->parallel_well_info_.end(),
-                                        value);
+        // Recall: false indicates NOT active!
+        const auto value = std::make_pair(well.name(), true);
+        auto candidate = std::lower_bound(this->parallel_well_info_.begin(),
+                                          this->parallel_well_info_.end(),
+                                          value);
 
-      return (candidate == this->parallel_well_info_.end())
-              || (*candidate != value);
-  };
+        return (candidate == this->parallel_well_info_.end())
+                || (*candidate != value);
+    };
+
+    const auto& node_pressures = eclState.getRestartNetworkPressures();
+    if (node_pressures.has_value()) {
+        this->node_pressures_ = node_pressures.value();
+    }
 }
 
 int
@@ -137,6 +145,13 @@ BlackoilWellModelGeneric::
 wellsActive() const
 {
     return wells_active_;
+}
+
+bool
+BlackoilWellModelGeneric::
+networkActive() const
+{
+    return network_active_;
 }
 
 bool
@@ -662,10 +677,10 @@ checkGroupHigherConstraints(const Group& group,
 void
 BlackoilWellModelGeneric::
 updateEclWells(const int timeStepIdx,
-               const std::unordered_set<std::string>& wells,
+               const SimulatorUpdate& sim_update,
                const SummaryState& st)
 {
-    for (const auto& wname : wells) {
+    for (const auto& wname : sim_update.affected_wells) {
         auto well_iter = std::find_if(this->wells_ecl_.begin(), this->wells_ecl_.end(),
             [&wname] (const auto& well) -> bool
         {
@@ -676,25 +691,36 @@ updateEclWells(const int timeStepIdx,
             continue;
         }
 
-        auto well_index = std::distance(this->wells_ecl_.begin(), well_iter);
-        this->wells_ecl_[well_index] = schedule_.getWell(wname, timeStepIdx);
+        const auto well_index = std::distance(this->wells_ecl_.begin(), well_iter);
 
-        const auto& well = this->wells_ecl_[well_index];
-        auto& pd     = this->well_perf_data_[well_index];
-        auto  pdIter = pd.begin();
-        for (const auto& conn : well.getConnections()) {
-            if (conn.state() != Connection::State::SHUT) {
-                pdIter->connection_transmissibility_factor = conn.CF();
-                ++pdIter;
+        const auto& well = this->wells_ecl_[well_index] =
+            this->schedule_.getWell(wname, timeStepIdx);
+
+        auto& pd = this->well_perf_data_[well_index];
+
+        {
+            auto pdIter = pd.begin();
+
+            for (const auto& conn : well.getConnections()) {
+                if (conn.state() != Connection::State::SHUT) {
+                    pdIter->connection_transmissibility_factor = conn.CF();
+                    ++pdIter;
+                }
             }
         }
-        auto& ws = this->wellState().well(well_index);
 
-        ws.updateStatus( well.getStatus() );
-        ws.reset_connection_factors(pd);
-        ws.update_targets(well, st);
+        {
+            auto& ws = this->wellState().well(well_index);
+
+            ws.updateStatus(well.getStatus());
+            ws.reset_connection_factors(pd);
+            ws.update_targets(well, st);
+        }
+
         this->prod_index_calc_[well_index].reInit(well);
     }
+
+    this->wellStructureChangedDynamically_ = sim_update.well_structure_changed;
 }
 
 double
@@ -846,6 +872,7 @@ assignShutConnections(data::Wells& wsrpt,
 
             xc.effective_Kh = conn.Kh();
             xc.trans_factor = conn.CF();
+            xc.d_factor = conn.dFactor();
         }
 
         ++wellID;
@@ -902,11 +929,44 @@ assignGroupValues(const int                               reportStepIdx,
 
 void
 BlackoilWellModelGeneric::
-assignNodeValues(std::map<std::string, data::NodeData>& nodevalues) const
+assignNodeValues(std::map<std::string, data::NodeData>& nodevalues, const int reportStepIdx) const
 {
     nodevalues.clear();
+    if (reportStepIdx < 0) return;
+
     for (const auto& [node, pressure] : node_pressures_) {
         nodevalues.emplace(node, data::NodeData{pressure});
+        // Assign node values of well groups to GPR:WELLNAME
+        const auto& sched = schedule();
+        if (!sched.hasGroup(node, reportStepIdx)) continue;
+        const auto& group = sched.getGroup(node, reportStepIdx);
+        for (const std::string& wellname : group.wells()) {
+                nodevalues.emplace(wellname, data::NodeData{pressure});
+        }
+    }
+
+    const auto& network = schedule()[reportStepIdx].network();
+    if (!network.active()) return;
+
+    auto converged_pressures = WellGroupHelpers::computeNetworkPressures(network,
+                                                                this->wellState(),
+                                                                this->groupState(),
+                                                                *(vfp_properties_->getProd()),
+                                                                schedule(),
+                                                                reportStepIdx);
+    for (const auto& [node, converged_pressure] : converged_pressures) {
+        auto it = nodevalues.find(node);
+        assert(it != nodevalues.end() );
+        it->second.converged_pressure = converged_pressure;
+        // Assign node values of group to GPR:WELLNAME
+        const auto& sched = schedule();
+        if (!sched.hasGroup(node, reportStepIdx)) continue;
+        const auto& group = sched.getGroup(node, reportStepIdx);
+        for (const std::string& wellname : group.wells()) {
+                auto it2 = nodevalues.find(wellname);
+                assert(it2 != nodevalues.end());
+                it2->second.converged_pressure = converged_pressure;
+        }
     }
 }
 
@@ -917,7 +977,7 @@ groupAndNetworkData(const int reportStepIdx) const
     auto grp_nwrk_values = data::GroupAndNetworkValues{};
 
     this->assignGroupValues(reportStepIdx, grp_nwrk_values.groupData);
-    this->assignNodeValues(grp_nwrk_values.nodeData);
+    this->assignNodeValues(grp_nwrk_values.nodeData, reportStepIdx-1); // Schedule state info at previous step
 
     return grp_nwrk_values;
 }
@@ -978,27 +1038,43 @@ hasTHPConstraints() const
     return BlackoilWellModelConstraints(*this).hasTHPConstraints();
 }
 
-bool
+void
 BlackoilWellModelGeneric::
-needRebalanceNetwork(const int report_step) const
-{
+updateNetworkActiveState(const int report_step) {
     const auto& network = schedule()[report_step].network();
     if (!network.active()) {
-        return false;
+        this->network_active_ = false;
+        return;
     }
 
+    bool network_active = false;
+    for (const auto& well : well_container_generic_) {
+        const bool is_partof_network = network.has_node(well->wellEcl().groupName());
+        const bool prediction_mode = well->wellEcl().predictionMode();
+        if (is_partof_network && prediction_mode) {
+            network_active = true;
+            break;
+        }
+    }
+    this->network_active_ = comm_.max(network_active);
+}
+
+bool
+BlackoilWellModelGeneric::
+needPreStepNetworkRebalance(const int report_step) const
+{
+    const auto& network = schedule()[report_step].network();
     bool network_rebalance_necessary = false;
     for (const auto& well : well_container_generic_) {
-        const auto& events = this->wellState().well(well->indexOfWell()).events;
         const bool is_partof_network = network.has_node(well->wellEcl().groupName());
-        // TODO: we might find more relevant events to be included here
+        // TODO: we might find more relevant events to be included here (including network change events?)
+        const auto& events = this->wellState().well(well->indexOfWell()).events;
         if (is_partof_network && events.hasEvent(ScheduleEvents::WELL_STATUS_CHANGE)) {
             network_rebalance_necessary = true;
             break;
         }
     }
     network_rebalance_necessary = comm_.max(network_rebalance_necessary);
-
     return network_rebalance_necessary;
 }
 
@@ -1059,7 +1135,7 @@ double
 BlackoilWellModelGeneric::
 updateNetworkPressures(const int reportStepIdx)
 {
-    // Get the network and return if inactive.
+    // Get the network and return if inactive (no wells in network at this time)
     const auto& network = schedule()[reportStepIdx].network();
     if (!network.active()) {
         return 0.0;
@@ -1076,10 +1152,18 @@ updateNetworkPressures(const int reportStepIdx)
 
     // here, the network imbalance is the difference between the previous nodal pressure and the new nodal pressure
     double network_imbalance = 0.;
+    if (!this->networkActive())
+        return network_imbalance;
 
     if (!previous_node_pressures.empty()) {
-        for (const auto& [name, pressure]: previous_node_pressures) {
-            const auto new_pressure = node_pressures_.at(name);
+        for (const auto& [name, new_pressure]: node_pressures_) {
+            if (previous_node_pressures.count(name) <= 0) {
+                if (std::abs(new_pressure) > network_imbalance) {
+                    network_imbalance = std::abs(new_pressure);
+                }
+                continue;
+            }
+            const auto pressure = previous_node_pressures.at(name);
             const double change = (new_pressure - pressure);
             if (std::abs(change) > network_imbalance) {
                 network_imbalance = std::abs(change);
@@ -1111,7 +1195,7 @@ updateNetworkPressures(const int reportStepIdx)
         // Producers only, since we so far only support the
         // "extended" network model (properties defined by
         // BRANPROP and NODEPROP) which only applies to producers.
-        if (well->isProducer()) {
+        if (well->isProducer() && well->wellEcl().predictionMode()) {
             const auto it = node_pressures_.find(well->wellEcl().groupName());
             if (it != node_pressures_.end()) {
                 // The well belongs to a group with has a network pressure constraint,

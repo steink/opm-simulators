@@ -117,7 +117,7 @@ public:
     static constexpr bool has_polymermw = getPropValue<TypeTag, Properties::EnablePolymerMW>();
     static constexpr bool has_foam = getPropValue<TypeTag, Properties::EnableFoam>();
     static constexpr bool has_brine = getPropValue<TypeTag, Properties::EnableBrine>();
-    static constexpr bool has_watVapor = getPropValue<TypeTag, Properties::EnableEvaporation>();
+    static constexpr bool has_watVapor = getPropValue<TypeTag, Properties::EnableVapwat>();
     static constexpr bool has_disgas_in_water = getPropValue<TypeTag, Properties::EnableDisgasInWater>();
     static constexpr bool has_saltPrecip = getPropValue<TypeTag, Properties::EnableSaltPrecipitation>();
     static constexpr bool has_micp = getPropValue<TypeTag, Properties::EnableMICP>();
@@ -327,7 +327,7 @@ public:
     /// to the rates returned by computeCurrentWellRates().
     void updateWellStateRates(const Simulator& ebosSimulator,
                               WellState& well_state,
-                              DeferredLogger& deferred_logger) const;                      
+                              DeferredLogger& deferred_logger) const;
 
     void solveWellEquation(const Simulator& ebosSimulator,
                            WellState& well_state,
@@ -348,6 +348,13 @@ public:
     {
         return 0;
     }
+
+    std::vector<double> wellIndex(const int perf, const IntensiveQuantities& intQuants, const double trans_mult, const SingleWellState& ws) const;
+
+    void updateConnectionDFactor(const Simulator& simulator, SingleWellState& ws) const;
+
+    void updateConnectionTransmissibilityFactor(const Simulator& simulator, SingleWellState& ws) const;
+
 
 protected:
     // simulation parameters
@@ -439,6 +446,10 @@ protected:
                                 const std::vector<Scalar>& mobility,
                                 double* connII,
                                 DeferredLogger& deferred_logger) const;
+
+    double computeConnectionDFactor(const int perf, const IntensiveQuantities& intQuants, const SingleWellState& ws) const;
+
+
 };
 
 }

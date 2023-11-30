@@ -171,7 +171,7 @@ add_test_compare_parallel_simulation(CASENAME actionx_m1
                                      ABS_TOL ${abs_tol_parallel}
                                      REL_TOL ${coarse_rel_tol_parallel}
                                      DIR udq_actionx
-                                     TEST_ARGS --linear-solver-reduction=1e-7 --tolerance-cnv=5e-6 --tolerance-mb=1e-6)
+                                     TEST_ARGS --solver-max-time-step-in-days=0.2 --linear-solver-reduction=1e-7 --tolerance-cnv=5e-6 --tolerance-mb=1e-6)
 
 add_test_compare_parallel_simulation(CASENAME winjmult_msw
                                      FILENAME WINJMULT_MSW
@@ -203,4 +203,4 @@ add_test_compare_parallel_simulation(CASENAME rxft
                                      ABS_TOL ${abs_tol_parallel}
                                      REL_TOL 1.0e-3
                                      DIR rxft_smry
-                                     TEST_ARGS --linear-solver-reduction=1e-7 --tolerance-cnv=5e-6 --tolerance-mb=1e-8 --ecl-enable-drift-compensation=false)
+                                     TEST_ARGS --enable-tuning=true --linear-solver-reduction=1e-7 --tolerance-cnv=5e-6 --tolerance-mb=1e-8 --ecl-enable-drift-compensation=false)

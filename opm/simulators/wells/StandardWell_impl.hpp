@@ -119,7 +119,7 @@ namespace Opm
     computePerfRate(const IntensiveQuantities& intQuants,
                     const std::vector<Value>& mob,
                     const Value& bhp,
-                    const double Tw,
+                    const std::vector<Scalar>& Tw,
                     const int perf,
                     const bool allow_cf,
                     std::vector<Value>& cq_s,
@@ -224,7 +224,7 @@ namespace Opm
                     const Value& rvw,
                     const Value& rsw,
                     std::vector<Value>& b_perfcells_dense,
-                    const double Tw,
+                    const std::vector<Scalar>& Tw,
                     const int perf,
                     const bool allow_cf,
                     const Value& skin_pressure,
@@ -249,7 +249,7 @@ namespace Opm
 
             // compute component volumetric rates at standard conditions
             for (int componentIdx = 0; componentIdx < this->numComponents(); ++componentIdx) {
-                const Value cq_p = - Tw * (mob[componentIdx] * drawdown);
+                const Value cq_p = - Tw[componentIdx] * (mob[componentIdx] * drawdown);
                 cq_s[componentIdx] = b_perfcells_dense[componentIdx] * cq_p;
             }
 
@@ -269,9 +269,6 @@ namespace Opm
             for (int componentIdx = 1; componentIdx < this->numComponents(); ++componentIdx) {
                 total_mob_dense += mob[componentIdx];
             }
-
-            // injection perforations total volume rates
-            const Value cqt_i = - Tw * (total_mob_dense * drawdown);
 
             // compute volume ratio between connection at standard conditions
             Value volumeRatio = bhp * 0.0; // initialize it with the correct type
@@ -306,8 +303,9 @@ namespace Opm
             }
 
             // injecting connections total volumerates at standard conditions
-            Value cqt_is = cqt_i / volumeRatio;
             for (int componentIdx = 0; componentIdx < this->numComponents(); ++componentIdx) {
+                const Value cqt_i = - Tw[componentIdx] * (total_mob_dense * drawdown);
+                Value cqt_is = cqt_i / volumeRatio;
                 cq_s[componentIdx] = cmix_s[componentIdx] * cqt_is;
             }
 
@@ -369,9 +367,11 @@ namespace Opm
         auto& ws = well_state.well(this->index_of_well_);
         ws.phase_mixing_rates.fill(0.0);
 
+
         const int np = this->number_of_phases_;
 
         std::vector<RateVector> connectionRates = this->connectionRates_; // Copy to get right size.
+
         auto& perf_data = ws.perf_data;
         auto& perf_rates = perf_data.phase_rates;
         for (int perf = 0; perf < this->number_of_perforations_; ++perf) {
@@ -465,7 +465,7 @@ namespace Opm
         try {
             this->linSys_.invert();
         } catch( ... ) {
-            OPM_DEFLOG_THROW(NumericalProblem, "Error when inverting local well equations for well " + name(), deferred_logger);
+            OPM_DEFLOG_PROBLEM(NumericalProblem, "Error when inverting local well equations for well " + name(), deferred_logger);
         }
     }
 
@@ -492,8 +492,9 @@ namespace Opm
         getMobility(ebosSimulator, perf, mob, deferred_logger);
 
         PerforationRates perf_rates;
-        double trans_mult = ebosSimulator.problem().template rockCompTransMultiplier<double>(intQuants,  cell_idx);
-        const double Tw = this->well_index_[perf] * trans_mult;
+        double trans_mult = ebosSimulator.problem().template wellTransMultiplier<double>(intQuants,  cell_idx);
+        const auto& wellstate_nupcol = ebosSimulator.problem().wellModel().nupcolWellState().well(this->index_of_well_);
+        const std::vector<Scalar> Tw = this->wellIndex(perf, intQuants, trans_mult, wellstate_nupcol);
         computePerfRate(intQuants, mob, bhp, Tw, perf, allow_cf,
                         cq_s, perf_rates, deferred_logger);
 
@@ -517,6 +518,10 @@ namespace Opm
             ws.phase_mixing_rates[ws.dissolved_gas_in_water] += perf_rates.dis_gas_in_water;
             ws.phase_mixing_rates[ws.vaporized_oil] += perf_rates.vap_oil;
             ws.phase_mixing_rates[ws.vaporized_water] += perf_rates.vap_wat;
+            perf_data.phase_mixing_rates[perf][ws.dissolved_gas] = perf_rates.dis_gas;
+            perf_data.phase_mixing_rates[perf][ws.dissolved_gas_in_water] = perf_rates.dis_gas_in_water;
+            perf_data.phase_mixing_rates[perf][ws.vaporized_oil] = perf_rates.vap_oil;
+            perf_data.phase_mixing_rates[perf][ws.vaporized_water] = perf_rates.vap_wat;
         }
 
         if constexpr (has_energy) {
@@ -703,7 +708,7 @@ namespace Opm
     {
         const double dFLimit = this->param_.dwell_fraction_max_;
         const double dBHPLimit = this->param_.dbhp_max_rel_;
-        this->primary_variables_.updateNewton(dwells, stop_or_zero_rate_target, dFLimit, dBHPLimit);
+        this->primary_variables_.updateNewton(dwells, stop_or_zero_rate_target, dFLimit, dBHPLimit, deferred_logger);
 
         // for the water velocity and skin pressure
         if constexpr (Base::has_polymermw) {
@@ -787,12 +792,13 @@ namespace Opm
             }
 
             // the well index associated with the connection
-            const double tw_perf = this->well_index_[perf]*ebos_simulator.problem().template rockCompTransMultiplier<double>(int_quantities, cell_idx);
-
+            double trans_mult = ebos_simulator.problem().template wellTransMultiplier<double>(int_quantities, cell_idx);
+            const auto& wellstate_nupcol = ebos_simulator.problem().wellModel().nupcolWellState().well(this->index_of_well_);
+            const std::vector<Scalar> tw_perf = this->wellIndex(perf, int_quantities, trans_mult, wellstate_nupcol);  
             std::vector<double> ipr_a_perf(this->ipr_a_.size());
             std::vector<double> ipr_b_perf(this->ipr_b_.size());
             for (int comp_idx = 0; comp_idx < this->num_components_; ++comp_idx) {
-                const double tw_mob = tw_perf * mob[comp_idx] * b_perf[comp_idx];
+                const double tw_mob = tw_perf[comp_idx] * mob[comp_idx] * b_perf[comp_idx];
                 ipr_a_perf[comp_idx] += tw_mob * pressure_diff;
                 ipr_b_perf[comp_idx] += tw_mob;
             }
@@ -1361,8 +1367,9 @@ namespace Opm
             // flux for each perforation
             std::vector<Scalar> mob(this->num_components_, 0.);
             getMobility(ebosSimulator, perf, mob, deferred_logger);
-            double trans_mult = ebosSimulator.problem().template rockCompTransMultiplier<double>(intQuants, cell_idx);
-            const double Tw = this->well_index_[perf] * trans_mult;
+            double trans_mult = ebosSimulator.problem().template wellTransMultiplier<double>(intQuants, cell_idx);
+            const auto& wellstate_nupcol = ebosSimulator.problem().wellModel().nupcolWellState().well(this->index_of_well_);
+            const std::vector<Scalar> Tw = this->wellIndex(perf, intQuants, trans_mult, wellstate_nupcol);
 
             std::vector<Scalar> cq_s(this->num_components_, 0.);
             PerforationRates perf_rates;
@@ -1431,7 +1438,9 @@ namespace Opm
             well_state_copy.wellRates(this->index_of_well_)[phase]
                     = sign * ws.well_potentials[phase];
         }
-        well_copy.calculateExplicitQuantities(ebosSimulator, well_state_copy, deferred_logger);
+        well_copy.updatePrimaryVariables(summary_state, well_state_copy, deferred_logger);
+        well_copy.initPrimaryVariablesEvaluation();
+        well_copy.computeAccumWell();
 
         const double dt = ebosSimulator.timeStepSize();
         const bool converged = well_copy.iterateWellEqWithControl(ebosSimulator, dt, inj_controls, prod_controls, well_state_copy, group_state, deferred_logger);
@@ -1664,8 +1673,9 @@ namespace Opm
 
             std::vector<EvalWell> cq_s(this->num_components_, {this->primary_variables_.numWellEq() + Indices::numEq, 0.});
             PerforationRates perf_rates;
-            double trans_mult = ebos_simulator.problem().template rockCompTransMultiplier<double>(int_quant, cell_idx);
-            const double Tw = this->well_index_[perf] * trans_mult;
+            double trans_mult = ebos_simulator.problem().template wellTransMultiplier<double>(int_quant, cell_idx);
+            const auto& wellstate_nupcol = ebos_simulator.problem().wellModel().nupcolWellState().well(this->index_of_well_);
+            const std::vector<Scalar> Tw = this->wellIndex(perf, int_quant, trans_mult, wellstate_nupcol);  
             computePerfRate(int_quant, mob, bhp, Tw, perf, allow_cf, cq_s,
                             perf_rates, deferred_logger);
             // TODO: make area a member
@@ -2167,26 +2177,26 @@ namespace Opm
                                DeferredLogger& deferred_logger)
     {
         const int max_iter = this->param_.max_inner_iter_wells_;
-        
+
         int it = 0;
         bool converged;
         bool relax_convergence = false;
         this->regularize_ = false;
         const auto& summary_state = ebosSimulator.vanguard().summaryState();
 
-        // Max status switch frequency should be 2 to avoid getting stuck in cycle 
+        // Max status switch frequency should be 2 to avoid getting stuck in cycle
         constexpr int min_its_after_switch = 2;
         int its_since_last_switch = min_its_after_switch;
         int switch_count= 0;
         const auto well_status = this->wellStatus_;
         const bool allow_switching = !this->wellUnderZeroRateTarget(summary_state, well_state) && (this->well_ecl_.getStatus() == WellStatus::OPEN);
         bool changed = false;
-        bool final_check = false; 
+        bool final_check = false;
         do {
             its_since_last_switch++;
             if (allow_switching && its_since_last_switch >= min_its_after_switch){
                 const double wqTotal = this->primary_variables_.eval(WQTotal).value();
-                changed = this->updateWellControlAndStatusLocalIteration(ebosSimulator, well_state, group_state, inj_controls, prod_controls, wqTotal, deferred_logger); 
+                changed = this->updateWellControlAndStatusLocalIteration(ebosSimulator, well_state, group_state, inj_controls, prod_controls, wqTotal, deferred_logger);
                 if (changed){
                     its_since_last_switch = 0;
                     switch_count++;
@@ -2197,7 +2207,7 @@ namespace Opm
                     final_check = false;
                 }
             }
-  
+
             assembleWellEqWithoutIteration(ebosSimulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
 
             if (it > this->param_.strict_inner_iter_wells_) {
@@ -2216,14 +2226,14 @@ namespace Opm
                     its_since_last_switch = min_its_after_switch;
                 } else {
                     break;
-                }   
+                }
             }
 
             ++it;
             solveEqAndUpdateWellState(summary_state, well_state, deferred_logger);
             initPrimaryVariablesEvaluation();
         } while (it < max_iter);
-        
+
         if (converged) {
             if (allow_switching){
                 // update operability if status change
@@ -2268,8 +2278,9 @@ namespace Opm
             std::vector<Scalar> mob(this->num_components_, 0.);
             getMobility(ebosSimulator, perf, mob, deferred_logger);
             std::vector<Scalar> cq_s(this->num_components_, 0.);
-            double trans_mult = ebosSimulator.problem().template rockCompTransMultiplier<double>(intQuants,  cell_idx);
-            const double Tw = this->well_index_[perf] * trans_mult;
+            double trans_mult = ebosSimulator.problem().template wellTransMultiplier<double>(intQuants,  cell_idx);
+            const auto& wellstate_nupcol = ebosSimulator.problem().wellModel().nupcolWellState().well(this->index_of_well_);
+            const std::vector<Scalar> Tw = this->wellIndex(perf, intQuants, trans_mult, wellstate_nupcol);
             PerforationRates perf_rates;
             computePerfRate(intQuants, mob, bhp.value(), Tw, perf, allow_cf,
                             cq_s, perf_rates, deferred_logger);

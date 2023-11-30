@@ -54,14 +54,15 @@
 namespace Opm {
     class DeferredLogger;
     class EclipseState;
+    class GasLiftGroupInfo;
     class GasLiftSingleWellGeneric;
     class GasLiftWellState;
-    class GasLiftGroupInfo;
     class Group;
     class GuideRateConfig;
     class ParallelWellInfo;
     class RestartValue;
     class Schedule;
+    struct SimulatorUpdate;
     class SummaryConfig;
     class VFPProperties;
     class WellInterfaceGeneric;
@@ -103,6 +104,9 @@ public:
     bool wellsActive() const;
     bool hasWell(const std::string& wname) const;
 
+    /// return true if network is active (at least one network well in prediction mode)
+    bool networkActive() const;
+
     // whether there exists any multisegment well open on this process
     bool anyMSWellOpenLocal() const;
 
@@ -130,6 +134,14 @@ public:
         return this->active_wgstate_.well_state;
     }
 
+    /*
+      Will return the currently active nupcolWellState; must initialize
+      the internal nupcol wellstate with initNupcolWellState() first.
+    */
+    const WellState& nupcolWellState() const
+    {
+        return this->nupcol_wgstate_.well_state;
+    }
     GroupState& groupState() { return this->active_wgstate_.group_state; }
 
     WellTestState& wellTestState() { return this->active_wgstate_.well_test_state; }
@@ -141,7 +153,7 @@ public:
     double wellPI(const std::string& well_name) const;
 
     void updateEclWells(const int timeStepIdx,
-                        const std::unordered_set<std::string>& wells,
+                        const SimulatorUpdate& sim_update,
                         const SummaryState& st);
 
     void initFromRestartFile(const RestartValue& restartValues,
@@ -169,8 +181,13 @@ public:
     /// Return true if any well has a THP constraint.
     bool hasTHPConstraints() const;
 
-    /// Whether it is necessary to re-balance network
-    bool needRebalanceNetwork(const int report_step) const;
+    /// Checks if network is active (at least one network well on prediction).
+    void updateNetworkActiveState(const int report_step);
+
+    /// Checks if there are reasons to perform a pre-step network re-balance.
+    /// (Currently, the only reasons are network well status changes.)
+    /// (TODO: Consider if adding network change events would be helpful.)
+    bool needPreStepNetworkRebalance(const int report_step) const;
 
     /// Shut down any single well
     /// Returns true if the well was actually found and shut.
@@ -268,18 +285,13 @@ protected:
         return this->last_valid_wgstate_.well_state;
     }
 
+
     const WGState& prevWGState() const
     {
         return this->last_valid_wgstate_;
     }
-    /*
-      Will return the currently active nupcolWellState; must initialize
-      the internal nupcol wellstate with initNupcolWellState() first.
-    */
-    const WellState& nupcolWellState() const
-    {
-        return this->nupcol_wgstate_.well_state;
-    }
+
+
 
     /*
       Will store a copy of the input argument well_state in the
@@ -342,7 +354,7 @@ protected:
                             data::GroupData& gdata) const;
     void assignGroupValues(const int reportStepIdx,
                            std::map<std::string, data::GroupData>& gvalues) const;
-    void assignNodeValues(std::map<std::string, data::NodeData>& nodevalues) const;
+    void assignNodeValues(std::map<std::string, data::NodeData>& nodevalues, const int reportStepIdx) const;
 
     void calculateEfficiencyFactors(const int reportStepIdx);
 
@@ -431,6 +443,7 @@ protected:
     PhaseUsage phase_usage_;
     bool terminal_output_{false};
     bool wells_active_{false};
+    bool network_active_{false};
     bool initial_step_{};
     bool report_step_starts_{};
 
@@ -566,6 +579,8 @@ protected:
     bool glift_debug = false;
 
     double last_glift_opt_time_ = -1.0;
+
+    bool wellStructureChangedDynamically_{false};
 
     std::map<std::string, std::string> switched_prod_groups_;
     std::map<std::pair<std::string, Opm::Phase>, std::string> switched_inj_groups_;

@@ -265,6 +265,7 @@ template<class FluidSystem,class Scalar>
 Inplace EclGenericOutputBlackoilModule<FluidSystem,Scalar>::
 outputFipLog(std::map<std::string, double>& miscSummaryData,
              std::map<std::string, std::vector<double>>& regionData,
+             const std::size_t reportStepNum,
              const bool substep,
              const Parallel::Communication& comm)
 {
@@ -276,8 +277,27 @@ outputFipLog(std::map<std::string, double>& miscSummaryData,
                               miscSummaryData,
                               regionData);
 
-    if (!substep && !forceDisableFipOutput_) {
-        logOutput_.fip(inplace, this->initialInplace());
+    // For report step 0 we use the RPTSOL config, else derive from RPTSCHED
+    std::unique_ptr<FIPConfig> fipSched;
+    if (reportStepNum != 0) {
+        const auto& rpt = this->schedule_[reportStepNum].rpt_config.get();
+        fipSched = std::make_unique<FIPConfig>(rpt);
+    }
+    const FIPConfig& fipc = reportStepNum == 0 ? this->eclState_.getEclipseConfig().fip()
+                                               : *fipSched;
+
+    if (!substep && !forceDisableFipOutput_ && fipc.output(FIPConfig::OutputField::FIELD)) {
+        logOutput_.fip(inplace, this->initialInplace(), "");
+        if (fipc.output(FIPConfig::OutputField::FIPNUM)) {
+            logOutput_.fip(inplace, this->initialInplace(), "FIPNUM");
+        }
+        if (fipc.output(FIPConfig::OutputField::FIP)) {
+            for (const auto& reg : this->regions_) {
+                if (reg.first != "FIPNUM") {
+                    logOutput_.fip(inplace, this->initialInplace(), reg.first);
+                }
+            }
+        }
     }
 
     return inplace;
@@ -286,9 +306,10 @@ outputFipLog(std::map<std::string, double>& miscSummaryData,
 template<class FluidSystem,class Scalar>
 Inplace EclGenericOutputBlackoilModule<FluidSystem,Scalar>::
 outputFipresvLog(std::map<std::string, double>& miscSummaryData,
-             std::map<std::string, std::vector<double>>& regionData,
-             const bool substep,
-             const Parallel::Communication& comm)
+                 std::map<std::string, std::vector<double>>& regionData,
+                 const std::size_t reportStepNum,
+                 const bool substep,
+                 const Parallel::Communication& comm)
 {
     auto inplace = this->accumulateRegionSums(comm);
     if (comm.rank() != 0)
@@ -298,7 +319,16 @@ outputFipresvLog(std::map<std::string, double>& miscSummaryData,
                               miscSummaryData,
                               regionData);
 
-    if (!substep && !forceDisableFipresvOutput_) {
+    // For report step 0 we use the RPTSOL config, else derive from RPTSCHED
+    std::unique_ptr<FIPConfig> fipSched;
+    if (reportStepNum != 0) {
+        const auto& rpt = this->schedule_[reportStepNum].rpt_config.get();
+        fipSched = std::make_unique<FIPConfig>(rpt);
+    }
+    const FIPConfig& fipc = reportStepNum == 0 ? this->eclState_.getEclipseConfig().fip()
+                                               : *fipSched;
+
+    if (!substep && !forceDisableFipresvOutput_ && fipc.output(FIPConfig::OutputField::RESV)) {
         logOutput_.fipResv(inplace);
     }
 
@@ -515,7 +545,7 @@ assignToSolution(data::Solution& sol)
                    data::TargetType::RESTART_SOLUTION);
     }
 
-    if (eclState_.runspec().co2Storage() && !rsw_.empty()) {
+    if ((eclState_.runspec().co2Storage() || eclState_.runspec().h2Storage()) && !rsw_.empty()) {
         auto mfrac = std::vector<double>(this->rsw_.size(), 0.0);
 
         std::transform(this->rsw_.begin(), this->rsw_.end(),
@@ -527,13 +557,14 @@ assignToSolution(data::Solution& sol)
             return FluidSystem::convertXwGToxwG(xwg, pvtReg - 1);
         });
 
-        sol.insert("XMFCO2",
+        std::string moleFracName = eclState_.runspec().co2Storage() ? "XMFCO2" : "XMFH2";
+        sol.insert(moleFracName,
                    UnitSystem::measure::identity,
                    std::move(mfrac),
                    data::TargetType::RESTART_OPM_EXTENDED);
     }
 
-    if (eclState_.runspec().co2Storage() && !rvw_.empty()) {
+    if ((eclState_.runspec().co2Storage() || eclState_.runspec().h2Storage()) && !rvw_.empty()) {
         auto mfrac = std::vector<double>(this->rvw_.size(), 0.0);
 
         std::transform(this->rvw_.begin(), this->rvw_.end(),
@@ -548,6 +579,28 @@ assignToSolution(data::Solution& sol)
         sol.insert("YMFWAT",
                    UnitSystem::measure::identity,
                    std::move(mfrac),
+                   data::TargetType::RESTART_OPM_EXTENDED);
+    }
+
+    if (FluidSystem::phaseIsActive(waterPhaseIdx) &&
+        ! this->residual_[waterPhaseIdx].empty())
+    {
+        sol.insert("RES_WAT", UnitSystem::measure::liquid_surface_volume,
+                   std::move(this->residual_[waterPhaseIdx]),
+                   data::TargetType::RESTART_OPM_EXTENDED);
+    }
+    if (FluidSystem::phaseIsActive(gasPhaseIdx) &&
+        ! this->residual_[gasPhaseIdx].empty())
+    {
+        sol.insert("RES_GAS", UnitSystem::measure::gas_surface_volume,
+                   std::move(this->residual_[gasPhaseIdx]),
+                   data::TargetType::RESTART_OPM_EXTENDED);
+    }
+    if (FluidSystem::phaseIsActive(oilPhaseIdx) &&
+        ! this->residual_[oilPhaseIdx].empty())
+    {
+        sol.insert("RES_OIL", UnitSystem::measure::liquid_surface_volume,
+                   std::move(this->residual_[oilPhaseIdx]),
                    data::TargetType::RESTART_OPM_EXTENDED);
     }
 
@@ -1135,6 +1188,16 @@ doAllocBuffers(const unsigned bufferSize,
         }
     }
 
+    if (rstKeywords["RESIDUAL"] > 0) {
+        rstKeywords["RESIDUAL"] = 0;
+        for (int phaseIdx = 0; phaseIdx <  numPhases; ++phaseIdx)
+        {
+            if (FluidSystem::phaseIsActive(phaseIdx)) {
+                this->residual_[phaseIdx].resize(bufferSize, 0.0);
+            }
+        }
+    }
+
     // ROCKC
     if (rstKeywords["ROCKC"] > 0) {
         rstKeywords["ROCKC"] = 0;
@@ -1272,10 +1335,7 @@ accumulateRegionSums(const Parallel::Communication& comm)
     }
 
     // The first time the outputFipLog function is run we store the inplace values in
-    // the initialInplace_ member. This has at least two problems:
-    //
-    //   o We really want the *initial* value - now we get the value after
-    //     the first timestep.
+    // the initialInplace_ member. This has a problem:
     //
     //   o For restarted runs this is obviously wrong.
     //

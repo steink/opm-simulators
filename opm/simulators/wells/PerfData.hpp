@@ -25,6 +25,7 @@
 
 #include <cstddef>
 #include <vector>
+#include <array>
 
 namespace Opm {
 
@@ -50,6 +51,7 @@ public:
         serializer(pressure);
         serializer(rates);
         serializer(phase_rates);
+        serializer(phase_mixing_rates);
         serializer(solvent_rates);
         serializer(polymer_rates);
         serializer(brine_rates);
@@ -57,6 +59,7 @@ public:
         serializer(micp_rates);
         serializer(cell_index);
         serializer(connection_transmissibility_factor);
+        serializer(connection_d_factor);
         serializer(satnum_id);
         serializer(ecl_index);
         serializer(water_throughput);
@@ -71,6 +74,7 @@ public:
     std::vector<double> pressure;
     std::vector<double> rates;
     std::vector<double> phase_rates;
+    std::vector<std::array<double,4>> phase_mixing_rates;
     std::vector<double> solvent_rates;
     std::vector<double> polymer_rates;
     std::vector<double> brine_rates;
@@ -78,6 +82,7 @@ public:
     std::vector<double> micp_rates;
     std::vector<std::size_t> cell_index;
     std::vector<double> connection_transmissibility_factor;
+    std::vector<double> connection_d_factor;
     std::vector<int> satnum_id;
     std::vector<std::size_t> ecl_index;
 

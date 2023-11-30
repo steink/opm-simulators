@@ -22,6 +22,7 @@
 #include <opm/common/Exceptions.hpp>
 
 #include <opm/input/eclipse/Schedule/ScheduleTypes.hpp>
+#include <opm/input/eclipse/Schedule/Well/WDFAC.hpp>
 #include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
 #include <opm/simulators/wells/GroupState.hpp>
 #include <opm/simulators/wells/TargetCalculator.hpp>
@@ -208,7 +209,7 @@ namespace Opm
             bool output = std::count(this->well_control_log_.begin(), this->well_control_log_.end(), from) == param_.max_number_of_well_switches_;
             if (output) {
                 std::ostringstream ss;
-                ss << "    The control model for well " << this->name()
+                ss << "    The control mode for well " << this->name()
                    << " is oscillating\n"
                    << "    We don't allow for more than "
                    << param_.max_number_of_well_switches_
@@ -267,7 +268,7 @@ namespace Opm
     {
         const auto& summary_state = ebos_simulator.vanguard().summaryState();
         const auto& schedule = ebos_simulator.vanguard().schedule();
-        
+
         if (this->wellUnderZeroRateTarget(summary_state, well_state) || !(this->well_ecl_.getStatus() == WellStatus::OPEN)) {
            return false;
         }
@@ -297,7 +298,7 @@ namespace Opm
                         updateWellStateWithTarget(ebos_simulator, group_state, well_state, deferred_logger);
                     } else {
                         ws.thp = this->getTHPConstraint(summary_state);
-                    }  
+                    }
                     updatePrimaryVariables(summary_state, well_state, deferred_logger);
                 }
                 return changed;
@@ -310,9 +311,9 @@ namespace Opm
             const bool has_thp = this->wellHasTHPConstraints(summary_state);
             if (has_thp){
                 // calculate bhp from thp-limit (using explicit fractions zince zero rate)
-                // TODO: this will often be too strict condition for re-opening, a better 
-                // option is probably minimum bhp on current vfp-curve, but some more functionality 
-                // is needed for this option to be robustly implemented. 
+                // TODO: this will often be too strict condition for re-opening, a better
+                // option is probably minimum bhp on current vfp-curve, but some more functionality
+                // is needed for this option to be robustly implemented.
                 std::vector<double> rates(this->num_components_);
                 const double bhp_thp = WellBhpThpCalculator(*this).calculateBhpFromThp(well_state, rates, this->well_ecl_, summary_state, this->getRefDensity(), deferred_logger);
                 if (this->isInjector()){
@@ -353,7 +354,12 @@ namespace Opm
         initPrimaryVariablesEvaluation();
 
         if (this->isProducer()) {
-            gliftBeginTimeStepWellTestUpdateALQ(simulator, well_state_copy, deferred_logger);
+            const auto& schedule = simulator.vanguard().schedule();
+            const auto report_step = simulator.episodeIndex();
+            const auto& glo = schedule.glo(report_step);
+            if (glo.active()) {
+                gliftBeginTimeStepWellTestUpdateALQ(simulator, well_state_copy, deferred_logger);
+            }
         }
 
         WellTestState welltest_state_temp;
@@ -444,7 +450,7 @@ namespace Opm
             } else {
                 converged = this->iterateWellEqWithSwitching(ebosSimulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
             }
-                 
+
         } catch (NumericalProblem& e ) {
             const std::string msg = "Inner well iterations failed for well " + this->name() + " Treat the well as unconverged. ";
             deferred_logger.warning("INNER_ITERATION_FAILED", msg);
@@ -626,23 +632,9 @@ namespace Opm
         const bool well_operable = this->operability_status_.isOperableAndSolvable();
 
         if (!well_operable && old_well_operable) {
-            if (this->param_.local_well_solver_control_switching_) {
-                deferred_logger.info(" well " + this->name() + " gets STOPPED during iteration ");
-                this->stopWell();
-                changed_to_stopped_this_step_ = true;
-            } else {
-                // \Note: keep the old manner for now for testing checking.
-                // Will be investgiated and fixed in a later PR
-                if (this->well_ecl_.getAutomaticShutIn()) {
-                    deferred_logger.info(" well " + this->name() + " gets SHUT during iteration ");
-                } else {
-                    if (!this->wellIsStopped()) {
-                        deferred_logger.info(" well " + this->name() + " gets STOPPED during iteration ");
-                        this->stopWell();
-                        changed_to_stopped_this_step_ = true;
-                    }
-                }
-            }
+            deferred_logger.info(" well " + this->name() + " gets STOPPED during iteration ");
+            this->stopWell();
+            changed_to_stopped_this_step_ = true;
         } else if (well_operable && !old_well_operable) {
             deferred_logger.info(" well " + this->name() + " gets REVIVED during iteration ");
             this->openWell();
@@ -725,8 +717,8 @@ namespace Opm
         const auto& schedule = ebos_simulator.vanguard().schedule();
         auto report_step_idx = ebos_simulator.episodeIndex();
         const auto& glo = schedule.glo(report_step_idx);
-        if(glo.has_well(well_name)) {
-            auto increment = glo.gaslift_increment();
+        if(glo.active() && glo.has_well(well_name)) {
+            const auto increment = glo.gaslift_increment();
             auto alq = well_state.getALQ(well_name);
             bool converged;
             while (alq > 0) {
@@ -759,9 +751,8 @@ namespace Opm
             deferred_logger.info(msg);
             return;
         }
-        const auto& well_ecl = this->wellEcl();
         const auto& schedule = ebos_simulator.vanguard().schedule();
-        auto report_step_idx = ebos_simulator.episodeIndex();
+        const auto report_step_idx = ebos_simulator.episodeIndex();
         const auto& glo = schedule.glo(report_step_idx);
         if (!glo.has_well(well_name)) {
             const std::string msg = fmt::format(
@@ -777,6 +768,7 @@ namespace Opm
             max_alq = *max_alq_optional;
         }
         else {
+            const auto& well_ecl = this->wellEcl();
             const auto& controls = well_ecl.productionControls(summary_state);
             const auto& table = this->vfpProperties()->getProd()->getTable(controls.vfp_table_number);
             const auto& alq_values = table.getALQAxis();
@@ -795,7 +787,7 @@ namespace Opm
     updateWellOperability(const Simulator& ebos_simulator,
                           const WellState& well_state,
                           DeferredLogger& deferred_logger)
-    {   
+    {
         if (this->param_.local_well_solver_control_switching_) {
             const bool success = updateWellOperabilityFromWellEq(ebos_simulator, well_state, deferred_logger);
             if (success) {
@@ -841,7 +833,7 @@ namespace Opm
         // equations should be converged at this stage, so only one it is needed
         bool converged = iterateWellEquations(ebos_simulator, dt, well_state_copy, group_state, deferred_logger);
         return converged;
-    }                          
+    }
 
     template<typename TypeTag>
     void
@@ -1316,6 +1308,86 @@ namespace Opm
             }
         }
     }
+
+    template <typename TypeTag>
+    std::vector<double>
+    WellInterface<TypeTag>::
+    wellIndex(const int perf, const IntensiveQuantities& intQuants, const double trans_mult, const SingleWellState& ws) const {
+
+        std::vector<Scalar> wi(this->num_components_, this->well_index_[perf] * trans_mult);
+        const auto& wdfac = this->well_ecl_.getWDFAC();
+        if (!wdfac.useDFactor()) {
+            return wi;
+        }
+        // for gas wells we may want to add a Forchheimer term if the WDFAC or WDFACCOR keyword is used        
+        if constexpr (! Indices::gasEnabled) {
+            return wi;
+        }
+        // closed connection are still closed
+        if (this->well_index_[perf] == 0)
+            return std::vector<Scalar>(this->num_components_, 0.0);
+
+        double d = computeConnectionDFactor(perf, intQuants, ws);
+        const PhaseUsage& pu = this->phaseUsage();
+        double Q = std::abs(ws.perf_data.phase_rates[perf*pu.num_phases + pu.phase_pos[Gas]]);
+        const auto& connection = this->well_ecl_.getConnections()[ws.perf_data.ecl_index[perf]];
+        double Kh = connection.Kh();
+        double scaling = 3.141592653589 * Kh * connection.wpimult();
+        const unsigned gas_comp_idx = Indices::canonicalToActiveComponentIndex(FluidSystem::gasCompIdx);
+        wi[gas_comp_idx]  = 1.0/(1.0/(trans_mult * this->well_index_[perf]) + (Q/2 * d / scaling));
+        return wi;
+    }
+
+    template <typename TypeTag>
+    void
+    WellInterface<TypeTag>::
+    updateConnectionDFactor(const Simulator& simulator, SingleWellState& ws) const {
+
+        const auto& wdfac = this->well_ecl_.getWDFAC();
+        if (!wdfac.useDFactor()) {
+            return;
+        }
+        auto& perf_data = ws.perf_data;
+        for (int perf = 0; perf < this->number_of_perforations_; ++perf) {
+            const int cell_idx = this->well_cells_[perf];
+            const auto& intQuants = simulator.model().intensiveQuantities(cell_idx, /*timeIdx=*/ 0);
+            perf_data.connection_d_factor[perf] = computeConnectionDFactor(perf, intQuants, ws);
+        }
+    }
+
+    template <typename TypeTag>
+    double 
+    WellInterface<TypeTag>::
+    computeConnectionDFactor(const int perf, const IntensiveQuantities& intQuants, const SingleWellState& ws) const {
+        const double connection_pressure = ws.perf_data.pressure[perf];
+        // viscosity is evaluated at connection pressure
+        const auto& rv = getValue(intQuants.fluidState().Rv());
+        const double psat = FluidSystem::gasPvt().saturationPressure(this->pvtRegionIdx(), ws.temperature, rv);
+        const double mu = connection_pressure < psat ?
+                                FluidSystem::gasPvt().saturatedViscosity(this->pvtRegionIdx(), ws.temperature, connection_pressure) :
+                                FluidSystem::gasPvt().viscosity(this->pvtRegionIdx(), ws.temperature, connection_pressure, rv, getValue(intQuants.fluidState().Rvw()));
+        double rho = FluidSystem::referenceDensity(FluidSystem::gasPhaseIdx, this->pvtRegionIdx());
+        const double phi = getValue(intQuants.porosity());
+        const auto& connection = this->well_ecl_.getConnections()[ws.perf_data.ecl_index[perf]];
+        const auto& wdfac = this->well_ecl_.getWDFAC();
+        return wdfac.getDFactor(connection, mu, rho, phi);
+    }
+
+
+    template <typename TypeTag>
+    void
+    WellInterface<TypeTag>::
+    updateConnectionTransmissibilityFactor(const Simulator& simulator, SingleWellState& ws) const {
+        auto& perf_data = ws.perf_data;
+        for (int perf = 0; perf < this->number_of_perforations_; ++perf) {
+            const int cell_idx = this->well_cells_[perf];
+            const auto& intQuants = simulator.model().intensiveQuantities(cell_idx, /*timeIdx=*/ 0);
+            const double trans_mult = simulator.problem().template rockCompTransMultiplier<double>(intQuants, cell_idx);
+            const auto& connection = this->well_ecl_.getConnections()[perf_data.ecl_index[perf]];
+            perf_data.connection_transmissibility_factor[perf] = connection.CF() * trans_mult;
+        }
+    }
+
 
     template<typename TypeTag>
     typename WellInterface<TypeTag>::Eval

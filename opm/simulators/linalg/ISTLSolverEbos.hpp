@@ -278,7 +278,6 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
                 os << "Property tree for linear solvers:\n";
                 for (std::size_t i = 0; i<prm_.size(); i++) {
                     prm_[i].write_json(os, true);
-                    std::cerr<< "debug: ["<<i<<"] : " << os.str() <<std::endl;
                 }
                 OpmLog::note(os.str());
             }
@@ -295,8 +294,7 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
                 OPM_THROW(std::logic_error, "Solver number " + std::to_string(num) + " not available.");
             }
             activeSolverNum_ = num;
-            auto cc = Dune::MPIHelper::getCollectiveCommunication();
-            if (cc.rank() == 0) {
+            if (simulator_.gridView().comm().rank() == 0) {
                 OpmLog::debug("Active solver = " + std::to_string(activeSolverNum_)
                               + " (" + parameters_[activeSolverNum_].linsolver_ + ")");
             }
@@ -307,14 +305,8 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
             return flexibleSolver_.size();
         }
 
-        void prepare(const SparseMatrixAdapter& M, Vector& b)
+        void initPrepare(const Matrix& M, Vector& b)
         {
-            prepare(M.istlMatrix(), b);
-        }
-
-        void prepare(const Matrix& M, Vector& b)
-        {
-            OPM_TIMEBLOCK(istlSolverEbosPrepare);
             const bool firstcall = (matrix_ == nullptr);
 #if HAVE_MPI
             if (firstcall && isParallel()) {
@@ -345,6 +337,19 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
             if (isParallel() && prm_[activeSolverNum_].template get<std::string>("preconditioner.type") != "ParOverILU0") {
                 detail::makeOverlapRowsInvalid(getMatrix(), overlapRows_);
             }
+        }
+
+        void prepare(const SparseMatrixAdapter& M, Vector& b)
+        {
+            prepare(M.istlMatrix(), b);
+        }
+
+        void prepare(const Matrix& M, Vector& b)
+        {
+            OPM_TIMEBLOCK(istlSolverEbosPrepare);
+
+            initPrepare(M,b);
+
             prepareFlexibleSolver();
         }
 
@@ -428,7 +433,7 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
             if(!converged_){
                 if(result.reduction < parameters_[activeSolverNum_].relaxed_linear_solver_reduction_){
                     std::stringstream ss;
-                    ss<< "Full linear solver tolerance not achived. The reduction is:" << result.reduction
+                    ss<< "Full linear solver tolerance not achieved. The reduction is:" << result.reduction
                       << " after " << result.iterations << " iterations ";
                     OpmLog::warning(ss.str());
                     converged_ = true;

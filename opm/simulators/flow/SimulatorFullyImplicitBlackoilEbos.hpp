@@ -44,6 +44,7 @@
 
 #include <boost/date_time/gregorian/gregorian.hpp>
 
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -97,7 +98,6 @@ struct LoadFile
     using type = UndefinedProperty;
 };
 
-
 template<class TypeTag>
 struct EnableTerminalOutput<TypeTag, TTag::EclFlowProblem> {
     static constexpr bool value = true;
@@ -134,7 +134,6 @@ struct LoadFile<TypeTag, TTag::EclFlowProblem>
 {
     static constexpr auto* value = "";
 };
-
 
 template <class TypeTag>
 struct LoadStep<TypeTag, TTag::EclFlowProblem>
@@ -538,6 +537,24 @@ protected:
                                              modelParam_,
                                              wellModel,
                                              terminalOutput_);
+
+        if (this->modelParam_.write_partitions_) {
+            const auto& iocfg = this->eclState().cfg().io();
+
+            const auto odir = iocfg.getOutputDir()
+                / std::filesystem::path { "partition" }
+                / iocfg.getBaseName();
+
+            if (this->grid().comm().rank() == 0) {
+                create_directories(odir);
+            }
+
+            this->grid().comm().barrier();
+
+            model->writePartitions(odir);
+
+            this->modelParam_.write_partitions_ = false;
+        }
 
         return std::make_unique<Solver>(solverParam_, std::move(model));
     }

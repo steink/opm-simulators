@@ -34,7 +34,10 @@
 #include <opm/simulators/linalg/PressureTransferPolicy.hpp>
 #include <opm/simulators/linalg/PropertyTree.hpp>
 #include <opm/simulators/linalg/WellOperators.hpp>
+#include <opm/simulators/linalg/DILU.hpp>
+#include <opm/simulators/linalg/ExtraSmoothers.hpp>
 
+#include <dune/common/unused.hh>
 #include <dune/istl/owneroverlapcopy.hh>
 #include <dune/istl/preconditioners.hh>
 #include <dune/istl/paamg/amg.hh>
@@ -47,6 +50,7 @@
 #include <opm/simulators/linalg/cuistl/PreconditionerAdapter.hpp>
 #include <opm/simulators/linalg/cuistl/PreconditionerConvertFieldTypeAdapter.hpp>
 #include <opm/simulators/linalg/cuistl/CuBlockPreconditioner.hpp>
+#include <opm/simulators/linalg/cuistl/CuJac.hpp>
 
 #endif
 
@@ -89,6 +93,7 @@ struct AMGSmootherArgsHelper<Opm::ParallelOverlappingILU0<M,V,V,C>>
         return smootherArgs;
     }
 };
+
 
 template <class Operator, class Comm, class Matrix, class Vector>
 typename AMGHelper<Operator, Comm, Matrix, Vector>::Criterion
@@ -157,6 +162,10 @@ struct StandardPreconditioners
         F::addCreator("ILUn", [](const O& op, const P& prm, const std::function<V()>&, std::size_t, const C& comm) {
           return createParILU(op, prm, comm, prm.get<int>("ilulevel", 0));
         });
+        F::addCreator("DILU", [](const O& op, const P& prm, const std::function<V()>&, std::size_t, const C& comm) {
+          DUNE_UNUSED_PARAMETER(prm);
+          return wrapBlockPreconditioner<MultithreadDILU<M, V, V>>(comm, op.getmat());
+        });
         F::addCreator("Jac", [](const O& op, const P& prm, const std::function<V()>&,
                      std::size_t, const C& comm) {
           const int n = prm.get<int>("repeats", 1);
@@ -185,12 +194,23 @@ struct StandardPreconditioners
         // with the AMG hierarchy construction.
         if constexpr (std::is_same_v<O, Dune::OverlappingSchwarzOperator<M, V, V, C>>) {
           F::addCreator("amg", [](const O& op, const P& prm, const std::function<V()>&, std::size_t, const C& comm) {
+            using PrecPtr = std::shared_ptr<Dune::PreconditionerWithUpdate<V, V>>;
             const std::string smoother = prm.get<std::string>("smoother", "ParOverILU0");
             if (smoother == "ILU0" || smoother == "ParOverILU0") {
               using Smoother = Opm::ParallelOverlappingILU0<M, V, V, C>;
               auto crit = AMGHelper<O,C,M,V>::criterion(prm);
               auto sargs = AMGSmootherArgsHelper<Smoother>::args(prm);
-              return std::make_shared<Dune::Amg::AMGCPR<O, V, Smoother, C>>(op, crit, sargs, comm);
+              PrecPtr prec = std::make_shared<Dune::Amg::AMGCPR<O, V, Smoother, C>>(op, crit, sargs, comm);
+              return prec;
+            }
+            else if (smoother == "DILU") {
+              using SeqSmoother = Dune::MultithreadDILU<M, V, V>;
+              using Smoother = Dune::BlockPreconditioner<V, V, C, SeqSmoother>;
+              using SmootherArgs = typename Dune::Amg::SmootherTraits<Smoother>::Arguments;
+              SmootherArgs sargs;
+              auto crit = AMGHelper<O,C,M,V>::criterion(prm);
+              PrecPtr prec = std::make_shared<Dune::Amg::AMGCPR<O, V, Smoother, C>>(op, crit, sargs, comm);
+              return prec;
             } else {
               OPM_THROW(std::invalid_argument, "Properties: No smoother with name " + smoother + ".");
             }
@@ -236,6 +256,17 @@ struct StandardPreconditioners
             auto cuILU0 = std::make_shared<CuILU0>(op.getmat(), w);
 
             auto adapted = std::make_shared<Opm::cuistl::PreconditionerAdapter<V, V, CuILU0>>(cuILU0);
+            auto wrapped = std::make_shared<Opm::cuistl::CuBlockPreconditioner<V, V, Comm>>(adapted, comm);
+            return wrapped;
+        });
+
+        F::addCreator("CUJac", [](const O& op, const P& prm, const std::function<V()>&, std::size_t, const C& comm) {
+            const double w = prm.get<double>("relaxation", 1.0);
+            using field_type = typename V::field_type;
+            using CuJac = typename Opm::cuistl::CuJac<M, Opm::cuistl::CuVector<field_type>, Opm::cuistl::CuVector<field_type>>;
+            auto cuJac = std::make_shared<CuJac>(op.getmat(), w);
+
+            auto adapted = std::make_shared<Opm::cuistl::PreconditionerAdapter<V, V, CuJac>>(cuJac);
             auto wrapped = std::make_shared<Opm::cuistl::CuBlockPreconditioner<V, V, Comm>>(adapted, comm);
             return wrapped;
         });
@@ -317,6 +348,10 @@ struct StandardPreconditioners<Operator,Dune::Amg::SequentialInformation>
             return std::make_shared<Opm::ParallelOverlappingILU0<M, V, V, C>>(
                 op.getmat(), n, w, Opm::MILU_VARIANT::ILU);
         });
+        F::addCreator("DILU", [](const O& op, const P& prm, const std::function<V()>&, std::size_t) {
+            DUNE_UNUSED_PARAMETER(prm);
+            return std::make_shared<MultithreadDILU<M, V, V>>(op.getmat());
+        });
         F::addCreator("Jac", [](const O& op, const P& prm, const std::function<V()>&, std::size_t) {
             const int n = prm.get<int>("repeats", 1);
             const double w = prm.get<double>("relaxation", 1.0);
@@ -348,6 +383,9 @@ struct StandardPreconditioners<Operator,Dune::Amg::SequentialInformation>
                     return AMGHelper<O,C,M,V>::template makeAmgPreconditioner<Smoother>(op, prm);
                 } else if (smoother == "Jac") {
                     using Smoother = SeqJac<M, V, V>;
+                    return AMGHelper<O,C,M,V>::template makeAmgPreconditioner<Smoother>(op, prm);
+                } else if (smoother == "DILU") {
+                    using Smoother = MultithreadDILU<M, V, V>;
                     return AMGHelper<O,C,M,V>::template makeAmgPreconditioner<Smoother>(op, prm);
                 } else if (smoother == "SOR") {
                     using Smoother = SeqSOR<M, V, V>;
@@ -444,6 +482,13 @@ struct StandardPreconditioners<Operator,Dune::Amg::SequentialInformation>
             converted->setUnderlyingPreconditioner(adapted);
             return converted;
 
+        });
+
+        F::addCreator("CUJac", [](const O& op, const P& prm, const std::function<V()>&, std::size_t) {
+            const double w = prm.get<double>("relaxation", 1.0);
+            using field_type = typename V::field_type;
+            using CUJac = typename Opm::cuistl::CuJac<M, Opm::cuistl::CuVector<field_type>, Opm::cuistl::CuVector<field_type>>;
+            return std::make_shared<Opm::cuistl::PreconditionerAdapter<V, V, CUJac>>(std::make_shared<CUJac>(op.getmat(), w));
         });
 #endif
     }

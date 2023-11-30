@@ -256,8 +256,7 @@ macro (config_hook)
   opm_need_version_of ("opm-models")
 
   if(NOT fmt_FOUND)
-    add_definitions(-DFMT_HEADER_ONLY)
-    list(APPEND EXTRA_INCLUDES SYSTEM ${PROJECT_SOURCE_DIR}/external/fmtlib/include)
+    include(DownloadFmt)
   endif()
   if(USE_TRACY_PROFILER AND Tracy_FOUND)
     set(USE_TRACY 1)
@@ -311,6 +310,11 @@ macro (files_hook)
       "only normal restart without hdf5 file support.")
     set(HDF5_FOUND OFF)
     unset(HAVE_HDF5)
+  endif()
+  if(HAVE_ROCSPARSE AND HAVE_CUDA)
+    message(WARNING "WARNING! Using CUDA and ROCm at the same time is not allowed. Please choose only one of them by setting CMAKE_DISABLE_FIND_PACKAGE_<rocsparse|CUDA>=<ON|OFF>. Disabling CUDA...\n")
+    set(CUDA_FOUND OFF)
+    unset(HAVE_CUDA)
   endif()
   # read the list of components from this file (in the project directory);
   # it should set various lists with the names of the files to include
@@ -552,7 +556,7 @@ foreach(OBJ ${COMMON_MODELS} ${FLOW_MODELS} ${FLOW_VARIANT_MODELS})
   if(TARGET fmt::fmt)
     target_link_libraries(flow_lib${OBJ} fmt::fmt)
   endif()
-  if(TARGET opmcommon AND CMAKE_GENERATOR MATCHES "Makefiles")
+  if(TARGET opmcommon)
       add_dependencies(flow_lib${OBJ} opmcommon)
   endif()
   opm_add_test(flow_${OBJ}
@@ -654,7 +658,10 @@ if(CUDA_FOUND)
                        cuda_safe_call
                        cuda_check_last_error
                        cublas_handle
+                       cujac
                        cusparse_handle
+                       cuSparse_matrix_operations
+                       cuVector_operations
                        cuvector
                        cusparsematrix
                        cuseqilu0

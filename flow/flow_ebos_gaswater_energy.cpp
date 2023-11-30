@@ -39,14 +39,17 @@ struct EclFlowGasWaterEnergyProblem {
 };
 }
 
-//template<class TypeTag>
-//struct Linearizer<TypeTag, TTag::EclFlowGasWaterProblem> { using type = TpfaLinearizer<TypeTag>; };
-
-//template<class TypeTag>
-//struct LocalResidual<TypeTag, TTag::EclFlowGasWaterProblem> { using type = BlackOilLocalResidualTPFA<TypeTag>; };
+template<class TypeTag>
+struct Linearizer<TypeTag, TTag::EclFlowGasWaterEnergyProblem> { using type = TpfaLinearizer<TypeTag>; };
 
 template<class TypeTag>
-struct EnableDiffusion<TypeTag, TTag::EclFlowGasWaterEnergyProblem> { static constexpr bool value = false; };
+struct LocalResidual<TypeTag, TTag::EclFlowGasWaterEnergyProblem> { using type = BlackOilLocalResidualTPFA<TypeTag>; };
+
+template<class TypeTag>
+struct EnableDiffusion<TypeTag, TTag::EclFlowGasWaterEnergyProblem> { static constexpr bool value = true; };
+
+template<class TypeTag>
+struct EnableDispersion<TypeTag, TTag::EclFlowGasWaterEnergyProblem> { static constexpr bool value = true; };
 
 template<class TypeTag>
 struct EnableEnergy<TypeTag, TTag::EclFlowGasWaterEnergyProblem> {
@@ -59,7 +62,7 @@ struct EnableDisgasInWater<TypeTag, TTag::EclFlowGasWaterEnergyProblem> {
 };
 
 template<class TypeTag>
-struct EnableEvaporation<TypeTag, TTag::EclFlowGasWaterEnergyProblem> {
+struct EnableVapwat<TypeTag, TTag::EclFlowGasWaterEnergyProblem> {
     static constexpr bool value = true;
 };
 

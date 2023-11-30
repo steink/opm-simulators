@@ -93,7 +93,8 @@ EclTransmissibility(const EclipseState& eclState,
                     const Grid& grid,
                     std::function<std::array<double,dimWorld>(int)> centroids,
                     bool enableEnergy,
-                    bool enableDiffusivity)
+                    bool enableDiffusivity,
+                    bool enableDispersivity)
       : eclState_(eclState)
       , gridView_(gridView)
       , cartMapper_(cartMapper)
@@ -101,6 +102,9 @@ EclTransmissibility(const EclipseState& eclState,
       , centroids_(centroids)
       , enableEnergy_(enableEnergy)
       , enableDiffusivity_(enableDiffusivity)
+      , enableDispersivity_(enableDispersivity)
+      , lookUpData_(gridView)
+      , lookUpCartesianData_(gridView, cartMapper)
 {
     const UnitSystem& unitSystem = eclState_.getDeckUnitSystem();
     transmissibilityThreshold_  = unitSystem.parse("Transmissibility").getSIScaling() * 1e-6;
@@ -146,6 +150,17 @@ diffusivity(unsigned elemIdx1, unsigned elemIdx2) const
 }
 
 template<class Grid, class GridView, class ElementMapper, class CartesianIndexMapper, class Scalar>
+Scalar EclTransmissibility<Grid,GridView,ElementMapper,CartesianIndexMapper,Scalar>::
+dispersivity(unsigned elemIdx1, unsigned elemIdx2) const
+{
+    if (dispersivity_.empty())
+        return 0.0;
+
+    return dispersivity_.at(isId(elemIdx1, elemIdx2));
+
+}
+
+template<class Grid, class GridView, class ElementMapper, class CartesianIndexMapper, class Scalar>
 void EclTransmissibility<Grid,GridView,ElementMapper,CartesianIndexMapper,Scalar>::
 update(bool global, const std::function<unsigned int(unsigned int)>& map, const bool applyNncMultregT)
 {
@@ -154,10 +169,11 @@ update(bool global, const std::function<unsigned int(unsigned int)>& map, const 
     const auto& comm = gridView_.comm();
     ElementMapper elemMapper(gridView_, Dune::mcmgElementLayout());
 
-    // get the ntg values, the ntg values are modified for the cells merged with minpv
-    const std::vector<double>& ntg = eclState_.fieldProps().get_double("NTG");
-    const bool updateDiffusivity = eclState_.getSimulationConfig().isDiffusive() && enableDiffusivity_;
     unsigned numElements = elemMapper.size();
+    // get the ntg values, the ntg values are modified for the cells merged with minpv
+    const std::vector<double>& ntg = this->lookUpData_.assignFieldPropsDoubleOnLeaf(eclState_.fieldProps(), "NTG", numElements);
+    const bool updateDiffusivity = eclState_.getSimulationConfig().isDiffusive();
+    const bool updateDispersivity = eclState_.getSimulationConfig().rock_config().dispersion();
 
     if (map)
         extractPermeability_(map);
@@ -205,6 +221,13 @@ update(bool global, const std::function<unsigned int(unsigned int)>& map, const 
         diffusivity_.clear();
         diffusivity_.reserve(numElements*3*1.05);
         extractPorosity_();
+    }
+
+    // if dispersion is enabled, let's do the same for the "dispersivity"
+    if (updateDispersivity) {
+        dispersivity_.clear();
+        dispersivity_.reserve(numElements*3*1.05);
+        extractDispersion_();
     }
 
     // The MULTZ needs special case if the option is ALL
@@ -291,7 +314,7 @@ update(bool global, const std::function<unsigned int(unsigned int)>& map, const 
 
             // we only need to calculate a face's transmissibility
             // once...
-            if (insideCartElemIdx > outsideCartElemIdx)
+            if (elemIdx > outsideElemIdx)
                 continue;
 
             // local indices of the faces of the inside and
@@ -311,6 +334,9 @@ update(bool global, const std::function<unsigned int(unsigned int)>& map, const 
 
                 if (updateDiffusivity) {
                     diffusivity_[isId(elemIdx, outsideElemIdx)] = 0.0;
+                }
+                if (updateDispersivity) {
+                    dispersivity_[isId(elemIdx, outsideElemIdx)] = 0.0;
                 }
                 continue;
             }
@@ -483,6 +509,42 @@ update(bool global, const std::function<unsigned int(unsigned int)>& map, const 
 
                 diffusivity_[isId(elemIdx, outsideElemIdx)] = diffusivity;
            }
+
+           // update the "dispersivity half transmissibility" for the intersection
+            if (updateDispersivity) {
+
+                Scalar halfDispersivity1;
+                Scalar halfDispersivity2;
+
+                computeHalfDiffusivity_(halfDispersivity1,
+                                        faceAreaNormal,
+                                        distanceVector_(faceCenterInside,
+                                                        intersection.indexInInside(),
+                                                        elemIdx,
+                                                        axisCentroids),
+                                        dispersion_[elemIdx]);
+                computeHalfDiffusivity_(halfDispersivity2,
+                                        faceAreaNormal,
+                                        distanceVector_(faceCenterOutside,
+                                                        intersection.indexInOutside(),
+                                                        outsideElemIdx,
+                                                        axisCentroids),
+                                        dispersion_[outsideElemIdx]);
+
+                applyNtg_(halfDispersivity1, insideFaceIdx, elemIdx, ntg);
+                applyNtg_(halfDispersivity2, outsideFaceIdx, outsideElemIdx, ntg);
+
+                //TODO Add support for multipliers
+                Scalar dispersivity;
+                if (std::abs(halfDispersivity1) < 1e-30 || std::abs(halfDispersivity2) < 1e-30)
+                    // avoid division by zero
+                    dispersivity = 0.0;
+                else
+                    dispersivity = 1.0 / (1.0/halfDispersivity1 + 1.0/halfDispersivity2);
+
+
+                dispersivity_[isId(elemIdx, outsideElemIdx)] = dispersivity;
+           }
         }
     }
 
@@ -495,7 +557,7 @@ update(bool global, const std::function<unsigned int(unsigned int)>& map, const 
     // Loop over all elements (global grid) and store Cartesian index
     for (const auto& elem : elements(grid_.leafGridView())) {
         int elemIdx = elemMapper.index(elem);
-        int cartElemIdx = cartMapper_.cartesianIndex(elemIdx);
+        int cartElemIdx =  cartMapper_.cartesianIndex(elemIdx);
         globalToLocal[cartElemIdx] = elemIdx;
     }
 
@@ -615,6 +677,18 @@ extractPorosity_()
 
 template<class Grid, class GridView, class ElementMapper, class CartesianIndexMapper, class Scalar>
 void EclTransmissibility<Grid,GridView,ElementMapper,CartesianIndexMapper,Scalar>::
+extractDispersion_()
+{
+    if (!enableDispersivity_) {
+        throw std::runtime_error("Dispersion disabled at compile time, but the deck "
+                                 "contains the DISPERC keyword.");
+    }
+    const auto& fp = eclState_.fieldProps();
+    dispersion_ = fp.get_double("DISPERC");
+}
+
+template<class Grid, class GridView, class ElementMapper, class CartesianIndexMapper, class Scalar>
+void EclTransmissibility<Grid,GridView,ElementMapper,CartesianIndexMapper,Scalar>::
 removeSmallNonCartesianTransmissibilities_()
 {
     const auto& cartDims = cartMapper_.cartesianDimensions();
@@ -626,7 +700,9 @@ removeSmallNonCartesianTransmissibilities_()
             int gc2 = std::max(cartMapper_.cartesianIndex(elements.first), cartMapper_.cartesianIndex(elements.second));
 
             // only adjust the NNCs
-            if (gc2 - gc1 == 1 || gc2 - gc1 == cartDims[0] || gc2 - gc1 == cartDims[0]*cartDims[1])
+            // When LGRs, all neighbors in the LGR are cartesian neighbours on the level grid representing the LGR.
+            // When elements on the leaf grid view have the same parent cell, gc1 and gc2 coincide.
+            if (gc2 - gc1 == 1 || gc2 - gc1 == cartDims[0] || gc2 - gc1 == cartDims[0]*cartDims[1] || gc2 - gc1 == 0)
                 continue;
 
             //remove transmissibilities less than the threshold (by default 1e-6 in the deck's unit system)
@@ -741,7 +817,7 @@ createTransmissibilityArrays_(const std::array<bool,3>& is_tran)
             int gc1 = cartMapper_.cartesianIndex(c1);
             int gc2 = cartMapper_.cartesianIndex(c2);
 
-            if (gc1 > gc2)
+            if (c1 > c2)
                 continue; // we only need to handle each connection once, thank you.
 
             auto isID = isId(c1, c2);
@@ -793,7 +869,7 @@ resetTransmissibilityFromArrays_(const std::array<bool,3>& is_tran,
             unsigned c2 = elemMapper.index(intersection.outside());
             int gc1 = cartMapper_.cartesianIndex(c1);
             int gc2 = cartMapper_.cartesianIndex(c2);
-            if (gc1 > gc2)
+            if (c1 > c2)
                 continue; // we only need to handle each connection once, thank you.
 
             auto isID = isId(c1, c2);
