@@ -1462,20 +1462,38 @@ namespace Opm
             assembleWellEqWithoutIteration(ebosSimulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
 
             BVectorWell dx_well;
-            try{
-                dx_well = this->linSys_.solve();
-            }
-            catch(const NumericalProblem& exp) {
-                // Add information about the well and log to deferred logger
-                // (Logging done inside of solve() method will only be seen if
-                // this is the process with rank zero)
-                deferred_logger.problem("In MultisegmentWell::iterateWellEqWithControl for well "
-                                        + this->name() +": "+exp.what());
-                throw;
+            try {
+                 dx_well = this->linSys_.solve();
+            } catch (NumericalProblem& e ) {
+                std::cout << "Writing system for failed well:" << this->name() << " at local it: " << it << std::endl; 
+                const std::string case_name = "failed" + this->name() + "_" + std::to_string(it);
+
+                MultisegmentWellAssemble<FluidSystem,Indices,Scalar>(*this).
+                    OutputWellLinearSystem(this->linSys_, case_name);
+                converged = false;
+                break;
             }
 
             // --------------------------------------------------------
-            if(it > max_iter_number-10){
+            bool problem = false;
+            for (size_t i_block = 0; i_block < dx_well.size(); ++i_block) {
+                for (size_t i_elem = 0; i_elem < dx_well[i_block].size(); ++i_elem) {
+                    if (std::isinf(dx_well[i_block][i_elem]) || std::isnan(dx_well[i_block][i_elem]) ) {
+                        problem = true;
+                        //const std::string msg{"nan or inf value found after UMFPack solve due to singular matrix"};
+                        //OpmLog::debug(msg);
+                        //OPM_THROW_NOLOG(NumericalProblem, msg);
+                    }
+                }
+            }
+            if (problem) {
+                std::cout << "Writing system for (nan/inf) well:" << this->name() << " at local it: " << it << std::endl; 
+                const std::string case_name = "problem_" + this->name() + "_" + std::to_string(it);
+                MultisegmentWellAssemble<FluidSystem,Indices,Scalar>(*this).
+                    OutputWellLinearSystem(this->linSys_, case_name);
+            }
+
+            if(it > max_iter_number-2){
                 std::cout << "Writing system for well:" << this->name() << " at local it: " << it << std::endl; 
                 const std::string case_name = this->name() + "_" + std::to_string(it);
                 MultisegmentWellAssemble<FluidSystem,Indices,Scalar>(*this).
@@ -1663,7 +1681,49 @@ namespace Opm
 
             assembleWellEqWithoutIteration(ebosSimulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
 
-            const BVectorWell dx_well = this->linSys_.solve();
+            BVectorWell dx_well;
+            try {
+                 dx_well = this->linSys_.solve();
+            } catch (NumericalProblem& e ) {
+                std::cout << "Writing system for failed well:" << this->name() << " at local it: " << it << std::endl; 
+                const std::string case_name = "failed" + this->name() + "_" + std::to_string(it);
+                std::cout << "Current control: " << well_state.well(this->index_of_well_).production_cmode << ", is stopped: " << this->wellIsStopped() << std::endl; 
+                MultisegmentWellAssemble<FluidSystem,Indices,Scalar>(*this).
+                    OutputWellLinearSystem(this->linSys_, case_name);
+                auto v0 = this->primary_variables_.value(0);
+                double so = 1-v0[1]-v0[2];
+                std::cout << "rate: " << v0[0] << " fracs: (" << v0[1] << " " << so << " " << v0[2] << ")\n"; 
+                converged = false;
+                break;
+            }
+            
+
+            // --------------------------------------------------------
+            bool problem = false;
+            for (size_t i_block = 0; i_block < dx_well.size(); ++i_block) {
+                for (size_t i_elem = 0; i_elem < dx_well[i_block].size(); ++i_elem) {
+                    if (std::isinf(dx_well[i_block][i_elem]) || std::isnan(dx_well[i_block][i_elem]) ) {
+                        problem = true;
+                        //const std::string msg{"nan or inf value found after UMFPack solve due to singular matrix"};
+                        //OpmLog::debug(msg);
+                        //OPM_THROW_NOLOG(NumericalProblem, msg);
+                    }
+                }
+            }
+            if (problem) {
+                std::cout << "Writing system for (nan/inf) well:" << this->name() << " at local it: " << it << std::endl; 
+                const std::string case_name = "problem_" + this->name() + "_" + std::to_string(it);
+                MultisegmentWellAssemble<FluidSystem,Indices,Scalar>(*this).
+                    OutputWellLinearSystem(this->linSys_, case_name);
+            }
+
+            if(it > max_iter_number-2){
+                std::cout << "Writing system for well:" << this->name() << " at local it: " << it << std::endl; 
+                const std::string case_name = this->name() + "_" + std::to_string(it);
+                MultisegmentWellAssemble<FluidSystem,Indices,Scalar>(*this).
+                    OutputWellLinearSystem(this->linSys_, case_name);
+            }
+            // ------------------------------------------------------
 
             if (it > this->param_.strict_inner_iter_wells_) {
                 relax_convergence = true;
