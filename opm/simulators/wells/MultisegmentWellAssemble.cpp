@@ -116,6 +116,20 @@ assembleControlEq(const WellState& well_state,
         return rates;
     };
 
+    auto getFractions = [&]() {
+        std::vector<EvalWell> fractions(3, 0.0);
+        if (FluidSystem::phaseIsActive(FluidSystem::waterPhaseIdx)) {
+            fractions[Water] = primary_variables.volumeFractionScaled(0, Indices::canonicalToActiveComponentIndex(FluidSystem::waterCompIdx));
+        }
+        if (FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx)) {
+            fractions[Oil] = primary_variables.volumeFractionScaled(0, Indices::canonicalToActiveComponentIndex(FluidSystem::oilCompIdx));
+        }
+        if (FluidSystem::phaseIsActive(FluidSystem::gasPhaseIdx)) {
+            fractions[Gas] = primary_variables.volumeFractionScaled(0, Indices::canonicalToActiveComponentIndex(FluidSystem::gasCompIdx));
+        }
+        return fractions;
+    };
+
     if (well_.stopppedOrZeroRateTarget(summaryState, well_state)) {
         control_eq = primary_variables.getWQTotal();
     } else if (well_.isInjector() ) {
@@ -167,6 +181,7 @@ assembleControlEq(const WellState& well_state,
     } else {
         // Find rates.
         const auto rates = getRates();
+        const auto fractions = getFractions();
         // Setup function for evaluation of BHP from THP (used only if needed).
         std::function<EvalWell()> bhp_from_thp = [&]() {
             return WellBhpThpCalculator(well_).calculateBhpFromThp(well_state,
@@ -183,7 +198,8 @@ assembleControlEq(const WellState& well_state,
                                                   summaryState,
                                                   prod_controls,
                                                   primary_variables.getBhp(),
-                                                  rates,
+                                                  primary_variables.getWQTotal(),
+                                                  fractions,
                                                   bhp_from_thp,
                                                   control_eq,
                                                   deferred_logger);

@@ -60,7 +60,8 @@ public:
                                const SummaryState& summaryState,
                                const WellProductionControls& controls,
                                const EvalWell& bhp,
-                               const std::vector<EvalWell>& rates, // Always 3 canonical rates.
+                               const EvalWell& wqtotal, 
+                               const std::vector<EvalWell>& fractions, // Always 3 canonical fractions.
                                const std::function<EvalWell()>& bhp_from_thp,
                                EvalWell& control_eq,
                                DeferredLogger& deferred_logger) const;

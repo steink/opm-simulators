@@ -306,7 +306,8 @@ void WellGroupControls::getGroupProductionControl(const Group& group,
                                                   const Schedule& schedule,
                                                   const SummaryState& summaryState,
                                                   const EvalWell& bhp,
-                                                  const std::vector<EvalWell>& rates,
+                                                  const EvalWell& wqtotal,
+                                                  const std::vector<EvalWell>& component_fractions,
                                                   const RateConvFunc& rateConverter,
                                                   double efficiencyFactor,
                                                   EvalWell& control_eq,
@@ -333,7 +334,7 @@ void WellGroupControls::getGroupProductionControl(const Group& group,
             efficiencyFactor *= group.getGroupEfficiencyFactor();
             getGroupProductionControl(parent, well_state, group_state,
                                       schedule, summaryState, bhp,
-                                      rates, rateConverter,
+                                      wqtotal, component_fractions, rateConverter,
                                       efficiencyFactor, control_eq, deferred_logger);
             return;
         }
@@ -402,8 +403,21 @@ void WellGroupControls::getGroupProductionControl(const Group& group,
     }
     // Avoid negative target rates coming from too large local reductions.
     const double target_rate = std::max(0.0, target / efficiencyFactor);
-    const auto current_rate = -tcalc.calcModeRateFromRates(rates); // Switch sign since 'rates' are negative for producers.
-    control_eq = current_rate - target_rate;
+    //const auto current_rate = -tcalc.calcModeRateFromRates(rates); // Switch sign since 'rates' are negative for producers.
+    // slight unconventional use of function, but ok since rates = wqtotal*fractions 
+    const auto current_fraction = tcalc.calcModeRateFromRates(component_fractions);
+    const double zero_tol = 1e-5;
+    if (true) { //(target_rate > 0) {
+        control_eq = -wqtotal*current_fraction - target_rate; // Switch sign since wqtotal is negative for producers.
+        if (wqtotal.value() == 0.0 && current_fraction.value() < zero_tol) {
+            // add a small fraction to prevent singular control eq
+            control_eq -= wqtotal*(zero_tol - current_fraction.value());
+        }
+    } else {
+        // zero comp rate - replace by zero total rate
+        control_eq = -wqtotal;
+    }
+
 }
 
 double WellGroupControls::
@@ -522,6 +536,7 @@ getGroupProductionControl<__VA_ARGS__>(const Group&, \
                                        const Schedule&, \
                                        const SummaryState&, \
                                        const __VA_ARGS__& bhp, \
+                                       const __VA_ARGS__& wqtotal, \
                                        const std::vector<__VA_ARGS__>&, \
                                        const RateConvFunc& rateConverter, \
                                        double efficiencyFactor, \

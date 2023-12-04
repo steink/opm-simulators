@@ -59,7 +59,8 @@ assembleControlEqProd(const WellState& well_state,
                       const SummaryState& summaryState,
                       const Well::ProductionControls& controls,
                       const EvalWell& bhp,
-                      const std::vector<EvalWell>& rates, // Always 3 canonical rates.
+                      const EvalWell& wqtotal, 
+                      const std::vector<EvalWell>& fractions, // Always 3 canonical fractions.
                       const std::function<EvalWell()>& bhp_from_thp,
                       EvalWell& control_eq,
                       DeferredLogger& deferred_logger) const
@@ -67,31 +68,45 @@ assembleControlEqProd(const WellState& well_state,
     const auto current = well_state.well(well_.indexOfWell()).production_cmode;
     const auto& pu = well_.phaseUsage();
     const double efficiencyFactor = well_.wellEcl().getEfficiencyFactor();
+    // In case of rate control, introduce a minumum fraction for the phase 
+    const double zero_tol = 1e-5;
 
     switch (current) {
     case Well::ProducerCMode::ORAT: {
         assert(FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx));
-        const EvalWell rate = -rates[BlackoilPhases::Liquid];
-        control_eq = rate - controls.oil_rate;
+        const EvalWell fraction = fractions[BlackoilPhases::Liquid];
+        control_eq = -wqtotal*fraction - controls.oil_rate;
+        if (wqtotal.value() == 0.0 && fraction.value() < zero_tol) {
+            control_eq -= wqtotal*(zero_tol - fraction.value());
+        }
         break;
     }
     case Well::ProducerCMode::WRAT: {
         assert(FluidSystem::phaseIsActive(FluidSystem::waterPhaseIdx));
-        const EvalWell rate = -rates[BlackoilPhases::Aqua];
-        control_eq = rate - controls.water_rate;
+        const EvalWell fraction = fractions[BlackoilPhases::Aqua];
+        control_eq = -wqtotal*fraction - controls.water_rate;
+        if (wqtotal.value() == 0.0 && fraction.value() < zero_tol) {
+            control_eq -= wqtotal*(zero_tol - fraction.value());
+        }
         break;
     }
     case Well::ProducerCMode::GRAT: {
         assert(FluidSystem::phaseIsActive(FluidSystem::gasPhaseIdx));
-        const EvalWell rate = -rates[BlackoilPhases::Vapour];
-        control_eq = rate - controls.gas_rate;
+        const EvalWell fraction = fractions[BlackoilPhases::Vapour];
+        control_eq = -wqtotal*fraction - controls.gas_rate;
+        if (wqtotal.value() == 0.0 && fraction.value() < zero_tol) {
+            control_eq -= wqtotal*(zero_tol - fraction.value());
+        }
         break;
     }
     case Well::ProducerCMode::LRAT: {
         assert(FluidSystem::phaseIsActive(FluidSystem::waterPhaseIdx));
         assert(FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx));
-        EvalWell rate = -rates[BlackoilPhases::Aqua] - rates[BlackoilPhases::Liquid];
-        control_eq = rate - controls.liquid_rate;
+        const EvalWell fraction = fractions[BlackoilPhases::Aqua] - fractions[BlackoilPhases::Liquid];
+        control_eq = -wqtotal*fraction - controls.liquid_rate;
+        if (wqtotal.value() == 0.0 && fraction.value() < zero_tol) {
+            control_eq -= wqtotal*(zero_tol - fraction.value());
+        }        
         break;
     }
     case Well::ProducerCMode::CRAT: {
@@ -100,14 +115,14 @@ assembleControlEqProd(const WellState& well_state,
                          deferred_logger);
     }
     case Well::ProducerCMode::RESV: {
-        auto total_rate = rates[0]; // To get the correct type only.
+        auto total_rate = fractions[0]; // To get the correct type only.
         total_rate = 0.0;
         std::vector<double> convert_coeff(well_.numPhases(), 1.0);
         well_.rateConverter().calcCoeff(/*fipreg*/ 0, well_.pvtRegionIdx(), well_state.well(well_.indexOfWell()).surface_rates, convert_coeff);
         for (int phase = 0; phase < 3; ++phase) {
             if (pu.phase_used[phase]) {
                 const int pos = pu.phase_pos[phase];
-                total_rate -= rates[phase] * convert_coeff[pos]; // Note different indices.
+                total_rate -= wqtotal * fractions[phase] * convert_coeff[pos]; // Note different indices.
             }
         }
         if (controls.prediction_mode) {
@@ -147,10 +162,10 @@ assembleControlEqProd(const WellState& well_state,
         // they are required (THP controlled well). But for the
         // group production control things we must pass only the
         // active phases' rates.
-        std::vector<EvalWell> active_rates(pu.num_phases);
+        std::vector<EvalWell> active_fractions(pu.num_phases);
         for (int canonical_phase = 0; canonical_phase < 3; ++canonical_phase) {
             if (pu.phase_used[canonical_phase]) {
-                active_rates[pu.phase_pos[canonical_phase]] = rates[canonical_phase];
+                active_fractions[pu.phase_pos[canonical_phase]] = fractions[canonical_phase];
             }
         }
         auto rCoeff = [this, &group_state](const RegionId id, const int region, const std::optional<std::string>& prod_gname, std::vector<double>& coeff)
@@ -165,7 +180,8 @@ assembleControlEqProd(const WellState& well_state,
                                                              group_state,
                                                              schedule,
                                                              summaryState,
-                                                             bhp, active_rates,
+                                                             bhp, wqtotal,
+                                                             active_fractions,
                                                              rCoeff,
                                                              efficiencyFactor,
                                                              control_eq,
@@ -282,6 +298,7 @@ assembleControlEqProd<__VA_ARGS__>(const WellState&, \
                                    const Schedule&, \
                                    const SummaryState&, \
                                    const Well::ProductionControls&, \
+                                   const __VA_ARGS__&, \
                                    const __VA_ARGS__&, \
                                    const std::vector<__VA_ARGS__>&, \
                                    const std::function<__VA_ARGS__()>&, \
