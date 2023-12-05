@@ -411,6 +411,7 @@ namespace Opm {
         updateAndCommunicateGroupData(reportStepIdx,
                                       ebosSimulator_.model().newtonMethod().numIterations());
 
+        this->wellState().updateWellsDefaultALQ(this->wells_ecl_, this->summaryState());
         this->wellState().gliftTimeStepInit();
 
         const double simulationTime = ebosSimulator_.time();
@@ -584,7 +585,12 @@ namespace Opm {
                 well->setPrevSurfaceRates(this->wellState(), this->prevWellState());
             }
 
-            well->wellTesting(ebosSimulator_, simulationTime, this->wellState(), this->groupState(), wellTestState(), deferred_logger);
+            try {
+                well->wellTesting(ebosSimulator_, simulationTime, this->wellState(), this->groupState(), wellTestState(), deferred_logger);
+            } catch (const std::exception& e) {
+                const std::string msg = fmt::format("Exception during testing of well: {}. The well will not open.\n Exception message: {}", wellEcl.name(), e.what());
+                deferred_logger.warning("WELL_TESTING_FAILED", msg);
+            }
         }
     }
 
@@ -1916,15 +1922,22 @@ namespace Opm {
         }
         // Check wells' group constraints and communicate.
         bool changed_well_to_group = false;
-        for (const auto& well : well_container_) {
-            const auto mode = WellInterface<TypeTag>::IndividualOrGroup::Group;
-            const bool changed_well = well->updateWellControl(ebosSimulator_, mode, this->wellState(), this->groupState(), deferred_logger);
-            if (changed_well) {
-                changed_well_to_group = changed_well || changed_well_to_group;
-            }
+        {
+            // For MS Wells a linear solve is performed below and the matrix might be singular.
+            // We need to communicate the exception thrown to the others and rethrow.
+            OPM_BEGIN_PARALLEL_TRY_CATCH()
+                for (const auto& well : well_container_) {
+                    const auto mode = WellInterface<TypeTag>::IndividualOrGroup::Group;
+                    const bool changed_well = well->updateWellControl(ebosSimulator_, mode, this->wellState(), this->groupState(), deferred_logger);
+                    if (changed_well) {
+                        changed_well_to_group = changed_well || changed_well_to_group;
+                    }
+                }
+            OPM_END_PARALLEL_TRY_CATCH("BlackoilWellModel: updating well controls failed: ",
+                                       ebosSimulator_.gridView().comm());
         }
 
-        changed_well_to_group = comm.sum(changed_well_to_group);
+        changed_well_to_group = comm.sum(static_cast<int>(changed_well_to_group));
         if (changed_well_to_group) {
             updateAndCommunicate(episodeIdx, iterationIdx, deferred_logger);
             changed_well_group = true;
@@ -1932,14 +1945,22 @@ namespace Opm {
 
         // Check individual well constraints and communicate.
         bool changed_well_individual = false;
-        for (const auto& well : well_container_) {
-            const auto mode = WellInterface<TypeTag>::IndividualOrGroup::Individual;
-            const bool changed_well = well->updateWellControl(ebosSimulator_, mode, this->wellState(), this->groupState(), deferred_logger);
-            if (changed_well) {
-                changed_well_individual = changed_well || changed_well_individual;
-            }
+        {
+            // For MS Wells a linear solve is performed below and the matrix might be singular.
+            // We need to communicate the exception thrown to the others and rethrow.
+            OPM_BEGIN_PARALLEL_TRY_CATCH()
+                for (const auto& well : well_container_) {
+                    const auto mode = WellInterface<TypeTag>::IndividualOrGroup::Individual;
+                    const bool changed_well = well->updateWellControl(ebosSimulator_, mode, this->wellState(), this->groupState(), deferred_logger);
+                    if (changed_well) {
+                        changed_well_individual = changed_well || changed_well_individual;
+                    }
+                }
+            OPM_END_PARALLEL_TRY_CATCH("BlackoilWellModel: updating well controls failed: ",
+                                       ebosSimulator_.gridView().comm());
         }
-        changed_well_individual = comm.sum(changed_well_individual);
+
+        changed_well_individual = comm.sum(static_cast<int>(changed_well_individual));
         if (changed_well_individual) {
             updateAndCommunicate(episodeIdx, iterationIdx, deferred_logger);
             changed_well_group = true;

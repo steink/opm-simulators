@@ -285,7 +285,7 @@ add_test_compareECLFiles(CASENAME polymer_oilwater
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         TEST_ARGS --tolerance-mb=1.e-7)
+                         TEST_ARGS --solver-max-time-step-in-days=10 --tolerance-mb=1.e-7)
 
 add_test_compareECLFiles(CASENAME polymer_injectivity
                          FILENAME 2D_POLYMER_INJECTIVITY
@@ -439,7 +439,8 @@ add_test_compareECLFiles(CASENAME udq_actionx
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR udq_actionx)
+                         DIR udq_actionx
+                         TEST_ARGS --solver-max-time-step-in-days=5)
 
 add_test_compareECLFiles(CASENAME udq_wconprod
                          FILENAME UDQ_WCONPROD
@@ -497,6 +498,13 @@ add_test_compareECLFiles(CASENAME waghyst2
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
                          DIR waghystr)
+
+add_test_compareECLFiles(CASENAME gpmaint11
+                         FILENAME GPMAINT-11
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR gpmaint)
 
 set(_pinch_cases
   T1A_GAP T1A_NOGAP T1A_NOPINCH
@@ -1221,7 +1229,8 @@ add_test_compareECLFiles(CASENAME rxft_smry
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR rxft_smry )
+                         DIR rxft_smry
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME bo_diffusion
                          FILENAME BO_DIFFUSE_CASE1
@@ -1242,7 +1251,8 @@ add_test_compareECLFiles(CASENAME actionx_wpimult
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR actionx)
+                         DIR actionx
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME wvfpexp_02
                          FILENAME WVFPEXP-02

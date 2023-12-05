@@ -410,7 +410,7 @@ struct NonlinearSolver<TypeTag, TTag::FlowModelParameters> {
 };
 template<class TypeTag>
 struct LocalSolveApproach<TypeTag, TTag::FlowModelParameters> {
-    static constexpr auto value = "jacobi";
+    static constexpr auto value = "gauss-seidel";
 };
 template<class TypeTag>
 struct MaxLocalSolveIterations<TypeTag, TTag::FlowModelParameters> {
@@ -424,7 +424,7 @@ struct LocalToleranceScalingMb<TypeTag, TTag::FlowModelParameters> {
 template<class TypeTag>
 struct LocalToleranceScalingCnv<TypeTag, TTag::FlowModelParameters> {
     using type = GetPropType<TypeTag, Scalar>;
-    static constexpr type value = 0.01;
+    static constexpr type value = 0.1;
 };
 template<class TypeTag>
 struct NlddNumInitialNewtonIter<TypeTag, TTag::FlowModelParameters> {
@@ -447,7 +447,7 @@ struct LocalDomainsPartitioningMethod<TypeTag, TTag::FlowModelParameters> {
 };
 template<class TypeTag>
 struct LocalDomainsOrderingMeasure<TypeTag, TTag::FlowModelParameters> {
-    static constexpr auto value = "pressure";
+    static constexpr auto value = "maxpressure";
 };
 // if openMP is available, determine the number threads per process automatically.
 #if _OPENMP
@@ -590,7 +590,7 @@ namespace Opm
         int num_local_domains_{0};
         double local_domain_partition_imbalance_{1.03};
         std::string local_domain_partition_method_;
-        DomainOrderingMeasure local_domain_ordering_{DomainOrderingMeasure::AveragePressure};
+        DomainOrderingMeasure local_domain_ordering_{DomainOrderingMeasure::MaxPressure};
 
         bool write_partitions_{false};
 
@@ -632,7 +632,7 @@ namespace Opm
             local_well_solver_control_switching_ = EWOMS_GET_PARAM(TypeTag, bool, LocalWellSolveControlSwitching);
             use_implicit_ipr_ = EWOMS_GET_PARAM(TypeTag, bool, UseImplicitIpr);
             nonlinear_solver_ = EWOMS_GET_PARAM(TypeTag, std::string, NonlinearSolver);
-            std::string approach = EWOMS_GET_PARAM(TypeTag, std::string, LocalSolveApproach);
+            const auto approach = EWOMS_GET_PARAM(TypeTag, std::string, LocalSolveApproach);
             if (approach == "jacobi") {
                 local_solve_approach_ = DomainSolveApproach::Jacobi;
             } else if (approach == "gauss-seidel") {
@@ -651,15 +651,7 @@ namespace Opm
             deck_file_name_ = EWOMS_GET_PARAM(TypeTag, std::string, EclDeckFileName);
             network_max_strict_iterations_ = EWOMS_GET_PARAM(TypeTag, int, NetworkMaxStrictIterations);
             network_max_iterations_ = EWOMS_GET_PARAM(TypeTag, int, NetworkMaxIterations);
-            std::string measure = EWOMS_GET_PARAM(TypeTag, std::string, LocalDomainsOrderingMeasure);
-            if (measure == "residual") {
-                local_domain_ordering_ = DomainOrderingMeasure::Residual;
-            } else if (measure == "pressure") {
-                local_domain_ordering_ = DomainOrderingMeasure::AveragePressure;
-            } else {
-                throw std::runtime_error("Invalid domain ordering '" + measure + "' specified.");
-            }
-
+            local_domain_ordering_ = domainOrderingMeasureFromString(EWOMS_GET_PARAM(TypeTag, std::string, LocalDomainsOrderingMeasure));
             write_partitions_ = EWOMS_GET_PARAM(TypeTag, bool, DebugEmitCellPartition);
         }
 
@@ -714,7 +706,7 @@ namespace Opm
             EWOMS_REGISTER_PARAM(TypeTag, std::string, LocalDomainsPartitioningMethod, "Subdomain partitioning method. "
                                  "Allowed values are 'zoltan', 'simple', and the name of a partition file ending with '.partition'.");
             EWOMS_REGISTER_PARAM(TypeTag, std::string, LocalDomainsOrderingMeasure, "Subdomain ordering measure. "
-                                 "Allowed values are 'pressure' and  'residual'.");
+                                 "Allowed values are 'maxpressure', 'averagepressure' and  'residual'.");
 
             EWOMS_REGISTER_PARAM(TypeTag, bool, DebugEmitCellPartition, "Whether or not to emit cell partitions as a debugging aid.");
 

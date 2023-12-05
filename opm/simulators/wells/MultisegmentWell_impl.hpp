@@ -1179,7 +1179,7 @@ namespace Opm
                 const double thp = WellBhpThpCalculator(*this).calculateThpFromBhp(well_rates_bhp_limit,
                                                                                    bhp_limit,
                                                                                    this->getRefDensity(),
-                                                                                   this->wellEcl().alq_value(),
+                                                                                   this->wellEcl().alq_value(summaryState),
                                                                                    thp_limit,
                                                                                    deferred_logger);
                 if ( (this->isProducer() && thp < thp_limit) || (this->isInjector() && thp > thp_limit) ) {
@@ -1847,6 +1847,8 @@ namespace Opm
                 if (this->isProducer()) {
                     ws.phase_mixing_rates[ws.dissolved_gas] += perfRates.dis_gas;
                     ws.phase_mixing_rates[ws.vaporized_oil] += perfRates.vap_oil;
+                    perf_data.phase_mixing_rates[perf][ws.dissolved_gas] = perfRates.dis_gas;
+                    perf_data.phase_mixing_rates[perf][ws.vaporized_oil] = perfRates.vap_oil;
                 }
 
                 // store the perf pressure and rates

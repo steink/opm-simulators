@@ -480,7 +480,7 @@ protected:
                                 double* connII,
                                 DeferredLogger& deferred_logger) const;
 
-    double computeConnectionDFactor(const int perf, const IntensiveQuantities& intQuants, const double trans_mult, const double total_tw, const SingleWellState& ws) const;
+    double computeConnectionDFactor(const int perf, const IntensiveQuantities& intQuants, const SingleWellState& ws) const;
 
 
 };
