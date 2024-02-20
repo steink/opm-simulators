@@ -25,7 +25,7 @@
 #include <opm/models/blackoil/blackoiltwophaseindices.hh>
 
 #include <opm/grid/CpGrid.hpp>
-#include <opm/simulators/flow/SimulatorFullyImplicitBlackoilEbos.hpp>
+#include <opm/simulators/flow/SimulatorFullyImplicitBlackoil.hpp>
 #include <opm/simulators/flow/Main.hpp>
 
 namespace Opm {
@@ -75,7 +75,7 @@ int flowEbosGasWaterSolventMain(int argc, char** argv, bool outputCout, bool out
     // with incorrect locale settings.
     resetLocale();
 
-    FlowMainEbos<Properties::TTag::EclFlowGasWaterSolventProblem>
+    FlowMain<Properties::TTag::EclFlowGasWaterSolventProblem>
         mainfunc {argc, argv, outputCout, outputFiles} ;
     return mainfunc.execute();
 }

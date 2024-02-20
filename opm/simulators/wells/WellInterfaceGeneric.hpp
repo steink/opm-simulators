@@ -80,6 +80,7 @@ public:
     void adaptRatesForVFP(std::vector<double>& rates) const;
 
     const Well& wellEcl() const;
+    Well& wellEcl();
     const PhaseUsage& phaseUsage() const;
 
     /// Returns true if the well is currently in prediction mode (i.e. not history mode).
@@ -244,6 +245,11 @@ protected:
     void checkNegativeWellPotentials(std::vector<double>& well_potentials,
                                      const bool checkOperability,
                                      DeferredLogger& deferred_logger);
+
+    void prepareForPotentialCalculations(const SummaryState& summary_state,
+                                         WellState& well_state, 
+                                         Well::InjectionControls& inj_controls,
+                                         Well::ProductionControls& prod_controls) const;
 
     // definition of the struct OperabilityStatus
     struct OperabilityStatus {

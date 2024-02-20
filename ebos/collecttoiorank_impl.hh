@@ -31,6 +31,8 @@
 #include <dune/common/version.hh>
 #include <dune/grid/common/gridenums.hh>
 #include <dune/grid/common/mcmgmapper.hh>
+#include <dune/grid/common/partitionset.hh>
+
 
 #include <algorithm>
 #include <cassert>
@@ -320,7 +322,7 @@ public:
 
         // write all cell data registered in local state
         for (const auto& pair : localCellData_) {
-            const auto& data = pair.second.data;
+            const auto& data = pair.second.data<double>();
 
             // write all data from local data to buffer
             write(buffer, localIndexMap_, data);
@@ -333,7 +335,7 @@ public:
         // its order governs the order the data got received.
         for (auto& pair : localCellData_) {
             const std::string& key = pair.first;
-            auto& data = globalCellData_.data(key);
+            auto& data = globalCellData_.data<double>(key);
 
             //write all data from local cell data to buffer
             read(buffer, indexMap, data);
@@ -739,13 +741,13 @@ private:
 
 class PackUnpackInterRegFlows : public P2PCommunicatorType::DataHandleInterface
 {
-    const EclInterRegFlowMap& localInterRegFlows_;
-    EclInterRegFlowMap&       globalInterRegFlows_;
+    const InterRegFlowMap& localInterRegFlows_;
+    InterRegFlowMap&       globalInterRegFlows_;
 
 public:
-    PackUnpackInterRegFlows(const EclInterRegFlowMap& localInterRegFlows,
-                            EclInterRegFlowMap&       globalInterRegFlows,
-                            const bool                isIORank)
+    PackUnpackInterRegFlows(const InterRegFlowMap& localInterRegFlows,
+                            InterRegFlowMap&       globalInterRegFlows,
+                            const bool             isIORank)
         : localInterRegFlows_(localInterRegFlows)
         , globalInterRegFlows_(globalInterRegFlows)
     {
@@ -848,7 +850,7 @@ CollectDataToIORank(const Grid& grid, const EquilGrid* equilGrid,
                     const Dune::CartesianIndexMapper<EquilGrid>* equilCartMapper,
                     const std::set<std::string>& fipRegionsInterregFlow)
     : toIORankComm_(grid.comm())
-    , globalInterRegFlows_(EclInterRegFlowMap::createMapFromNames(toVector(fipRegionsInterregFlow)))
+    , globalInterRegFlows_(InterRegFlowMap::createMapFromNames(toVector(fipRegionsInterregFlow)))
 {
     // index maps only have to be build when reordering is needed
     if (!needsReordering && !isParallel())
@@ -865,7 +867,7 @@ CollectDataToIORank(const Grid& grid, const EquilGrid* equilGrid,
         ElementMapper elemMapper(localGridView, Dune::mcmgElementLayout());
         sortedCartesianIdx_.reserve(localGridView.size(0));
 
-        for (const auto& elem : elements(localGridView))
+        for (const auto& elem : elements(localGridView, Dune::Partitions::interior))
         {
             auto idx = elemMapper.index(elem);
             sortedCartesianIdx_.push_back(cartMapper.cartesianIndex(idx));
@@ -934,12 +936,12 @@ CollectDataToIORank(const Grid& grid, const EquilGrid* equilGrid,
         distributedCartesianIndex.resize(gridSize, -1);
 
         // A mapping for the whole grid (including the ghosts) is needed for restarts
-        for (const auto& elem : elements(localGridView)) {
+        for (const auto& elem : elements(localGridView, Dune::Partitions::interior)) {
             int elemIdx = elemMapper.index(elem);
             distributedCartesianIndex[elemIdx] = cartMapper.cartesianIndex(elemIdx);
 
             // only store interior element for collection
-            //assert(element.partitionType() == Dune::InteriorEntity);
+            assert(elem.partitionType() == Dune::InteriorEntity);
 
             localIndexMap_.push_back(elemIdx);
         }
@@ -972,7 +974,7 @@ collect(const data::Solution&                                localCellData,
         const data::GroupAndNetworkValues&                   localGroupAndNetworkData,
         const data::Aquifers&                                localAquiferData,
         const WellTestState&                                 localWellTestState,
-        const EclInterRegFlowMap&                            localInterRegFlows,
+        const InterRegFlowMap&                               localInterRegFlows,
         const std::array<std::pair<std::string, std::pair<std::vector<int>, std::vector<double>>>, 3>& localFlowsn,
         const std::array<std::pair<std::string, std::pair<std::vector<int>, std::vector<double>>>, 3>& localFloresn)
 {

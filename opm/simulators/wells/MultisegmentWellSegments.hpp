@@ -34,6 +34,7 @@ namespace Opm {
     class  SegmentState;
     class  UnitSystem;
     class  WellInterfaceGeneric;
+    class  SummaryState;
 
 } // namespace Opm
 
@@ -85,14 +86,22 @@ public:
 
     // pressure drop for sub-critical valve (WSEGVALV)
     EvalWell pressureDropValve(const int seg, 
+                               const SummaryState& st,
                                const bool extra_reverse_flow_derivatives = false) const;
-                               
-    // pressure loss due to acceleration
-    EvalWell accelerationPressureLoss(const int seg) const;
+
+    // pressure loss contribution due to acceleration
+    EvalWell accelerationPressureLossContribution(const int seg,
+                                                  const double area, 
+                                                  const bool extra_reverse_flow_derivatives = false) const;
 
     const std::vector<std::vector<int>>& inlets() const
     {
         return inlets_;
+    }
+
+    const std::vector<int>& inlets(const int seg) const
+    {
+        return inlets_[seg];
     }
 
     const std::vector<std::vector<int>>& perforations() const
@@ -162,7 +171,7 @@ private:
     std::vector<std::vector<EvalWell>> phase_fractions_;
     std::vector<std::vector<EvalWell>> phase_viscosities_;
 
-    const WellInterfaceGeneric& well_;
+    WellInterfaceGeneric& well_;
 
     void copyPhaseDensities(const unsigned    phaseIdx,
                             const std::size_t stride,

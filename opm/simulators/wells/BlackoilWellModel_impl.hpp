@@ -37,7 +37,7 @@
 #include <opm/simulators/linalg/bda/WellContributions.hpp>
 
 #if HAVE_MPI
-#include <ebos/eclmpiserializer.hh>
+#include <opm/simulators/utils/MPISerializer.hpp>
 #endif
 
 #include <algorithm>
@@ -411,6 +411,7 @@ namespace Opm {
         updateAndCommunicateGroupData(reportStepIdx,
                                       ebosSimulator_.model().newtonMethod().numIterations());
 
+        this->wellState().updateWellsDefaultALQ(this->wells_ecl_, this->summaryState());
         this->wellState().gliftTimeStepInit();
 
         const double simulationTime = ebosSimulator_.time();
@@ -584,7 +585,12 @@ namespace Opm {
                 well->setPrevSurfaceRates(this->wellState(), this->prevWellState());
             }
 
-            well->wellTesting(ebosSimulator_, simulationTime, this->wellState(), this->groupState(), wellTestState(), deferred_logger);
+            try {
+                well->wellTesting(ebosSimulator_, simulationTime, this->wellState(), this->groupState(), wellTestState(), deferred_logger);
+            } catch (const std::exception& e) {
+                const std::string msg = fmt::format("Exception during testing of well: {}. The well will not open.\n Exception message: {}", wellEcl.name(), e.what());
+                deferred_logger.warning("WELL_TESTING_FAILED", msg);
+            }
         }
     }
 
@@ -841,10 +847,6 @@ namespace Opm {
                     // repeated timestep cuts. It should therefore not be opened,
                     // even if it was new or received new targets this report step.
                     const bool closed_this_step = (wellTestState().lastTestTime(well_name) == ebosSimulator_.time());
-                    // Always check if wells on historic controls can be opened
-                    if (!closed_this_step && !well_ecl.predictionMode()) {
-                        wellTestState().open_well(well_name);
-                    }
                     // TODO: more checking here, to make sure this standard more specific and complete
                     // maybe there is some WCON keywords will not open the well
                     auto& events = this->wellState().well(w).events;
@@ -879,47 +881,14 @@ namespace Opm {
                     }
                 }
 
-                // If a production well disallows crossflow and its
-                // (prediction type) rate control is zero, then it is effectively shut.
-                if (!well_ecl.getAllowCrossFlow() && well_ecl.isProducer() && well_ecl.predictionMode()) {
-                    const auto& summaryState = ebosSimulator_.vanguard().summaryState();
-                    const auto prod_controls = well_ecl.productionControls(summaryState);
-
-                    auto is_zero = [](const double x)
-                    {
-                        return std::isfinite(x) && !std::isnormal(x);
-                    };
-
-                    bool zero_rate_control = false;
-                    switch (prod_controls.cmode) {
-                    case Well::ProducerCMode::ORAT:
-                        zero_rate_control = is_zero(prod_controls.oil_rate);
-                        break;
-
-                    case Well::ProducerCMode::WRAT:
-                        zero_rate_control = is_zero(prod_controls.water_rate);
-                        break;
-
-                    case Well::ProducerCMode::GRAT:
-                        zero_rate_control = is_zero(prod_controls.gas_rate);
-                        break;
-
-                    case Well::ProducerCMode::LRAT:
-                        zero_rate_control = is_zero(prod_controls.liquid_rate);
-                        break;
-
-                    case Well::ProducerCMode::RESV:
-                        zero_rate_control = is_zero(prod_controls.resv_rate);
-                        break;
-                    default:
-                        // Might still have zero rate controls, but is pressure controlled.
-                        zero_rate_control = false;
-                        break;
-                    }
-
-                    if (zero_rate_control) {
+                // shut wells with zero rante constraints and disallowing
+                if (!well_ecl.getAllowCrossFlow()) {
+                    const bool any_zero_rate_constraint = well_ecl.isProducer()
+                                                  ? well_ecl.productionControls(summaryState_).anyZeroRateConstraint()
+                                                  : well_ecl.injectionControls(summaryState_).anyZeroRateConstraint();
+                    if (any_zero_rate_constraint) {
                         // Treat as shut, do not add to container.
-                        local_deferredLogger.info("  Well shut due to zero rate control and disallowing crossflow: " + well_ecl.name());
+                        local_deferredLogger.debug(fmt::format("  Well {} gets shut due to having zero rate constraint and disallowing crossflow ", well_ecl.name()) );
                         this->wellState().shutWell(w);
                         continue;
                     }
@@ -1405,7 +1374,7 @@ namespace Opm {
                     group_alq_rates.resize(num_rates_to_sync);
                 }
 #if HAVE_MPI
-                EclMpiSerializer ser(comm);
+                Parallel::MpiSerializer ser(comm);
                 ser.broadcast(i, group_indexes, group_oil_rates,
                               group_gas_rates, group_water_rates, group_alq_rates);
 #endif
@@ -1510,10 +1479,17 @@ namespace Opm {
     BlackoilWellModel<TypeTag>::
     assembleWellEqWithoutIteration(const double dt, DeferredLogger& deferred_logger)
     {
+        // We make sure that all processes throw in case there is an exception
+        // on one of them (WetGasPvt::saturationPressure might throw if not converged)
+        OPM_BEGIN_PARALLEL_TRY_CATCH();
+
         for (auto& well: well_container_) {
             well->assembleWellEqWithoutIteration(ebosSimulator_, dt, this->wellState(), this->groupState(),
                                                  deferred_logger);
         }
+        OPM_END_PARALLEL_TRY_CATCH_LOG(deferred_logger, "BlackoilWellModel::assembleWellEqWithoutIteration failed: ",
+                                       terminal_output_, grid().comm());
+
     }
 
 
@@ -1751,56 +1727,38 @@ namespace Opm {
     ConvergenceReport
     BlackoilWellModel<TypeTag>::
     getDomainWellConvergence(const Domain& domain,
-                             const std::vector<Scalar>& B_avg) const
+                             const std::vector<Scalar>& B_avg,
+                             DeferredLogger& local_deferredLogger) const
     {
         const auto& summary_state = ebosSimulator_.vanguard().summaryState();
         const int iterationIdx = ebosSimulator_.model().newtonMethod().numIterations();
         const bool relax_tolerance = iterationIdx > param_.strict_outer_iter_wells_;
 
-        Opm::DeferredLogger local_deferredLogger;
-        ConvergenceReport local_report;
+        ConvergenceReport report;
         for (const auto& well : well_container_) {
             if ((well_domain_.at(well->name()) == domain.index)) {
                 if (well->isOperableAndSolvable() || well->wellIsStopped()) {
-                    local_report += well->getWellConvergence(summary_state,
-                                                             this->wellState(),
-                                                             B_avg,
-                                                             local_deferredLogger,
-                                                             relax_tolerance);
+                    report += well->getWellConvergence(summary_state,
+                                                       this->wellState(),
+                                                       B_avg,
+                                                       local_deferredLogger,
+                                                       relax_tolerance);
                 } else {
-                    ConvergenceReport report;
+                    ConvergenceReport xreport;
                     using CR = ConvergenceReport;
-                    report.setWellFailed({CR::WellFailure::Type::Unsolvable, CR::Severity::Normal, -1, well->name()});
-                    local_report += report;
+                    xreport.setWellFailed({CR::WellFailure::Type::Unsolvable, CR::Severity::Normal, -1, well->name()});
+                    report += xreport;
                 }
             }
         }
 
-        // This function will be called once for each domain on a process,
-        // and the number of domains on a process will vary, so there is
-        // no way to communicate here. There is also no need, as a domain
-        // is local to a single process in our current approach.
-        // Therefore there is no call to gatherDeferredLogger() or to
-        // gatherConvergenceReport() below. However, as of now, log messages
-        // on non-output ranks will be lost here.
-        // TODO: create the DeferredLogger outside this scope to enable it
-        // to be gathered and printed on the output rank.
-        Opm::DeferredLogger global_deferredLogger = local_deferredLogger;
-        ConvergenceReport report = local_report;
-        if (terminal_output_) {
-            global_deferredLogger.logMessages();
-        }
-
         // Log debug messages for NaN or too large residuals.
-        // TODO: This will as of now only be logged on the output rank.
-        // In the similar code in getWellConvergence(), all ranks will be
-        // at the same spot, that does not hold for this per-domain function.
         if (terminal_output_) {
             for (const auto& f : report.wellFailures()) {
                 if (f.severity() == ConvergenceReport::Severity::NotANumber) {
-                    OpmLog::debug("NaN residual found with phase " + std::to_string(f.phase()) + " for well " + f.wellName());
+                    local_deferredLogger.debug("NaN residual found with phase " + std::to_string(f.phase()) + " for well " + f.wellName());
                 } else if (f.severity() == ConvergenceReport::Severity::TooLarge) {
-                    OpmLog::debug("Too large residual found with phase " + std::to_string(f.phase()) + " for well " + f.wellName());
+                    local_deferredLogger.debug("Too large residual found with phase " + std::to_string(f.phase()) + " for well " + f.wellName());
                 }
             }
         }
@@ -2144,10 +2102,16 @@ namespace Opm {
                          DeferredLogger& deferred_logger)
     {
         updateAndCommunicateGroupData(reportStepIdx, iterationIdx);
+
+        // updateWellStateWithTarget might throw for multisegment wells hence we
+        // have a parallel try catch here to thrown on all processes.
+        OPM_BEGIN_PARALLEL_TRY_CATCH()
         // if a well or group change control it affects all wells that are under the same group
         for (const auto& well : well_container_) {
             well->updateWellStateWithTarget(ebosSimulator_, this->groupState(), this->wellState(), deferred_logger);
         }
+        OPM_END_PARALLEL_TRY_CATCH("BlackoilWellModel::updateAndCommunicate failed: ",
+                                   ebosSimulator_.gridView().comm())
         updateAndCommunicateGroupData(reportStepIdx, iterationIdx);
     }
 
@@ -2221,12 +2185,18 @@ namespace Opm {
     {
         const int np = numPhases();
         std::vector<double> potentials;
-        const auto& well= well_container_[widx];
+        const auto& well = well_container_[widx];
+        std::string cur_exc_msg;
+        auto cur_exc_type = ExceptionType::NONE;
         try {
             well->computeWellPotentials(ebosSimulator_, well_state_copy, potentials, deferred_logger);
         }
         // catch all possible exception and store type and message.
-        OPM_PARALLEL_CATCH_CLAUSE(exc_type, exc_msg);
+        OPM_PARALLEL_CATCH_CLAUSE(cur_exc_type, cur_exc_msg);
+        if (cur_exc_type != ExceptionType::NONE) {
+            exc_msg += fmt::format("\nFor well {}: {}", well->name(), cur_exc_msg);
+        }
+        exc_type = std::max(exc_type, cur_exc_type);
         // Store it in the well state
         // potentials is resized and set to zero in the beginning of well->ComputeWellPotentials
         // and updated only if sucessfull. i.e. the potentials are zero for exceptions
@@ -2664,13 +2634,20 @@ namespace Opm {
                                    ebosSimulator_.gridView().comm());
 
         // Write well/domain info to the DBG file.
-        if (ebosSimulator_.gridView().comm().rank() == 0) {
+        const Opm::Parallel::Communication& comm = grid().comm();
+        const int rank = comm.rank();
+        DeferredLogger local_log;
+        if (!well_domain_.empty()) {
             std::ostringstream os;
-            os << "Well name      Domain\n";
+            os << "Well name      Rank      Domain\n";
             for (const auto& [wname, domain] : well_domain_) {
-                os << wname << std::setw(21 - wname.size()) << domain << '\n';
+                os << wname << std::setw(19 - wname.size()) << rank << std::setw(12) << domain << '\n';
             }
-            OpmLog::debug(os.str());
+            local_log.debug(os.str());
+        }
+        auto global_log = gatherDeferredLogger(local_log, comm);
+        if (terminal_output_) {
+            global_log.logMessages();
         }
     }
 

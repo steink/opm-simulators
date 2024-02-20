@@ -206,7 +206,8 @@ namespace Opm
                                                  this->param_.relaxed_tolerance_flow_well_,
                                                  this->param_.tolerance_pressure_ms_wells_,
                                                  this->param_.relaxed_tolerance_pressure_ms_well_,
-                                                 relax_tolerance);
+                                                 relax_tolerance, 
+                                                 this->wellIsStopped());
 
     }
 
@@ -286,13 +287,23 @@ namespace Opm
         }
 
         debug_cost_counter_ = 0;
-        // does the well have a THP related constraint?
-        const auto& summaryState = ebosSimulator.vanguard().summaryState();
-        if (!Base::wellHasTHPConstraints(summaryState) || bhp_controlled_well) {
-            computeWellRatesAtBhpLimit(ebosSimulator, well_potentials, deferred_logger);
-        } else {
-            well_potentials = computeWellPotentialWithTHP(
-                well_state, ebosSimulator, deferred_logger);
+        bool converged_implicit = false;
+        if (this->param_.local_well_solver_control_switching_) {
+            converged_implicit = computeWellPotentialsImplicit(ebosSimulator, well_potentials, deferred_logger);
+            if (!converged_implicit) {
+                deferred_logger.debug("Implicit potential calculations failed for well "
+                                       + this->name() + ",  reverting to original aproach.");
+            }
+        }
+        if (!converged_implicit) {
+            // does the well have a THP related constraint?
+            const auto& summaryState = ebosSimulator.vanguard().summaryState();
+            if (!Base::wellHasTHPConstraints(summaryState) || bhp_controlled_well) {
+                computeWellRatesAtBhpLimit(ebosSimulator, well_potentials, deferred_logger);
+            } else {
+                well_potentials = computeWellPotentialWithTHP(
+                    well_state, ebosSimulator, deferred_logger);
+            }
         }
         deferred_logger.debug("Cost in iterations of finding well potential for well "
                               + this->name() + ": " + std::to_string(debug_cost_counter_));
@@ -488,7 +499,74 @@ namespace Opm
         return potentials;
     }
 
+    template<typename TypeTag>
+    bool
+    MultisegmentWell<TypeTag>::
+    computeWellPotentialsImplicit(const Simulator& ebos_simulator,
+                                  std::vector<double>& well_potentials,
+                                  DeferredLogger& deferred_logger) const
+    {
+        // Create a copy of the well.
+        // TODO: check if we can avoid taking multiple copies. Call from updateWellPotentials 
+        // is allready a copy, but not from other calls. 
+        MultisegmentWell<TypeTag> well_copy(*this);
+        well_copy.debug_cost_counter_ = 0;
 
+        // store a copy of the well state, we don't want to update the real well state
+        WellState well_state_copy = ebos_simulator.problem().wellModel().wellState();
+        const auto& group_state = ebos_simulator.problem().wellModel().groupState();
+        auto& ws = well_state_copy.well(this->index_of_well_);
+        
+        // get current controls        
+        const auto& summary_state = ebos_simulator.vanguard().summaryState();
+        auto inj_controls = well_copy.well_ecl_.isInjector()
+            ? well_copy.well_ecl_.injectionControls(summary_state)
+            : Well::InjectionControls(0);
+        auto prod_controls = well_copy.well_ecl_.isProducer()
+            ? well_copy.well_ecl_.productionControls(summary_state)
+            : Well::ProductionControls(0);
+        
+        // prepare/modify well state and control
+        well_copy.prepareForPotentialCalculations(summary_state, well_state_copy, inj_controls, prod_controls);
+        
+        well_copy.scaleSegmentPressuresWithBhp(well_state_copy);
+
+        // initialize rates from previous potentials
+        const int np = this->number_of_phases_;
+        bool trivial = true;
+        for (int phase = 0; phase < np; ++phase){
+            trivial = trivial && (ws.well_potentials[phase] == 0.0) ;
+        }
+        if (!trivial) {
+            const double sign = well_copy.well_ecl_.isInjector() ? 1.0 : -1.0;
+            for (int phase = 0; phase < np; ++phase) {
+                ws.surface_rates[phase] = sign * ws.well_potentials[phase];
+            }
+        }
+        well_copy.scaleSegmentRatesWithWellRates(this->segments_.inlets(),
+                                                 this->segments_.perforations(),
+                                                 well_state_copy);
+
+        well_copy.calculateExplicitQuantities(ebos_simulator, well_state_copy, deferred_logger);
+        const double dt = ebos_simulator.timeStepSize();
+        // solve equations
+        bool converged = false;
+        if (this->well_ecl_.isProducer() && this->wellHasTHPConstraints(summary_state)) {
+            converged = well_copy.solveWellWithTHPConstraint(ebos_simulator, dt, inj_controls, prod_controls, well_state_copy, group_state, deferred_logger);
+        } else {
+            converged = well_copy.iterateWellEqWithSwitching(ebos_simulator, dt, inj_controls, prod_controls, well_state_copy, group_state, deferred_logger);
+        }
+
+        // fetch potentials (sign is updated on the outside).
+        well_potentials.clear();
+        well_potentials.resize(np, 0.0);
+        for (int compIdx = 0; compIdx < this->num_components_; ++compIdx) {
+            const EvalWell rate = well_copy.primary_variables_.getQs(compIdx);
+            well_potentials[this->ebosCompIdxToFlowCompIdx(compIdx)] = rate.value();
+        }
+        debug_cost_counter_ += well_copy.debug_cost_counter_;
+        return converged;
+    }
 
     template <typename TypeTag>
     void
@@ -501,9 +579,19 @@ namespace Opm
 
         // We assemble the well equations, then we check the convergence,
         // which is why we do not put the assembleWellEq here.
-        const BVectorWell dx_well = this->linSys_.solve();
+        try{
+            const BVectorWell dx_well = this->linSys_.solve();
 
-        updateWellState(summary_state, dx_well, well_state, deferred_logger);
+            updateWellState(summary_state, dx_well, well_state, deferred_logger);
+        }
+        catch(const NumericalProblem& exp) {
+            // Add information about the well and log to deferred logger
+            // (Logging done inside of solve() method will only be seen if
+            // this is the process with rank zero)
+            deferred_logger.problem("In MultisegmentWell::solveEqAndUpdateWellState for well "
+                                    + this->name() +": "+exp.what());
+            throw;
+        }
     }
 
 
@@ -1101,7 +1189,7 @@ namespace Opm
                 const double thp = WellBhpThpCalculator(*this).calculateThpFromBhp(well_rates_bhp_limit,
                                                                                    bhp_limit,
                                                                                    this->getRefDensity(),
-                                                                                   this->wellEcl().alq_value(),
+                                                                                   this->wellEcl().alq_value(summaryState),
                                                                                    thp_limit,
                                                                                    deferred_logger);
                 if ( (this->isProducer() && thp < thp_limit) || (this->isInjector() && thp > thp_limit) ) {
@@ -1220,6 +1308,73 @@ namespace Opm
     template<typename TypeTag>
     void
     MultisegmentWell<TypeTag>::
+    updateIPRImplicit(const Simulator& ebos_simulator, WellState& well_state, DeferredLogger& deferred_logger)
+    {
+        // Compute IPR based on *converged* well-equation:
+        // For a component rate r the derivative dr/dbhp is obtained by 
+        // dr/dbhp = - (partial r/partial x) * inv(partial Eq/partial x) * (partial Eq/partial bhp_target)
+        // where Eq(x)=0 is the well equation setup with bhp control and primary variables x 
+
+        // We shouldn't have zero rates at this stage, but check
+        bool zero_rates;
+        auto rates = well_state.well(this->index_of_well_).surface_rates;
+        zero_rates = true;
+        for (std::size_t p = 0; p < rates.size(); ++p) {
+            zero_rates &= rates[p] == 0.0;
+        }
+        auto& ws = well_state.well(this->index_of_well_);
+        if (zero_rates) {
+            const auto msg = fmt::format("updateIPRImplicit: Well {} has zero rate, IPRs might be problematic", this->name());
+            deferred_logger.debug(msg);
+            /*
+            // could revert to standard approach here:    
+            updateIPR(ebos_simulator, deferred_logger);
+            for (int comp_idx = 0; comp_idx < this->num_components_; ++comp_idx){
+                const int idx = this->ebosCompIdxToFlowCompIdx(comp_idx);
+                ws.implicit_ipr_a[idx] = this->ipr_a_[comp_idx];
+                ws.implicit_ipr_b[idx] = this->ipr_b_[comp_idx];
+            }
+            return;
+            */
+        }
+        const auto& group_state  = ebos_simulator.problem().wellModel().groupState();
+
+        std::fill(ws.implicit_ipr_a.begin(), ws.implicit_ipr_a.end(), 0.);
+        std::fill(ws.implicit_ipr_b.begin(), ws.implicit_ipr_b.end(), 0.);
+        //WellState well_state_copy = well_state;    
+        auto inj_controls = Well::InjectionControls(0);
+        auto prod_controls = Well::ProductionControls(0);
+        prod_controls.addControl(Well::ProducerCMode::BHP);
+        prod_controls.bhp_limit = well_state.well(this->index_of_well_).bhp;
+
+        //  Set current control to bhp, and bhp value in state, modify bhp limit in control object.
+        const auto cmode = ws.production_cmode;
+        ws.production_cmode = Well::ProducerCMode::BHP;
+        const double dt = ebos_simulator.timeStepSize();
+        assembleWellEqWithoutIteration(ebos_simulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
+
+        BVectorWell rhs(this->numberOfSegments());
+        rhs = 0.0;
+        rhs[0][SPres] = -1.0;
+
+        const BVectorWell x_well = this->linSys_.solve(rhs);
+        constexpr int num_eq = MSWEval::numWellEq;
+        for (int comp_idx = 0; comp_idx < this->num_components_; ++comp_idx){
+            const EvalWell comp_rate = this->primary_variables_.getQs(comp_idx);
+            const int idx = this->ebosCompIdxToFlowCompIdx(comp_idx);
+            for (size_t pvIdx = 0; pvIdx < num_eq; ++pvIdx) {
+                // well primary variable derivatives in EvalWell start at position Indices::numEq 
+                ws.implicit_ipr_b[idx] -= x_well[0][pvIdx]*comp_rate.derivative(pvIdx+Indices::numEq);
+            }
+            ws.implicit_ipr_a[idx] = ws.implicit_ipr_b[idx]*ws.bhp - comp_rate.value();
+        }
+        // reset cmode
+        ws.production_cmode = cmode;
+    }    
+
+    template<typename TypeTag>
+    void
+    MultisegmentWell<TypeTag>::
     checkOperabilityUnderTHPLimit(
              const Simulator& ebos_simulator,
              const WellState& well_state,
@@ -1306,7 +1461,18 @@ namespace Opm
 
             assembleWellEqWithoutIteration(ebosSimulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
 
-            const BVectorWell dx_well = this->linSys_.solve();
+            BVectorWell dx_well;
+            try{
+                dx_well = this->linSys_.solve();
+            }
+            catch(const NumericalProblem& exp) {
+                // Add information about the well and log to deferred logger
+                // (Logging done inside of solve() method will only be seen if
+                // this is the process with rank zero)
+                deferred_logger.problem("In MultisegmentWell::iterateWellEqWithControl for well "
+                                        + this->name() +": "+exp.what());
+                throw;
+            }
 
             // --------------------------------------------------------
             if(it > max_iter_number-10){
@@ -1429,10 +1595,10 @@ namespace Opm
                              const Well::ProductionControls& prod_controls,
                              WellState& well_state,
                              const GroupState& group_state,
-                             DeferredLogger& deferred_logger)
+                             DeferredLogger& deferred_logger, 
+                             const bool fixed_control /*false*/, 
+                             const bool fixed_status /*false*/)
     {
-        //if (!this->isOperableAndSolvable() && !this->wellIsStopped()) return true;
-
         const int max_iter_number = this->param_.max_inner_iter_ms_wells_;
 
         {
@@ -1452,25 +1618,41 @@ namespace Opm
         [[maybe_unused]] int stagnate_count = 0;
         bool relax_convergence = false;
         this->regularize_ = false;
+        const auto& summary_state = ebosSimulator.vanguard().summaryState();
 
-        // Max status switch frequency should be 2 to avoid getting stuck in cycle
-        const int min_its_after_switch = 2;
+        // Always take a few (more than one) iterations after a switch before allowing a new switch
+        // The optimal number here is subject to further investigation, but it has been observerved 
+        // that unless this number is >1, we may get stuck in a cycle 
+        const int min_its_after_switch = 3;
         int its_since_last_switch = min_its_after_switch;
         int switch_count= 0;
-        const auto well_status = this->wellStatus_;
-        const auto& summary_state = ebosSimulator.vanguard().summaryState();
-        const bool allow_switching = !this->wellUnderZeroRateTarget(summary_state, well_state) && (this->well_ecl_.getStatus() == WellStatus::OPEN);
+        // if we fail to solve eqs, we reset status/operability before leaving
+        const auto well_status_orig = this->wellStatus_;
+        const auto operability_orig = this->operability_status_;
+        auto well_status_cur = well_status_orig;
+        // don't allow opening wells that are stopped from schedule or has a stopped well state
+        const bool allow_open =  this->well_ecl_.getStatus() == WellStatus::OPEN &&
+                                 well_state.well(this->index_of_well_).status == WellStatus::OPEN;
+        // don't allow switcing for wells under zero rate target or requested fixed status and control
+        const bool allow_switching = !this->wellUnderZeroRateTarget(summary_state, well_state) &&
+                                     (!fixed_control || !fixed_status) && allow_open;
         bool changed = false;
         bool final_check = false;
+        // well needs to be set operable or else solving/updating of re-opened wells is skipped
+        this->operability_status_.resetOperability();
+        this->operability_status_.solvable = true;
 
         for (; it < max_iter_number; ++it, ++debug_cost_counter_) {
             its_since_last_switch++;
-            if (its_since_last_switch >= min_its_after_switch){
+            if (allow_switching && its_since_last_switch >= min_its_after_switch){
                 const double wqTotal = this->primary_variables_.getWQTotal().value();
-                changed = this->updateWellControlAndStatusLocalIteration (ebosSimulator, well_state, group_state, inj_controls, prod_controls, wqTotal, deferred_logger);
+                changed = this->updateWellControlAndStatusLocalIteration(ebosSimulator, well_state, group_state, inj_controls, prod_controls, wqTotal, deferred_logger, fixed_control, fixed_status);
                 if (changed){
                     its_since_last_switch = 0;
                     switch_count++;
+                    if (well_status_cur != this->wellStatus_) {
+                        well_status_cur = this->wellStatus_;
+                    }
                 }
                 if (!changed && final_check) {
                     break;
@@ -1574,9 +1756,6 @@ namespace Opm
                 } else {
                     this->operability_status_.operable_under_only_bhp_limit = !is_stopped;
                 }
-                // We reset the well status to it's original state. Status is updated
-                // on the outside based on operability status
-                this->wellStatus_ = well_status;
             }
             std::string message = fmt::format("   Well {} converged in {} inner iterations ("
                                                     "{} control/status switches).", this->name(), it, switch_count);
@@ -1586,7 +1765,9 @@ namespace Opm
             }
             deferred_logger.debug(message);
         } else {
-            const std::string message = fmt::format("   Well {} did not converged in {} inner iterations ("
+            this->wellStatus_ = well_status_orig;
+            this->operability_status_ = operability_orig;            
+            const std::string message = fmt::format("   Well {} did not converge in {} inner iterations ("
                                                     "{} control/status switches).", this->name(), it, switch_count);
             deferred_logger.debug(message);
         }
@@ -1738,7 +1919,8 @@ namespace Opm
                                         deferred_logger);
             } else {
                 const UnitSystem& unit_system = ebosSimulator.vanguard().eclState().getDeckUnitSystem();
-                this->assemblePressureEq(seg, unit_system, well_state, this->param_.use_average_density_ms_wells_, deferred_logger);
+                const auto& summary_state = ebosSimulator.vanguard().summaryState();
+                this->assemblePressureEq(seg, unit_system, well_state, summary_state, this->param_.use_average_density_ms_wells_, deferred_logger);
             }
         }
 

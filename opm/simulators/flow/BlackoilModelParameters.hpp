@@ -17,8 +17,8 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef OPM_BLACKOILMODELPARAMETERS_EBOS_HEADER_INCLUDED
-#define OPM_BLACKOILMODELPARAMETERS_EBOS_HEADER_INCLUDED
+#ifndef OPM_BLACKOILMODELPARAMETERS_HEADER_INCLUDED
+#define OPM_BLACKOILMODELPARAMETERS_HEADER_INCLUDED
 
 #include <opm/models/discretization/common/fvbaseproperties.hh>
 
@@ -180,6 +180,10 @@ struct UseAverageDensityMsWells {
 };
 template<class TypeTag, class MyTypeTag>
 struct LocalWellSolveControlSwitching {
+    using type = UndefinedProperty;
+};
+template<class TypeTag, class MyTypeTag>
+struct UseImplicitIpr {
     using type = UndefinedProperty;
 };
 // Network solver parameters
@@ -386,6 +390,10 @@ template<class TypeTag>
 struct LocalWellSolveControlSwitching<TypeTag, TTag::FlowModelParameters> {
     static constexpr bool value = false;
 };
+template<class TypeTag>
+struct UseImplicitIpr<TypeTag, TTag::FlowModelParameters> {
+    static constexpr bool value = false;
+};
 
 // Network solver parameters
 template<class TypeTag>
@@ -455,7 +463,7 @@ namespace Opm
 {
     /// Solver parameters for the BlackoilModel.
     template <class TypeTag>
-    struct BlackoilModelParametersEbos
+    struct BlackoilModelParameters
     {
     private:
         using Scalar = GetPropType<TypeTag, Properties::Scalar>;
@@ -559,6 +567,9 @@ namespace Opm
         /// Whether to allow control switching during local well solutions 
         bool local_well_solver_control_switching_;
 
+        /// Whether to use implicit IPR for thp stability checks and solution search
+        bool use_implicit_ipr_;
+
         /// Maximum number of iterations in the network solver before relaxing tolerance
         int network_max_strict_iterations_;
         
@@ -584,7 +595,7 @@ namespace Opm
         bool write_partitions_{false};
 
         /// Construct from user parameters or defaults.
-        BlackoilModelParametersEbos()
+        BlackoilModelParameters()
         {
             dbhp_max_rel_=  EWOMS_GET_PARAM(TypeTag, Scalar, DbhpMaxRel);
             dwell_fraction_max_ = EWOMS_GET_PARAM(TypeTag, Scalar, DwellFractionMax);
@@ -619,6 +630,7 @@ namespace Opm
             max_number_of_well_switches_ = EWOMS_GET_PARAM(TypeTag, int, MaximumNumberOfWellSwitches);
             use_average_density_ms_wells_ = EWOMS_GET_PARAM(TypeTag, bool, UseAverageDensityMsWells);
             local_well_solver_control_switching_ = EWOMS_GET_PARAM(TypeTag, bool, LocalWellSolveControlSwitching);
+            use_implicit_ipr_ = EWOMS_GET_PARAM(TypeTag, bool, UseImplicitIpr);
             nonlinear_solver_ = EWOMS_GET_PARAM(TypeTag, std::string, NonlinearSolver);
             const auto approach = EWOMS_GET_PARAM(TypeTag, std::string, LocalSolveApproach);
             if (approach == "jacobi") {
@@ -680,6 +692,7 @@ namespace Opm
             EWOMS_REGISTER_PARAM(TypeTag, int, MaximumNumberOfWellSwitches, "Maximum number of times a well can switch to the same control");
             EWOMS_REGISTER_PARAM(TypeTag, bool, UseAverageDensityMsWells, "Approximate segment densitities by averaging over segment and its outlet");
             EWOMS_REGISTER_PARAM(TypeTag, bool, LocalWellSolveControlSwitching, "Allow control switching during local well solutions");
+            EWOMS_REGISTER_PARAM(TypeTag, bool, UseImplicitIpr, "Compute implict IPR for stability checks and stable solution search");            
             EWOMS_REGISTER_PARAM(TypeTag, int, NetworkMaxStrictIterations, "Maximum iterations in network solver before relaxing tolerance");
             EWOMS_REGISTER_PARAM(TypeTag, int, NetworkMaxIterations, "Maximum number of iterations in the network solver before giving up");
             EWOMS_REGISTER_PARAM(TypeTag, std::string, NonlinearSolver, "Choose nonlinear solver. Valid choices are newton or nldd.");
@@ -702,4 +715,4 @@ namespace Opm
     };
 } // namespace Opm
 
-#endif // OPM_BLACKOILMODELPARAMETERS_EBOS_HEADER_INCLUDED
+#endif // OPM_BLACKOILMODELPARAMETERS_HEADER_INCLUDED

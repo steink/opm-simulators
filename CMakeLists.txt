@@ -349,6 +349,11 @@ if (HAVE_OPM_TESTS)
     include (${CMAKE_CURRENT_SOURCE_DIR}/compareECLFiles.cmake)
 endif()
 
+target_sources(test_outputdir PRIVATE $<TARGET_OBJECTS:moduleVersion>)
+target_sources(test_equil PRIVATE $<TARGET_OBJECTS:moduleVersion>)
+target_sources(test_RestartSerialization PRIVATE $<TARGET_OBJECTS:moduleVersion>)
+target_sources(test_glift1 PRIVATE $<TARGET_OBJECTS:moduleVersion>)
+
 opm_set_test_driver(${CMAKE_CURRENT_SOURCE_DIR}/tests/run-parallel-unitTest.sh "")
 
 opm_add_test(test_gatherconvergencereport
@@ -513,6 +518,19 @@ opm_add_test(test_HDF5Serializer_Parallel
     4
 )
 
+opm_add_test(test_rstconv_parallel
+  EXE_NAME
+    test_rstconv
+  CONDITION
+    MPI_FOUND AND Boost_UNIT_TEST_FRAMEWORK_FOUND
+  DRIVER_ARGS
+    -n 4
+    -b ${PROJECT_BINARY_DIR}
+  NO_COMPILE
+  PROCESSORS
+    4
+)
+
 include(OpmBashCompletion)
 
 if (NOT BUILD_FLOW)
@@ -562,7 +580,7 @@ foreach(OBJ ${COMMON_MODELS} ${FLOW_MODELS} ${FLOW_VARIANT_MODELS})
   opm_add_test(flow_${OBJ}
                ONLY_COMPILE
                SOURCES
-               flow/flow_${OBJ}.cpp
+               flow/flow_${OBJ}_main.cpp
                $<TARGET_OBJECTS:moduleVersion>
                $<TARGET_OBJECTS:flow_lib${OBJ}>
                EXE_NAME flow_${OBJ}

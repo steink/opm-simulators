@@ -31,7 +31,8 @@ struct SimulatorReport;
 struct SimulatorReportSingle;
 
 // Print an ASCII-art header to the PRT and DEBUG files.
-void printPRTHeader(const std::string& parameters,
+void printPRTHeader(const int nprocs, const int nthreads,
+                    const std::string& parameters,
                     std::string_view moduleVersion,
                     std::string_view compileTimestamp);
 
@@ -39,10 +40,13 @@ void printPRTHeader(const std::string& parameters,
 void printFlowBanner(int nprocs, int threads, std::string_view moduleVersionName);
 
 // Print flow application trailer.
-void printFlowTrailer(int nprocs, int nthreads,
+void printFlowTrailer(int nprocs,
+                      int nthreads,
+                      const double total_setup_time,
+                      const double deck_read_time,
                       const SimulatorReport& report,
                       const SimulatorReportSingle& localsolves_report);
 
 } // namespace Opm
 
-#endif // OPM_FLOW_BANNERS_EBOS_HEADER_INCLUDED
+#endif // OPM_FLOW_BANNERS_HEADER_INCLUDED

@@ -25,10 +25,11 @@
 #include <opm/output/eclipse/Inplace.hpp>
 
 #include <cstddef>
-#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <boost/date_time.hpp>
+
 
 namespace Opm {
 
@@ -42,11 +43,11 @@ class LogOutputHelper {
 public:
     LogOutputHelper(const EclipseState& eclState,
                     const Schedule& schedule,
-                    const SummaryState& st);
+                    const SummaryState& st,
+                    const std::string& moduleVersionName);
 
     //! \brief Write cumulative production and injection reports to output.
-    void cumulative(const std::size_t reportStepNum,
-                    std::function<bool(const std::string&)> isDefunct) const;
+    void cumulative(const std::size_t reportStepNum) const;
 
     //! \brief Write error report to output.
     void error(const std::vector<int>& failedCellsPbub,
@@ -58,19 +59,21 @@ public:
              const std::string& name) const;
 
     //! \brief Write fluid-in-place reservoir reports to output.
-    void fipResv(const Inplace& inplace) const;
+    void fipResv(const Inplace& inplace, const std::string& name) const;
 
     //! \brief Write injection report to output.
-    void injection(const std::size_t reportStepNum,
-                   std::function<bool(const std::string&)> isDefunct) const;
+    void injection(const std::size_t reportStepNum) const;
 
     //! \brief Write production report to output.
-    void production(const std::size_t reportStepNum,
-                    std::function<bool(const std::string&)> isDefunct) const;
+    void production(const std::size_t reportStepNum) const;
+
+    void timeStamp(const std::string& lbl, double elapsed, int rstep, boost::posix_time::ptime currentDate) const;
 
 private:
-    void outputCumulativeReport_(const std::vector<Scalar>& wellCum,
-                                 const std::vector<std::string>& wellCumNames) const;
+    void beginCumulativeReport_() const;
+    void endCumulativeReport_() const;
+    void outputCumulativeReportRecord_(const std::vector<Scalar>& wellCum,
+                                       const std::vector<std::string>& wellCumNames) const;
 
     void outputRegionFluidInPlace_(std::unordered_map<Inplace::Phase, Scalar> oip,
                                    std::unordered_map<Inplace::Phase, Scalar> cip,
@@ -81,11 +84,15 @@ private:
     void outputResvFluidInPlace_(std::unordered_map<Inplace::Phase, Scalar> cipr,
                                  const int reg) const;
 
-    void outputInjectionReport_(const std::vector<Scalar>& wellInj,
-                                const std::vector<std::string>& wellInjNames) const;
+    void beginInjectionReport_() const;
+    void endInjectionReport_() const;
+    void outputInjectionReportRecord_(const std::vector<Scalar>& wellInj,
+                                      const std::vector<std::string>& wellInjNames) const;
 
-    void outputProductionReport_(const std::vector<Scalar>& wellProd,
-                                 const std::vector<std::string>& wellProdNames) const;
+    void beginProductionReport_() const;
+    void endProductionReport_() const;
+    void outputProductionReportRecord_(const std::vector<Scalar>& wellProd,
+                                       const std::vector<std::string>& wellProdNames) const;
 
     void fipUnitConvert_(std::unordered_map<Inplace::Phase, Scalar>& fip) const;
     void pressureUnitConvert_(Scalar& pav) const;
@@ -161,6 +168,7 @@ private:
     const EclipseState& eclState_;
     const Schedule& schedule_;
     const SummaryState& summaryState_;
+    std::string flowVersionName_;
 };
 
 } // namespace Opm

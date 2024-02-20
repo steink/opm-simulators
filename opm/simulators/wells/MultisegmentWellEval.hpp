@@ -41,6 +41,8 @@ class ConvergenceReport;
 class GroupState;
 class Schedule;
 class WellContributions;
+class SummaryState;
+
 template<class FluidSystem, class Indices, class Scalar> class WellInterfaceIndices;
 class WellState;
 
@@ -83,6 +85,7 @@ protected:
     void assembleICDPressureEq(const int seg,
                                const UnitSystem& unit_system,
                                WellState& well_state,
+                               const SummaryState& summary_state,
                                const bool use_average_density,
                                DeferredLogger& deferred_logger);
 
@@ -94,6 +97,7 @@ protected:
     void assemblePressureEq(const int seg,
                             const UnitSystem& unit_system,
                             WellState& well_state,
+                            const SummaryState& summary_state,
                             const bool use_average_density,
                             DeferredLogger& deferred_logger);
 
@@ -106,7 +110,8 @@ protected:
                                          const double relaxed_inner_tolerance_flow_ms_well,
                                          const double tolerance_pressure_ms_wells,
                                          const double relaxed_inner_tolerance_pressure_ms_well,
-                                         const bool relax_tolerance) const;
+                                         const bool relax_tolerance, 
+                                         const bool well_is_stopped) const;
 
     std::pair<bool, std::vector<Scalar> >
     getFiniteWellResiduals(const std::vector<Scalar>& B_avg,
@@ -123,8 +128,8 @@ protected:
                                    const double tolerance_pressure_ms_wells,
                                    DeferredLogger& deferred_logger) const;
 
-    void handleAccelerationPressureLoss(const int seg,
-                                        WellState& well_state);
+    void assembleAccelerationPressureLoss(const int seg,
+                                          WellState& well_state);
 
     EvalWell pressureDropAutoICD(const int seg,
                                  const UnitSystem& unit_system) const;

@@ -40,17 +40,19 @@ list (APPEND MAIN_SOURCE_FILES
   opm/core/props/phaseUsageFromDeck.cpp
   opm/core/props/satfunc/RelpermDiagnostics.cpp
   opm/simulators/timestepping/SimulatorReport.cpp
+  opm/simulators/flow/ActionHandler.cpp
   opm/simulators/flow/Banners.cpp
   opm/simulators/flow/ConvergenceOutputConfiguration.cpp
-  opm/simulators/flow/EclActionHandler.cpp
-  opm/simulators/flow/EclInterRegFlows.cpp
   opm/simulators/flow/ExtraConvergenceOutputThread.cpp
-  opm/simulators/flow/FlowMainEbos.cpp
+  opm/simulators/flow/FlowMain.cpp
+  opm/simulators/flow/InterRegFlows.cpp
   opm/simulators/flow/KeywordValidation.cpp
   opm/simulators/flow/LogOutputHelper.cpp
   opm/simulators/flow/Main.cpp
-  opm/simulators/flow/NonlinearSolverEbos.cpp
-  opm/simulators/flow/SimulatorFullyImplicitBlackoilEbos.cpp
+  opm/simulators/flow/NonlinearSolver.cpp
+  opm/simulators/flow/RSTConv.cpp
+  opm/simulators/flow/SimulatorReportBanners.cpp
+  opm/simulators/flow/SimulatorSerializer.cpp
   opm/simulators/flow/ValidationFunctions.cpp
   opm/simulators/flow/partitionCells.cpp
   opm/simulators/linalg/ExtractParallelGridInformationToISTL.cpp
@@ -60,7 +62,7 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/linalg/FlexibleSolver4.cpp
   opm/simulators/linalg/FlexibleSolver5.cpp
   opm/simulators/linalg/FlexibleSolver6.cpp
-  opm/simulators/linalg/ISTLSolverEbos.cpp
+  opm/simulators/linalg/ISTLSolver.cpp
   opm/simulators/linalg/MILU.cpp
   opm/simulators/linalg/ParallelIstlInformation.cpp
   opm/simulators/linalg/ParallelOverlappingILU0.cpp
@@ -73,7 +75,8 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/linalg/PropertyTree.cpp
   opm/simulators/linalg/setupPropertyTree.cpp
   opm/simulators/timestepping/AdaptiveSimulatorTimer.cpp
-  opm/simulators/timestepping/AdaptiveTimeSteppingEbos.cpp
+  opm/simulators/timestepping/AdaptiveTimeStepping.cpp
+  opm/simulators/timestepping/ConvergenceReport.cpp
   opm/simulators/timestepping/TimeStepControl.cpp
   opm/simulators/timestepping/SimulatorTimer.cpp
   opm/simulators/timestepping/SimulatorTimerInterface.cpp
@@ -146,10 +149,14 @@ list (APPEND MAIN_SOURCE_FILES
   )
 
 
-if (Damaris_FOUND AND MPI_FOUND)
-  list (APPEND MAIN_SOURCE_FILES opm/simulators/utils/DamarisOutputModule.cpp)
-  list (APPEND MAIN_SOURCE_FILES opm/simulators/utils/DamarisKeywords.cpp)
-  list (APPEND MAIN_SOURCE_FILES opm/simulators/utils/initDamarisXmlFile.cpp)
+if (Damaris_FOUND AND MPI_FOUND AND USE_DAMARIS_LIB)
+  list (APPEND MAIN_SOURCE_FILES opm/simulators/utils/DamarisOutputModule.cpp
+                                 opm/simulators/utils/DamarisKeywords.cpp
+                                 opm/simulators/utils/initDamarisXmlFile.cpp
+                                 ebos/damariswriter.cc
+                                 opm/simulators/utils/DamarisVar.cpp
+                                 opm/simulators/utils/GridDataOutput.cpp
+  )
 endif()
 if(CUDA_FOUND)
   # CUISTL SOURCE
@@ -159,6 +166,7 @@ if(CUDA_FOUND)
   list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/CuVector.cpp)
   list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/detail/vector_operations.cu)
   list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/CuSparseMatrix.cpp)
+  list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/CuDILU.cpp)
   list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/CuJac.cpp)
   list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/CuSeqILU0.cpp)
   list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/set_device.cpp)
@@ -171,6 +179,7 @@ if(CUDA_FOUND)
   list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/cuda_check_last_error.hpp)
   list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/CuBlasHandle.hpp)
   list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/CuSparseHandle.hpp)
+  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/CuDILU.hpp)
   list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/CuJac.hpp)
   list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/CuVector.hpp)
   list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/CuSparseMatrix.hpp)
@@ -200,7 +209,7 @@ if(USE_BDA_BRIDGE)
   list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/bda/BdaBridge.cpp
                                  opm/simulators/linalg/bda/WellContributions.cpp
                                  opm/simulators/linalg/bda/MultisegmentWellContribution.cpp
-                                 opm/simulators/linalg/ISTLSolverEbosBda.cpp)
+                                 opm/simulators/linalg/ISTLSolverBda.cpp)
   if(OPENCL_FOUND)
     list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/bda/BlockedMatrix.cpp)
     list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/bda/opencl/BILU0.cpp)
@@ -239,6 +248,8 @@ if(MPI_FOUND)
                                 opm/simulators/utils/ParallelNLDDPartitioningZoltan.cpp
                                 opm/simulators/utils/ParallelSerialization.cpp
                                 opm/simulators/utils/SetupZoltanParams.cpp)
+  list(APPEND PUBLIC_HEADER_FILES opm/simulators/utils/MPIPacker.hpp
+                                  opm/simulators/utils/MPISerializer.hpp)
 endif()
 if(HDF5_FOUND)
   list(APPEND MAIN_SOURCE_FILES opm/simulators/utils/HDF5File.cpp)
@@ -254,19 +265,20 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_convergencereport.cpp
   tests/test_deferredlogger.cpp
   tests/test_dilu.cpp
-  tests/test_eclinterregflows.cpp
   tests/test_equil.cc
   tests/test_extractMatrix.cpp
   tests/test_flexiblesolver.cpp
   tests/test_glift1.cpp
   tests/test_graphcoloring.cpp
   tests/test_GroupState.cpp
+  tests/test_interregflows.cpp
   tests/test_invert.cpp
   tests/test_keyword_validator.cpp
   tests/test_LogOutputHelper.cpp
   tests/test_milu.cpp
   tests/test_multmatrixtransposed.cpp
   tests/test_norne_pvt.cpp
+  tests/test_outputdir.cpp
   tests/test_parallel_wbp_sourcevalues.cpp
   tests/test_parallelwellinfo.cpp
   tests/test_partitionCells.cpp
@@ -274,6 +286,7 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_privarspacking.cpp
   tests/test_relpermdiagnostics.cpp
   tests/test_RestartSerialization.cpp
+  tests/test_rstconv.cpp
   tests/test_stoppedwells.cpp
   tests/test_timer.cpp
   tests/test_vfpproperties.cpp
@@ -281,6 +294,10 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_wellprodindexcalculator.cpp
   tests/test_wellstate.cpp
   )
+
+if (HAVE_ECL_INPUT)
+  list(APPEND TEST_SOURCE_FILES tests/test_nonnc.cpp)
+endif()
 
 if(MPI_FOUND)
   list(APPEND TEST_SOURCE_FILES tests/test_parallelistlinformation.cpp
@@ -412,7 +429,6 @@ list (APPEND PUBLIC_HEADER_FILES
   ebos/eclgenericwriter.hh
   ebos/eclgenericwriter_impl.hh
   ebos/eclmixingratecontrols.hh
-  ebos/eclmpiserializer.hh
   ebos/eclnewtonmethod.hh
   ebos/ecloutputblackoilmodule.hh
   ebos/eclpolyhedralgridvanguard.hh
@@ -426,22 +442,24 @@ list (APPEND PUBLIC_HEADER_FILES
   ebos/ecltransmissibility_impl.hh
   ebos/eclwriter.hh
   ebos/femcpgridcompat.hh
-  ebos/hdf5serializer.hh
   ebos/vtkecltracermodule.hh
+  opm/simulators/flow/ActionHandler.hpp
   opm/simulators/flow/countGlobalCells.hpp
   opm/simulators/flow/priVarsPacking.hpp
-  opm/simulators/flow/BlackoilModelEbos.hpp
-  opm/simulators/flow/BlackoilModelEbosNldd.hpp
-  opm/simulators/flow/BlackoilModelParametersEbos.hpp
+  opm/simulators/flow/BlackoilModel.hpp
+  opm/simulators/flow/BlackoilModelNldd.hpp
+  opm/simulators/flow/BlackoilModelParameters.hpp
   opm/simulators/flow/Banners.hpp
   opm/simulators/flow/ConvergenceOutputConfiguration.hpp
-  opm/simulators/flow/EclActionHandler.hpp
-  opm/simulators/flow/EclInterRegFlows.hpp
   opm/simulators/flow/ExtraConvergenceOutputThread.hpp
-  opm/simulators/flow/FlowMainEbos.hpp
+  opm/simulators/flow/FlowMain.hpp
+  opm/simulators/flow/InterRegFlows.hpp
   opm/simulators/flow/Main.hpp
-  opm/simulators/flow/NonlinearSolverEbos.hpp
-  opm/simulators/flow/SimulatorFullyImplicitBlackoilEbos.hpp
+  opm/simulators/flow/NonlinearSolver.hpp
+  opm/simulators/flow/RSTConv.hpp
+  opm/simulators/flow/SimulatorFullyImplicitBlackoil.hpp
+  opm/simulators/flow/SimulatorReportBanners.hpp
+  opm/simulators/flow/SimulatorSerializer.hpp
   opm/simulators/flow/KeywordValidation.hpp
   opm/simulators/flow/LogOutputHelper.hpp
   opm/simulators/flow/ValidationFunctions.hpp
@@ -495,8 +513,8 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/linalg/FlexibleSolver_impl.hpp
   opm/simulators/linalg/FlowLinearSolverParameters.hpp
   opm/simulators/linalg/GraphColoring.hpp
-  opm/simulators/linalg/ISTLSolverEbos.hpp
-  opm/simulators/linalg/ISTLSolverEbosBda.hpp
+  opm/simulators/linalg/ISTLSolver.hpp
+  opm/simulators/linalg/ISTLSolverBda.hpp
   opm/simulators/linalg/MatrixMarketSpecializations.hpp
   opm/simulators/linalg/OwningBlockPreconditioner.hpp
   opm/simulators/linalg/OwningTwoLevelPreconditioner.hpp
@@ -516,7 +534,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/linalg/getQuasiImpesWeights.hpp
   opm/simulators/linalg/setupPropertyTree.hpp
   opm/simulators/timestepping/AdaptiveSimulatorTimer.hpp
-  opm/simulators/timestepping/AdaptiveTimeSteppingEbos.hpp
+  opm/simulators/timestepping/AdaptiveTimeStepping.hpp
   opm/simulators/timestepping/ConvergenceReport.hpp
   opm/simulators/timestepping/TimeStepControl.hpp
   opm/simulators/timestepping/TimeStepControlInterface.hpp
@@ -606,14 +624,24 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/WGState.hpp
   )
 
-if (Damaris_FOUND AND MPI_FOUND)
-  list (APPEND PUBLIC_HEADER_FILES ebos/damariswriter.hh)
+if (Damaris_FOUND AND MPI_FOUND AND USE_DAMARIS_LIB)
+  list (APPEND PUBLIC_HEADER_FILES opm/simulators/utils/DamarisOutputModule.hpp
+                                   opm/simulators/utils/DamarisKeywords.hpp
+                                   ebos/damaris_properties.hh
+                                   ebos/damariswriter.hh
+                                   opm/simulators/utils/DamarisVar.hpp
+                                   opm/simulators/utils/GridDataOutput.hpp
+                                   opm/simulators/utils/GridDataOutput_impl.hpp
+  )
 endif()
 
 if(HDF5_FOUND)
   list(APPEND PUBLIC_HEADER_FILES
-    ebos/hdf5serializer.hh
+    opm/simulators/utils/HDF5Serializer.hpp
     opm/simulators/utils/HDF5File.hpp
+  )
+  list(APPEND MAIN_SOURCE_FILES
+    opm/simulators/utils/HDF5Serializer.cpp
   )
 endif()
 

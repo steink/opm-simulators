@@ -86,7 +86,8 @@ getWellConvergence(const WellState& well_state,
                    const double relaxed_inner_tolerance_flow_ms_well,
                    const double tolerance_pressure_ms_wells,
                    const double relaxed_inner_tolerance_pressure_ms_well,
-                   const bool relax_tolerance) const
+                   const bool relax_tolerance, 
+                   const bool well_is_stopped) const
 {
     assert(int(B_avg.size()) == baseif_.numComponents());
 
@@ -161,12 +162,13 @@ getWellConvergence(const WellState& well_state,
                                    tolerance_wells,
                                    max_residual_allowed},
                                   std::abs(linSys_.residual()[0][SPres]),
+                                  well_is_stopped,  
                                   report,
                                   deferred_logger);
 
     // for stopped well, we do not enforce the following checking to avoid dealing with sign of near-zero values
     // for BHP or THP controlled wells, we need to make sure the flow direction is correct
-    if (!baseif_.wellIsStopped() && baseif_.isPressureControlled(well_state)) {
+    if (!well_is_stopped && baseif_.isPressureControlled(well_state)) {
         // checking the flow direction
         const double sign = baseif_.isProducer() ? -1. : 1.;
         const auto weight_total_flux = this->primary_variables_.getWQTotal() * sign;
@@ -196,19 +198,50 @@ extendEval(const Eval& in) const
 template<typename FluidSystem, typename Indices, typename Scalar>
 void
 MultisegmentWellEval<FluidSystem,Indices,Scalar>::
-handleAccelerationPressureLoss(const int seg,
-                               WellState& well_state)
+assembleAccelerationPressureLoss(const int seg,
+                                 WellState& well_state)
 {
-    const EvalWell accelerationPressureLoss = segments_.accelerationPressureLoss(seg);
-
+    // Computes and assembles p-drop due to acceleration
+    assert(seg != 0); // top segment can not enter here
     auto& segments = well_state.well(baseif_.indexOfWell()).segments;
-    segments.pressure_drop_accel[seg] = accelerationPressureLoss.value();
+    const auto& segment_set = this->segmentSet();
 
+    // Add segment head
+    const double seg_area = segment_set[seg].crossArea();
+    const EvalWell signed_velocity_head = segments_.accelerationPressureLossContribution(seg, seg_area);
+    segments.pressure_drop_accel[seg] = signed_velocity_head.value();
+    
+    const int seg_upwind = segments_.upwinding_segment(seg);
+    // acceleration term is *subtracted* from pressure equation
     MultisegmentWellAssemble<FluidSystem,Indices,Scalar>(baseif_).
-        assemblePressureLoss(seg,
-                             segments_.upwinding_segment(seg),
-                             accelerationPressureLoss, linSys_);
+        assembleAccelerationTerm(seg, seg, seg_upwind, signed_velocity_head, linSys_);
+    if (seg != seg_upwind) {// special treatment for reverse flow
+        // extra derivatives are *added* to Jacobian (hence minus)
+        const EvalWell extra_derivatives = -segments_.accelerationPressureLossContribution(seg, seg_area, /*extra_derivatives*/ true);
+        MultisegmentWellAssemble<FluidSystem,Indices,Scalar>(baseif_).
+            assemblePressureEqExtraDerivatives(seg, seg_upwind, extra_derivatives, linSys_);
+    }
+
+    // Subtract inlet head(s), opposite signs from above
+    for (const int inlet : segments_.inlets(seg)) {
+        // area used in formula is max of areas
+        const double inlet_area = std::max(seg_area, segment_set[inlet].crossArea());
+        const EvalWell signed_velocity_head_inlet = segments_.accelerationPressureLossContribution(inlet, inlet_area);
+        segments.pressure_drop_accel[seg] -= signed_velocity_head_inlet.value();
+
+        const int inlet_upwind = segments_.upwinding_segment(inlet); 
+        MultisegmentWellAssemble<FluidSystem,Indices,Scalar>(baseif_).
+            assembleAccelerationTerm(seg, inlet, inlet_upwind, -signed_velocity_head_inlet, linSys_);
+        if (inlet != inlet_upwind) {// special treatment for reverse flow
+            // extra derivatives are *added* to Jacobian (hence minus minus)
+            const EvalWell extra_derivatives_inlet = segments_.accelerationPressureLossContribution(inlet, inlet_area, /*extra_derivatives*/ true);
+            // in this case inlet_upwind = seg
+            MultisegmentWellAssemble<FluidSystem,Indices,Scalar>(baseif_).
+                assemblePressureEqExtraDerivatives(seg, inlet_upwind, extra_derivatives_inlet, linSys_);
+        }
+    }
 }
+
 
 template<typename FluidSystem, typename Indices, typename Scalar>
 void
@@ -262,6 +295,7 @@ MultisegmentWellEval<FluidSystem,Indices,Scalar>::
 assembleICDPressureEq(const int seg,
                       const UnitSystem& unit_system,
                       WellState& well_state,
+                      const SummaryState& summary_state,
                       const bool use_average_density,
                       DeferredLogger& deferred_logger)
 {
@@ -304,9 +338,9 @@ assembleICDPressureEq(const int seg,
             }
             break;
         case Segment::SegmentType::VALVE :
-            icd_pressure_drop = segments_.pressureDropValve(seg);
+            icd_pressure_drop = segments_.pressureDropValve(seg, summary_state);
             if (reverseFlow){
-                extra_derivatives = -segments_.pressureDropValve(seg, /*extra_reverse_flow_derivatives*/ true);
+                extra_derivatives = -segments_.pressureDropValve(seg, summary_state, /*extra_reverse_flow_derivatives*/ true);
             }
             break;
         default: {
@@ -349,7 +383,7 @@ assembleAccelerationAndHydroPressureLosses(const int seg,
                                            const bool use_average_density)
 {
     if (this->accelerationalPressureLossConsidered()) {
-        handleAccelerationPressureLoss(seg, well_state);
+        assembleAccelerationPressureLoss(seg, well_state);
     }
 
     // Since density derivatives are organized differently than what is required for assemblePressureEq,
@@ -378,6 +412,7 @@ MultisegmentWellEval<FluidSystem,Indices,Scalar>::
 assemblePressureEq(const int seg,
                    const UnitSystem& unit_system,
                    WellState& well_state,
+                   const SummaryState& summary_state,
                    const bool use_average_density,
                    DeferredLogger& deferred_logger)
 {
@@ -385,7 +420,7 @@ assemblePressureEq(const int seg,
         case Segment::SegmentType::SICD :
         case Segment::SegmentType::AICD :
         case Segment::SegmentType::VALVE : {
-            assembleICDPressureEq(seg, unit_system, well_state, use_average_density, deferred_logger);
+            assembleICDPressureEq(seg, unit_system, well_state, summary_state, use_average_density, deferred_logger);
             break;
         }
         default :
@@ -539,9 +574,6 @@ getResidualMeasureValue(const WellState& well_state,
         sum += residuals[SPres + 1] / control_tolerance;
         ++count;
     }
-
-    // if (count == 0), it should be converged.
-    assert(count != 0);
 
     return sum;
 }

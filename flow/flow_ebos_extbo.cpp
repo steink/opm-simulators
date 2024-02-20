@@ -20,7 +20,7 @@
 
 #include <opm/material/common/ResetLocale.hpp>
 #include <opm/grid/CpGrid.hpp>
-#include <opm/simulators/flow/SimulatorFullyImplicitBlackoilEbos.hpp>
+#include <opm/simulators/flow/SimulatorFullyImplicitBlackoil.hpp>
 #include <opm/simulators/flow/Main.hpp>
 
 namespace Opm {
@@ -45,7 +45,7 @@ int flowEbosExtboMain(int argc, char** argv, bool outputCout, bool outputFiles)
     // with incorrect locale settings.
     resetLocale();
 
-    FlowMainEbos<Properties::TTag::EclFlowExtboProblem>
+    FlowMain<Properties::TTag::EclFlowExtboProblem>
         mainfunc {argc, argv, outputCout, outputFiles};
     return mainfunc.execute();
 }

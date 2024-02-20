@@ -45,7 +45,7 @@
 #include <opm/output/eclipse/Summary.hpp>
 
 #if HAVE_MPI
-#include <ebos/eclmpiserializer.hh>
+#include <opm/simulators/utils/MPISerializer.hpp>
 #endif
 
 #if HAVE_MPI
@@ -115,7 +115,7 @@ bool directVerticalNeighbors(const std::array<int, 3>& cartDims,
 }
 
 std::unordered_map<std::string, Opm::data::InterRegFlowMap>
-getInterRegFlowsAsMap(const Opm::EclInterRegFlowMap& map)
+getInterRegFlowsAsMap(const Opm::InterRegFlowMap& map)
 {
     auto maps = std::unordered_map<std::string, Opm::data::InterRegFlowMap>{};
 
@@ -257,7 +257,7 @@ writeInit(const std::function<unsigned int(unsigned int)>& map)
 #if HAVE_MPI
     if (collectToIORank_.isParallel()) {
         const auto& comm = grid_.comm();
-        Opm::EclMpiSerializer ser(comm);
+        Opm::Parallel::MpiSerializer ser(comm);
         ser.broadcast(outputNnc_);
     }
 #endif
@@ -330,18 +330,18 @@ computeTrans_(const std::unordered_map<int,int>& cartesianToActive,
             }
 
             if (gc2 - gc1 == 1 && cartDims[0] > 1 ) {
-                tranx.data[gc1] = globalTrans().transmissibility(c1, c2);
+                tranx.data<double>()[gc1] = globalTrans().transmissibility(c1, c2);
                 continue; // skip other if clauses as they are false, last one needs some computation
             }
 
             if (gc2 - gc1 == cartDims[0] && cartDims[1] > 1) {
-                trany.data[gc1] = globalTrans().transmissibility(c1, c2);
+                trany.data<double>()[gc1] = globalTrans().transmissibility(c1, c2);
                 continue; // skipt next if clause as it needs some computation
             }
 
             if ( gc2 - gc1 == cartDims[0]*cartDims[1] ||
                  directVerticalNeighbors(cartDims, cartesianToActive, gc1, gc2))
-                tranz.data[gc1] = globalTrans().transmissibility(c1, c2);
+                tranz.data<double>()[gc1] = globalTrans().transmissibility(c1, c2);
         }
     }
 
@@ -605,7 +605,7 @@ evalSummary(const int                                            reportStepNum,
             const std::map<std::string, std::vector<double>>&    regionData,
             const Inplace&                                       inplace,
             const Inplace&                                       initialInPlace,
-            const EclInterRegFlowMap&                            interRegFlows,
+            const InterRegFlowMap&                               interRegFlows,
             SummaryState&                                        summaryState,
             UDQState&                                            udqState)
 {
@@ -659,7 +659,7 @@ evalSummary(const int                                            reportStepNum,
 
 #if HAVE_MPI
     if (collectToIORank_.isParallel()) {
-        EclMpiSerializer ser(grid_.comm());
+        Parallel::MpiSerializer ser(grid_.comm());
         ser.append(summaryState);
     }
 #endif

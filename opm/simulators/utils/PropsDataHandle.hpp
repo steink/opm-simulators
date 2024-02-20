@@ -30,6 +30,7 @@
 
 #include <opm/input/eclipse/EclipseState/Grid/FieldData.hpp>
 
+#include <opm/simulators/utils/MPISerializer.hpp>
 #include <opm/simulators/utils/ParallelEclipseState.hpp>
 #include <opm/simulators/utils/ParallelRestart.hpp>
 #include <dune/grid/common/datahandleif.hh>
@@ -73,7 +74,7 @@ public:
             m_distributed_fieldProps.copyTran(globalProps);
         }
 
-        EclMpiSerializer ser(comm);
+        Parallel::MpiSerializer ser(comm);
         ser.broadcast(*this);
 
         m_no_data = m_intKeys.size() + m_doubleKeys.size();
@@ -228,5 +229,6 @@ private:
 };
 
 } // end namespace Opm
+
 #endif // HAVE_MPI
 #endif // PROPS_DATAHANDLE_HPP

@@ -20,9 +20,16 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-
 #ifndef OPM_WELLINTERFACE_HEADER_INCLUDED
 #define OPM_WELLINTERFACE_HEADER_INCLUDED
+
+// NOTE: GasLiftSingleWell.hpp includes StandardWell.hpp which includes ourself
+//   (WellInterface.hpp), so we need to forward declare GasLiftSingleWell
+//   for it to be defined in this file. Similar for BlackoilWellModel
+namespace Opm {
+    template<typename TypeTag> class GasLiftSingleWell;
+    template<typename TypeTag> class BlackoilWellModel;
+}
 
 #include <opm/common/OpmLog/OpmLog.hpp>
 #include <opm/common/ErrorMacros.hpp>
@@ -32,31 +39,26 @@
 
 #include <opm/core/props/BlackoilPhases.hpp>
 
-#include <opm/simulators/wells/WellProdIndexCalculator.hpp>
-#include <opm/simulators/wells/WellState.hpp>
-// NOTE: GasLiftSingleWell.hpp includes StandardWell.hpp which includes ourself
-//   (WellInterface.hpp), so we need to forward declare GasLiftSingleWell
-//   for it to be defined in this file. Similar for BlackoilWellModel
-namespace Opm {
-    template<typename TypeTag> class GasLiftSingleWell;
-    template<typename TypeTag> class BlackoilWellModel;
-}
+#include <opm/simulators/flow/BlackoilModelParameters.hpp>
+
+#include <opm/simulators/wells/BlackoilWellModel.hpp>
 #include <opm/simulators/wells/GasLiftGroupInfo.hpp>
 #include <opm/simulators/wells/GasLiftSingleWell.hpp>
 #include <opm/simulators/wells/GasLiftSingleWellGeneric.hpp>
-#include <opm/simulators/wells/BlackoilWellModel.hpp>
-#include <opm/simulators/flow/BlackoilModelParametersEbos.hpp>
+#include <opm/simulators/wells/PerforationData.hpp>
+#include <opm/simulators/wells/WellInterfaceIndices.hpp>
+#include <opm/simulators/wells/WellProdIndexCalculator.hpp>
+#include <opm/simulators/wells/WellState.hpp>
+
+#include <opm/simulators/timestepping/ConvergenceReport.hpp>
 
 #include <opm/simulators/utils/DeferredLogger.hpp>
 
-#include<dune/common/fmatrix.hh>
-#include<dune/istl/bcrsmatrix.hh>
-#include<dune/istl/matrixmatrix.hh>
+#include <dune/common/fmatrix.hh>
+#include <dune/istl/bcrsmatrix.hh>
+#include <dune/istl/matrixmatrix.hh>
 
 #include <opm/material/densead/Evaluation.hpp>
-
-#include <opm/simulators/wells/WellInterfaceIndices.hpp>
-#include <opm/simulators/timestepping/ConvergenceReport.hpp>
 
 #include <cassert>
 #include <vector>
@@ -76,7 +78,7 @@ class WellInterface : public WellInterfaceIndices<GetPropType<TypeTag, Propertie
                                       GetPropType<TypeTag, Properties::Indices>,
                                       GetPropType<TypeTag, Properties::Scalar>>;
 public:
-    using ModelParameters = BlackoilModelParametersEbos<TypeTag>;
+    using ModelParameters = BlackoilModelParameters<TypeTag>;
 
     using Grid = GetPropType<TypeTag, Properties::Grid>;
     using Simulator = GetPropType<TypeTag, Properties::Simulator>;
@@ -247,7 +249,9 @@ public:
                                                   const Well::InjectionControls& inj_controls,
                                                   const Well::ProductionControls& prod_controls,
                                                   const double WQTotal,
-                                                  DeferredLogger& deferred_logger);
+                                                  DeferredLogger& deferred_logger, 
+                                                  const bool fixed_control = false, 
+                                                  const bool fixed_status = false);
 
     virtual void updatePrimaryVariables(const SummaryState& summary_state,
                                         const WellState& well_state,
@@ -414,13 +418,44 @@ protected:
                                             const WellProductionControls& prod_controls,
                                             WellState& well_state,
                                             const GroupState& group_state,
-                                            DeferredLogger& deferred_logger) = 0;
+                                            DeferredLogger& deferred_logger, 
+                                            const bool fixed_control = false, 
+                                            const bool fixed_status = false) = 0;
+
+    virtual void updateIPRImplicit(const Simulator& ebosSimulator,
+                                   WellState& well_state,
+                                   DeferredLogger& deferred_logger) = 0;                                            
 
     bool iterateWellEquations(const Simulator& ebosSimulator,
                               const double dt,
                               WellState& well_state,
                               const GroupState& group_state,
                               DeferredLogger& deferred_logger);
+
+    bool solveWellWithTHPConstraint(const Simulator& ebos_simulator,
+                                    const double dt,
+                                    const Well::InjectionControls& inj_controls,
+                                    const Well::ProductionControls& prod_controls,                                
+                                    WellState& well_state,
+                                    const GroupState& group_state,
+                                    DeferredLogger& deferred_logger);
+
+    std::optional<double> estimateOperableBhp(const Simulator& ebos_simulator,
+                                              const double dt,
+                                              WellState& well_state,
+                                              const SummaryState& summary_state,
+                                              DeferredLogger& deferred_logger);        
+
+    bool solveWellWithBhp(const Simulator& ebos_simulator,
+                          const double dt,
+                          const double bhp,
+                          WellState& well_state,
+                          DeferredLogger& deferred_logger);         
+
+    bool solveWellWithZeroRate(const Simulator& ebos_simulator,
+                               const double dt,
+                               WellState& well_state,
+                               DeferredLogger& deferred_logger);                                                                                                       
 
     bool solveWellForTesting(const Simulator& ebosSimulator, WellState& well_state, const GroupState& group_state,
                              DeferredLogger& deferred_logger);
@@ -447,12 +482,13 @@ protected:
                                 double* connII,
                                 DeferredLogger& deferred_logger) const;
 
-    double computeConnectionDFactor(const int perf, const IntensiveQuantities& intQuants, const SingleWellState& ws) const;
-
+    double computeConnectionDFactor(const int perf,
+                                    const IntensiveQuantities& intQuants,
+                                    const SingleWellState& ws) const;
 
 };
 
-}
+} // namespace Opm
 
 #include "WellInterface_impl.hpp"
 

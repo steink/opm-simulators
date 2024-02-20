@@ -19,12 +19,16 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef OPM_ISTLSOLVER_EBOS_WITH_BDA_INCLUDED
-#define OPM_ISTLSOLVER_EBOS_WITH_BDA_INCLUDED
+#ifndef OPM_ISTLSOLVER_WITH_BDA_HEADER_INCLUDED
+#define OPM_ISTLSOLVER_WITH_BDA_HEADER_INCLUDED
 
-#include <opm/simulators/linalg/ISTLSolverEbos.hpp>
+#include <opm/simulators/linalg/ISTLSolver.hpp>
 
 #include <cstddef>
+#include <memory>
+#include <set>
+#include <string>
+#include <vector>
 
 namespace Opm {
 
@@ -94,10 +98,10 @@ private:
 /// as a block-structured matrix (one block for all cell variables) for a fixed
 /// number of cell variables np .
 template <class TypeTag>
-class ISTLSolverEbosBda : public ISTLSolverEbos<TypeTag>
+class ISTLSolverBda : public ISTLSolver<TypeTag>
 {
 protected:
-    using ParentType = ISTLSolverEbos<TypeTag>;
+    using ParentType = ISTLSolver<TypeTag>;
     using GridView = GetPropType<TypeTag, Properties::GridView>;
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
     using SparseMatrixAdapter = GetPropType<TypeTag, Properties::SparseMatrixAdapter>;
@@ -128,7 +132,7 @@ public:
     /// \param[in] simulator   The opm-models simulator object
     /// \param[in] parameters  Explicit parameters for solver setup, do not
     ///                        read them from command line parameters.
-    ISTLSolverEbosBda(const Simulator& simulator, const FlowLinearSolverParameters& parameters)
+    ISTLSolverBda(const Simulator& simulator, const FlowLinearSolverParameters& parameters)
         : ParentType(simulator, parameters)
     {
         initializeBda();
@@ -136,8 +140,8 @@ public:
 
     /// Construct a system solver.
     /// \param[in] simulator   The opm-models simulator object
-    explicit ISTLSolverEbosBda(const Simulator& simulator)
-    : ParentType(simulator)
+    explicit ISTLSolverBda(const Simulator& simulator)
+        : ParentType(simulator)
     {
         initializeBda();
     }
@@ -194,7 +198,7 @@ public:
 #if HAVE_OPENCL
         // update matrix entries for solvers.
         if (firstcall && bdaBridge_) {
-            // ebos will not change the matrix object. Hence simply store a pointer
+            // model will not change the matrix object. Hence simply store a pointer
             // to the original one with a deleter that does nothing.
             // Outch! We need to be able to scale the linear system! Hence const_cast
             // setup sparsity pattern for jacobi matrix for preconditioner (only used for openclSolver)
@@ -230,7 +234,7 @@ public:
             return ParentType::solve(x);
         }
 
-        OPM_TIMEBLOCK(istlSolverEbosBdaSolve);
+        OPM_TIMEBLOCK(istlSolverBdaSolve);
         this->solveCount_ += 1;
         // Write linear system if asked for.
         const int verbosity = this->prm_[this->activeSolverNum_].template get<int>("verbosity", 0);
@@ -275,4 +279,4 @@ protected:
 
 } // namespace Opm
 
-#endif // OPM_ISTLSOLVER_EBOS_BDA_HEADER_INCLUDED
+#endif // OPM_ISTLSOLVER_WITH_BDA_HEADER_INCLUDED

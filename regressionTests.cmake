@@ -1019,6 +1019,13 @@ add_test_compareECLFiles(CASENAME nnc
                          REL_TOL ${rel_tol}
                          DIR editnnc)
 
+add_test_compareECLFiles(CASENAME nonnc
+                         FILENAME NONNC
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR editnnc)
+
 add_test_compareECLFiles(CASENAME spe1_foam
                          FILENAME SPE1FOAM
                          SIMULATOR flow
@@ -1403,6 +1410,24 @@ add_test_compareECLFiles(CASENAME 01_vappars
                          DIR vappars)
 add_test_compareECLFiles(CASENAME 01_multflt
                          FILENAME MULTFLT-01
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR mult)
+add_test_compareECLFiles(CASENAME 02_multflt
+                         FILENAME MULTFLT-02
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR mult)
+add_test_compareECLFiles(CASENAME 03_multflt
+                         FILENAME MULTFLT-03
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR mult)
+add_test_compareECLFiles(CASENAME 01_multregt
+                         FILENAME MULTREGT-01
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}

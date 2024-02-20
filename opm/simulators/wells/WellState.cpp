@@ -407,7 +407,7 @@ void WellState::init(const std::vector<double>& cellPressures,
     }
 
 
-    updateWellsDefaultALQ(wells_ecl);
+    updateWellsDefaultALQ(wells_ecl, summary_state);
 }
 
 void WellState::resize(const std::vector<Well>& wells_ecl,
@@ -594,6 +594,7 @@ void WellState::reportConnections(std::vector<data::Connection>& connections,
         connection.reservoir_rate = perf_rates[i];
         connection.trans_factor = perf_data.connection_transmissibility_factor[i];
         connection.d_factor = perf_data.connection_d_factor[i];
+        connection.compact_mult = perf_data.connection_compaction_tmult[i];
         connection.rates.set(rt::dissolved_gas, perf_mixing_rates[i][ws.dissolved_gas]);
         connection.rates.set(rt::vaporized_oil, perf_mixing_rates[i][ws.vaporized_oil]);
         if (!ws.producer) {
@@ -993,14 +994,14 @@ bool WellState::wellIsOwned(const std::string& wellName) const
     return wellIsOwned(well_index.value(), wellName);
 }
 
-void WellState::updateWellsDefaultALQ(const std::vector<Well>& wells_ecl)
+void WellState::updateWellsDefaultALQ(const std::vector<Well>& wells_ecl, const SummaryState& summary_state)
 {
     const int nw = wells_ecl.size();
     for (int i = 0; i<nw; i++) {
         const Well &well = wells_ecl[i];
         if (well.isProducer()) {
             // NOTE: This is the value set in item 12 of WCONPROD, or with WELTARG
-            auto alq = well.alq_value();
+            auto alq = well.alq_value(summary_state);
             this->alq_state.update_default(well.name(), alq);
         }
     }

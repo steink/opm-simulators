@@ -50,7 +50,8 @@ unsigned long long getTotalSystemMemory()
 
 namespace Opm {
 
-void printPRTHeader(const std::string& parameters,
+void printPRTHeader(const int nprocs, const int nthreads,
+                    const std::string& parameters,
                     std::string_view moduleVersion,
                     std::string_view compileTimestamp)
 {
@@ -85,7 +86,7 @@ void printPRTHeader(const std::string& parameters,
        ss << "User             =  " << user << std::endl;
     }
     ss << "Simulation started on " << tmstr << " hrs\n";
-
+    ss << "Using "<< nprocs << " MPI processes with "<< nthreads <<" OMP threads on each \n";
     ss << "Parameters used by Flow:\n" << parameters;
 
     OpmLog::note(ss.str());
@@ -111,7 +112,10 @@ void printFlowBanner(int nprocs, int nthreads, std::string_view moduleVersionNam
     std::cout << "Using "<< nprocs << " MPI processes with "<< nthreads <<" OMP threads on each \n\n";
 }
 
-void printFlowTrailer(int nprocs, int nthreads,
+void printFlowTrailer(int nprocs,
+                      int nthreads,
+                      const double total_setup_time,
+                      const double deck_read_time,
                       const SimulatorReport& report,
                       const SimulatorReportSingle& localsolves_report)
 {
@@ -119,6 +123,8 @@ void printFlowTrailer(int nprocs, int nthreads,
     ss << "\n\n================    End of simulation     ===============\n\n";
     ss << fmt::format("Number of MPI processes: {:9}\n", nprocs);
     ss << fmt::format("Threads per MPI process: {:9}\n", nthreads);
+    ss << fmt::format("Setup time:                 {:9.2f} s\n", total_setup_time);
+    ss << fmt::format("  Deck input:               {:9.2f} s\n", deck_read_time);
     report.reportFullyImplicit(ss);
 
     if (localsolves_report.total_linearizations > 0) {

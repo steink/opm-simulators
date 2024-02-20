@@ -34,7 +34,7 @@
 #include <opm/models/utils/start.hh>
 
 #include <opm/simulators/aquifers/BlackoilAquiferModel.hpp>
-#include <opm/simulators/linalg/ISTLSolverEbos.hpp>
+#include <opm/simulators/linalg/ISTLSolver.hpp>
 #include <opm/simulators/wells/BlackoilWellModel.hpp>
 
 namespace Opm {
@@ -115,7 +115,7 @@ struct LinearSolverSplice<TypeTag, TTag::EbosTypeTag> {
 
 template<>
 struct LinearSolverBackend<TTag::EbosTypeTag, TTag::FlowIstlSolverParams> {
-    using type = ISTLSolverEbos<TTag::EbosTypeTag>;
+    using type = ISTLSolver<TTag::EbosTypeTag>;
 };
 
 // the default for the allowed volumetric error for oil per second
@@ -193,7 +193,7 @@ public:
     {
         ParentType::registerParameters();
 
-        BlackoilModelParametersEbos<TypeTag>::registerParameters();
+        BlackoilModelParameters<TypeTag>::registerParameters();
         EWOMS_REGISTER_PARAM(TypeTag, bool, EnableTerminalOutput, "Do *NOT* use!");
         EWOMS_HIDE_PARAM(TypeTag, DbhpMaxRel);
         EWOMS_HIDE_PARAM(TypeTag, DwellFractionMax);

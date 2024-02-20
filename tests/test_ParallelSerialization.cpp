@@ -52,6 +52,7 @@
 #include <opm/input/eclipse/EclipseState/IOConfig/IOConfig.hpp>
 #include <opm/input/eclipse/Schedule/RPTConfig.hpp>
 #include <opm/input/eclipse/Schedule/RSTConfig.hpp>
+#include <opm/input/eclipse/Schedule/Source.hpp>
 #include <opm/input/eclipse/Schedule/SummaryState.hpp>
 #include <opm/input/eclipse/Schedule/Action/ActionResult.hpp>
 #include <opm/input/eclipse/Schedule/Action/State.hpp>
@@ -142,14 +143,14 @@
 #include <opm/input/eclipse/EclipseState/Tables/TableSchema.hpp>
 #include <opm/output/data/Aquifer.hpp>
 #include <opm/output/eclipse/RestartValue.hpp>
-#include <ebos/eclmpiserializer.hh>
+#include <opm/simulators/utils/MPISerializer.hpp>
 
 template<class T>
 std::tuple<T,int,int> PackUnpack(T& in)
 {
     const auto& comm = Dune::MPIHelper::getCommunication();
 
-    Opm::EclMpiSerializer ser(comm);
+    Opm::Parallel::MpiSerializer ser(comm);
     ser.pack(in);
     const size_t pos1 = ser.position();
     T out;
@@ -281,6 +282,7 @@ TEST_FOR_TYPE(SkprpolyTable)
 TEST_FOR_TYPE(SkprwatTable)
 TEST_FOR_TYPE(SICD)
 TEST_FOR_TYPE(SolventDensityTable)
+TEST_FOR_TYPE(Source)
 TEST_FOR_TYPE(SummaryConfig)
 TEST_FOR_TYPE(SummaryConfigNode)
 TEST_FOR_TYPE(SummaryState)

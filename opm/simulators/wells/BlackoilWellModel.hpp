@@ -51,7 +51,6 @@
 #include <opm/simulators/wells/GasLiftGroupInfo.hpp>
 #include <opm/simulators/wells/GasLiftSingleWell.hpp>
 #include <opm/simulators/wells/GasLiftSingleWellGeneric.hpp>
-#include <opm/simulators/wells/GasLiftStage2.hpp>
 #include <opm/simulators/wells/GasLiftWellState.hpp>
 #include <opm/simulators/wells/MultisegmentWell.hpp>
 #include <opm/simulators/wells/ParallelWBPCalculation.hpp>
@@ -97,7 +96,7 @@ namespace Opm {
         {
         public:
             // ---------      Types      ---------
-            typedef BlackoilModelParametersEbos<TypeTag> ModelParameters;
+            using ModelParameters = BlackoilModelParameters<TypeTag>;
 
             using Grid = GetPropType<TypeTag, Properties::Grid>;
             using EquilGrid = GetPropType<TypeTag, Properties::EquilGrid>;
@@ -292,7 +291,8 @@ namespace Opm {
 
             // Check if well equations are converged locally.
             ConvergenceReport getDomainWellConvergence(const Domain& domain,
-                                                       const std::vector<Scalar>& B_avg) const;
+                                                       const std::vector<Scalar>& B_avg,
+                                                       DeferredLogger& local_deferredLogger) const;
 
             const SimulatorReportSingle& lastReport() const;
 

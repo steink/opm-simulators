@@ -82,8 +82,8 @@
 
 #include <opm/output/eclipse/EclipseIO.hpp>
 
-#include <opm/simulators/flow/EclActionHandler.hpp>
-#include <opm/simulators/timestepping/AdaptiveTimeSteppingEbos.hpp>
+#include <opm/simulators/flow/ActionHandler.hpp>
+#include <opm/simulators/timestepping/AdaptiveTimeStepping.hpp>
 #include <opm/simulators/timestepping/SimulatorReport.hpp>
 #include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
 #include <opm/simulators/utils/ParallelSerialization.hpp>
@@ -181,6 +181,8 @@ class EclProblem : public GetPropType<TypeTag, Properties::BaseProblem>
     using BrineModule = BlackOilBrineModule<TypeTag>;
     using ExtboModule = BlackOilExtboModule<TypeTag>;
     using MICPModule = BlackOilMICPModule<TypeTag>;
+    using DispersionModule = BlackOilDispersionModule<TypeTag, enableDispersion>;
+    using DiffusionModule = BlackOilDiffusionModule<TypeTag, enableDiffusion>;
 
     using InitialFluidState = typename EclEquilInitializer<TypeTag>::ScalarFluidState;
 
@@ -236,13 +238,15 @@ public:
         if constexpr (enableExperiments)
             EWOMS_REGISTER_PARAM(TypeTag, bool, EclEnableAquifers,
                                  "Enable analytic and numeric aquifer models");
-        EWOMS_REGISTER_PARAM(TypeTag, bool, EclEnableTuning,
-                             "Honor some aspects of the TUNING keyword from the ECL deck.");
         EWOMS_REGISTER_PARAM(TypeTag, std::string, OutputMode,
                              "Specify which messages are going to be printed. Valid values are: none, log, all (default)");
         EWOMS_REGISTER_PARAM(TypeTag, int, NumPressurePointsEquil,
                              "Number of pressure points (in each direction) in tables used for equilibration");
         EWOMS_HIDE_PARAM(TypeTag, NumPressurePointsEquil); // Users will typically not need to modify this parameter..
+        EWOMS_REGISTER_PARAM(TypeTag, bool, ExplicitRockCompaction,
+                             "Use pressure from end of the last time step when evaluating rock compaction");
+        EWOMS_HIDE_PARAM(TypeTag, ExplicitRockCompaction); // Users will typically not need to modify this parameter..
+
     }
 
 
@@ -302,6 +306,8 @@ public:
         BrineModule::initFromState(vanguard.eclState());
         ExtboModule::initFromState(vanguard.eclState());
         MICPModule::initFromState(vanguard.eclState());
+        DispersionModule::initFromState(vanguard.eclState());
+        DiffusionModule::initFromState(vanguard.eclState());
 
         // create the ECL writer
         eclWriter_ = std::make_unique<EclWriterType>(simulator);
@@ -319,7 +325,7 @@ public:
         else
             enableAquifers_ = true;
 
-        this->enableTuning_ = EWOMS_GET_PARAM(TypeTag, bool, EclEnableTuning);
+        this->enableTuning_ = EWOMS_GET_PARAM(TypeTag, bool, EnableTuning);
         this->initialTimeStepSize_ = EWOMS_GET_PARAM(TypeTag, Scalar, InitialTimeStepSize);
         this->maxTimeStepAfterWellEvent_ = EWOMS_GET_PARAM(TypeTag, double, TimeStepAfterEventInDays)*24*60*60;
 
@@ -661,6 +667,10 @@ public:
             aquiferModel_.endTimeStep();
         tracerModel_.endTimeStep();
 
+
+        // Compute flux for output
+        this->model().linearizer().updateFlowsInfo();
+
         // deal with DRSDT and DRVDT
         asImp_().updateCompositionChangeLimits_();
         {
@@ -734,7 +744,7 @@ public:
      * \brief Write the requested quantities of the current solution into the output
      *        files.
      */
-    void writeOutput(bool verbose = true)
+    void writeOutput(const SimulatorTimer& timer, bool verbose = true)
     {
         OPM_TIMEBLOCK(problemWriteOutput);
         // use the generic code to prepare the output fields and to
@@ -752,9 +762,9 @@ public:
         if (enableDamarisOutput_) {
             damarisWriter_->writeOutput(localCellData, isSubStep) ;
         }
-#endif 
+#endif
         if (enableEclOutput_){
-            eclWriter_->writeOutput(std::move(localCellData), isSubStep);
+            eclWriter_->writeOutput(std::move(localCellData), timer, isSubStep);
         }
     }
 
@@ -1294,8 +1304,9 @@ public:
         values.setPvtRegionIndex(pvtRegionIndex(context, spaceIdx, timeIdx));
         values.assignNaive(initialFluidStates_[globalDofIdx]);
 
-        if constexpr (enableSolvent)
-            values[Indices::solventSaturationIdx] = this->solventSaturation_[globalDofIdx];
+        SolventModule::assignPrimaryVars(values,
+                                         enableSolvent ? this->solventSaturation_[globalDofIdx] : 0.0,
+                                         enableSolvent ? this->solventRsw_[globalDofIdx] : 0.0);
 
         if constexpr (enablePolymer)
             values[Indices::polymerConcentrationIdx] = this->polymer_.concentration[globalDofIdx];
@@ -1404,6 +1415,68 @@ public:
         if (enableAquifers_)
             aquiferModel_.addToSource(rate, globalDofIdx, timeIdx);
 
+        // Add source term from deck
+        const auto& source = this->simulator().vanguard().schedule()[this->episodeIndex()].source();
+        std::array<int,3> ijk;
+        this->simulator().vanguard().cartesianCoordinate(globalDofIdx, ijk);
+
+        if (source.hasSource(ijk)) {
+            const int pvtRegionIdx = this->pvtRegionIndex(globalDofIdx);  
+            static std::array<SourceComponent, 3> sc_map = {SourceComponent::WATER, SourceComponent::OIL, SourceComponent::GAS};
+            static std::array<int, 3> phidx_map = {FluidSystem::waterPhaseIdx, FluidSystem::oilPhaseIdx, FluidSystem::gasPhaseIdx}; 
+            static std::array<int, 3> cidx_map = {waterCompIdx, oilCompIdx, gasCompIdx}; 
+
+            for (unsigned i = 0; i < phidx_map.size(); ++i) {
+                const auto phaseIdx = phidx_map[i];
+                const auto sourceComp = sc_map[i];
+                const auto compIdx = cidx_map[i];
+                if (!FluidSystem::phaseIsActive(phaseIdx)) {
+                    continue;
+                } 
+                Scalar mass_rate = source.rate({ijk, sourceComp}) / this->model().dofTotalVolume(globalDofIdx);
+                if constexpr (getPropValue<TypeTag, Properties::BlackoilConserveSurfaceVolume>()) {
+                    mass_rate /= FluidSystem::referenceDensity(phaseIdx, pvtRegionIdx);
+                }
+                rate[Indices::canonicalToActiveComponentIndex(compIdx)] += mass_rate;
+            }
+
+            if constexpr (enableSolvent) {
+                Scalar mass_rate = source.rate({ijk, SourceComponent::SOLVENT}) / this->model().dofTotalVolume(globalDofIdx);
+                if constexpr (getPropValue<TypeTag, Properties::BlackoilConserveSurfaceVolume>()) {
+                    const auto& solventPvt = SolventModule::solventPvt();
+                    mass_rate /= solventPvt.referenceDensity(pvtRegionIdx);
+                }
+                rate[Indices::contiSolventEqIdx] += mass_rate;
+            }
+            if constexpr (enablePolymer) {
+                rate[Indices::polymerConcentrationIdx] += source.rate({ijk, SourceComponent::POLYMER}) / this->model().dofTotalVolume(globalDofIdx);
+            }
+            if constexpr (enableEnergy) {
+                for (unsigned i = 0; i < phidx_map.size(); ++i) {
+                    const auto phaseIdx = phidx_map[i];
+                    if (!FluidSystem::phaseIsActive(phaseIdx)) {
+                        continue;
+                    }
+                    const auto sourceComp = sc_map[i];
+                    if (source.hasHrate({ijk, sourceComp})) {
+                        rate[Indices::contiEnergyEqIdx] += source.hrate({ijk, sourceComp}) / this->model().dofTotalVolume(globalDofIdx);
+                    } else {
+                        const auto& intQuants = this->simulator().model().intensiveQuantities(globalDofIdx, /*timeIdx*/ 0);
+                        auto fs = intQuants.fluidState();
+                        // if temperature is not set, use cell temperature as default
+                        if (source.hasTemperature({ijk, sourceComp})) {
+                            Scalar temperature = source.temperature({ijk, sourceComp});
+                            fs.setTemperature(temperature);
+                        }
+                        const auto& h = FluidSystem::enthalpy(fs, phaseIdx, pvtRegionIdx);
+                        Scalar mass_rate = source.rate({ijk, sourceComp})/ this->model().dofTotalVolume(globalDofIdx);
+                        Scalar energy_rate = getValue(h)*mass_rate;
+                        rate[Indices::contiEnergyEqIdx] += energy_rate;
+                    }
+                }
+            }
+        }
+
         // if requested, compensate systematic mass loss for cells which were "well
         // behaved" in the last time step
         // Note that we don't allow for drift compensation if there are no active wells.
@@ -1511,17 +1584,7 @@ public:
                         throw std::logic_error("you need to specify a valid component (OIL, WATER or GAS) when DIRICHLET type is set in BC");
                         break;
                 }
-                int phaseIndex;
-                if (FluidSystem::phaseIsActive(oilPhaseIdx)) {
-                    phaseIndex = oilPhaseIdx;
-                }
-                else if (FluidSystem::phaseIsActive(gasPhaseIdx)) {
-                    phaseIndex = gasPhaseIdx;
-                }
-                else {
-                    phaseIndex = waterPhaseIdx;
-                }
-                double pressure = initialFluidStates_[globalDofIdx].pressure(phaseIndex);
+                double pressure = initialFluidStates_[globalDofIdx].pressure(refPressurePhaseIdx_());
                 const auto pressure_input = bc.pressure;
                 if (pressure_input) {
                     pressure = *pressure_input;
@@ -1545,7 +1608,7 @@ public:
                         fluidState.setPressure(phaseIdx, pressure);
                 }
                 
-                double temperature = initialFluidStates_[globalDofIdx].temperature(phaseIndex);
+                double temperature = initialFluidStates_[globalDofIdx].temperature(0); // we only have one temperature
                 const auto temperature_input = bc.temperature;
                 if(temperature_input)
                     temperature = *temperature_input;
@@ -1570,7 +1633,10 @@ public:
 
                     const auto& rho = FluidSystem::density(fluidState, phaseIdx, pvtRegionIdx);
                     fluidState.setDensity(phaseIdx, rho);
-
+                    if (enableEnergy) {
+                        const auto& h = FluidSystem::enthalpy(fluidState, phaseIdx, pvtRegionIdx);
+                        fluidState.setEnthalpy(phaseIdx, h);
+                    }
                 }
                 fluidState.checkDefined();
                 return fluidState;
@@ -1623,19 +1689,19 @@ public:
             tableIdx = this->rockTableIdx_[elementIdx];
 
         const auto& fs = intQuants.fluidState();
-        LhsEval effectiveOilPressure = decay<LhsEval>(fs.pressure(oilPhaseIdx));
-        if (!this->minOilPressure_.empty())
+        LhsEval effectivePressure = decay<LhsEval>(fs.pressure(refPressurePhaseIdx_()));
+        if (!this->minRefPressure_.empty())
             // The pore space change is irreversible
-            effectiveOilPressure =
-                min(decay<LhsEval>(fs.pressure(oilPhaseIdx)),
-                                   this->minOilPressure_[elementIdx]);
+            effectivePressure =
+                min(decay<LhsEval>(fs.pressure(refPressurePhaseIdx_())),
+                                   this->minRefPressure_[elementIdx]);
 
         if (!this->overburdenPressure_.empty())
-            effectiveOilPressure -= this->overburdenPressure_[elementIdx];
+            effectivePressure -= this->overburdenPressure_[elementIdx];
 
 
         if (!this->rockCompPoroMult_.empty()) {
-            return this->rockCompPoroMult_[tableIdx].eval(effectiveOilPressure, /*extrapolation=*/true);
+            return this->rockCompPoroMult_[tableIdx].eval(effectivePressure, /*extrapolation=*/true);
         }
 
         // water compaction
@@ -1643,7 +1709,7 @@ public:
         LhsEval SwMax = max(decay<LhsEval>(fs.saturation(waterPhaseIdx)), this->maxWaterSaturation_[elementIdx]);
         LhsEval SwDeltaMax = SwMax - initialFluidStates_[elementIdx].saturation(waterPhaseIdx);
 
-        return this->rockCompPoroMultWc_[tableIdx].eval(effectiveOilPressure, SwDeltaMax, /*extrapolation=*/true);
+        return this->rockCompPoroMultWc_[tableIdx].eval(effectivePressure, SwDeltaMax, /*extrapolation=*/true);
     }
 
     /*!
@@ -1654,35 +1720,9 @@ public:
     template <class LhsEval>
     LhsEval rockCompTransMultiplier(const IntensiveQuantities& intQuants, unsigned elementIdx) const
     {
-        OPM_TIMEBLOCK_LOCAL(rockCompTransMultiplier);
-        if (this->rockCompTransMult_.empty() && this->rockCompTransMultWc_.empty())
-            return 1.0;
-
-        unsigned tableIdx = 0;
-        if (!this->rockTableIdx_.empty())
-            tableIdx = this->rockTableIdx_[elementIdx];
-
-        const auto& fs = intQuants.fluidState();
-        LhsEval effectiveOilPressure = decay<LhsEval>(fs.pressure(oilPhaseIdx));
-
-        if (!this->minOilPressure_.empty())
-            // The pore space change is irreversible
-            effectiveOilPressure =
-                min(decay<LhsEval>(fs.pressure(oilPhaseIdx)),
-                    this->minOilPressure_[elementIdx]);
-
-        if (!this->overburdenPressure_.empty())
-            effectiveOilPressure -= this->overburdenPressure_[elementIdx];
-
-        if (!this->rockCompTransMult_.empty())
-            return this->rockCompTransMult_[tableIdx].eval(effectiveOilPressure, /*extrapolation=*/true);
-
-        // water compaction
-        assert(!this->rockCompTransMultWc_.empty());
-        LhsEval SwMax = max(decay<LhsEval>(fs.saturation(waterPhaseIdx)), this->maxWaterSaturation_[elementIdx]);
-        LhsEval SwDeltaMax = SwMax - initialFluidStates_[elementIdx].saturation(waterPhaseIdx);
-
-        return this->rockCompTransMultWc_[tableIdx].eval(effectiveOilPressure, SwDeltaMax, /*extrapolation=*/true);
+        bool implicit = !EWOMS_GET_PARAM(TypeTag, bool, ExplicitRockCompaction);
+        return implicit ? this->simulator().problem().template computeRockCompTransMultiplier_<LhsEval>(intQuants, elementIdx)
+                        : this->simulator().problem().getRockCompTransMultVal(elementIdx);
     }
 
     /*!
@@ -1713,7 +1753,9 @@ public:
     {
         OPM_TIMEBLOCK_LOCAL(wellTransMultiplier);
         
-        double trans_mult = this->simulator().problem().template rockCompTransMultiplier<double>(intQuants, elementIdx);
+        bool implicit = !EWOMS_GET_PARAM(TypeTag, bool, ExplicitRockCompaction);
+        double trans_mult = implicit ? this->simulator().problem().template computeRockCompTransMultiplier_<double>(intQuants, elementIdx)
+                                     : this->simulator().problem().getRockCompTransMultVal(elementIdx);
         trans_mult *= this->simulator().problem().template permFactTransMultiplier<double>(intQuants);
     
         return trans_mult;
@@ -1774,6 +1816,11 @@ public:
         return eclWriter_;
     }
 
+    void setConvData(const std::vector<std::vector<int>>& data)
+    {
+        eclWriter_->mutableEclOutputModule().setCnvData(data);
+    }
+
     template<class Serializer>
     void serializeOp(Serializer& serializer)
     {
@@ -1809,6 +1856,8 @@ protected:
 
         if constexpr (getPropValue<TypeTag, Properties::EnablePolymer>())
             updateMaxPolymerAdsorption_();
+
+        updateRockCompTransMultVal_();
     }
 
     template<class UpdateFunc>
@@ -1886,7 +1935,7 @@ protected:
     {
         OPM_TIMEBLOCK_LOCAL(updateMaxOilSaturation);
         const auto& fs = iq.fluidState();
-        const Scalar So = decay<Scalar>(fs.saturation(oilPhaseIdx));
+        const Scalar So = decay<Scalar>(fs.saturation(refPressurePhaseIdx_()));
         auto& mos = this->maxOilSaturation_;
         if(mos[compressedDofIdx] < So){
             mos[compressedDofIdx] = So;
@@ -1931,7 +1980,7 @@ protected:
     {
         OPM_TIMEBLOCK(updateMinPressure);
         // IRREVERS option is used in ROCKCOMP
-        if (this->minOilPressure_.empty())
+        if (this->minRefPressure_.empty())
             return false;
 
         this->updateProperty_("EclProblem::updateMinPressure_() failed:",
@@ -1945,14 +1994,43 @@ protected:
     bool updateMinPressure_(unsigned compressedDofIdx, const IntensiveQuantities& iq){
         OPM_TIMEBLOCK_LOCAL(updateMinPressure);
         const auto& fs = iq.fluidState();
-        const Scalar mo = getValue(fs.pressure(oilPhaseIdx));
-        auto& mos = this->minOilPressure_;
-        if(mos[compressedDofIdx]> mo){
-            mos[compressedDofIdx] = mo;
+        const Scalar min_pressure = getValue(fs.pressure(refPressurePhaseIdx_()));
+        auto& min_pressures = this->minRefPressure_;
+        if(min_pressures[compressedDofIdx]> min_pressure){
+            min_pressures[compressedDofIdx] = min_pressure;
             return true;
         }else{
             return false;
         }
+    }
+
+    // \brief Function to assign field properties of type double, on the leaf grid view.
+    //
+    // For CpGrid with local grid refinement, the field property of a cell on the leaf
+    // is inherited from its parent or equivalent (when has no parent) cell on level zero.
+    std::function<std::vector<double>(const FieldPropsManager&, const std::string&)>
+    fieldPropDoubleOnLeafAssigner_()
+    {
+        const auto& lookup = this->lookUpData_;
+        return [&lookup](const FieldPropsManager& fieldPropManager, const std::string& propString)
+        {
+            return lookup.assignFieldPropsDoubleOnLeaf(fieldPropManager, propString);
+        };
+    }
+
+    // \brief Function to assign field properties of type int, unsigned int, ..., on the leaf grid view.
+    //
+    // For CpGrid with local grid refinement, the field property of a cell on the leaf
+    // is inherited from its parent or equivalent (when has no parent) cell on level zero.
+    template<typename IntType>
+    std::function<std::vector<IntType>(const FieldPropsManager&, const std::string&, bool)>
+    fieldPropIntTypeOnLeafAssigner_()
+    {
+        const auto& lookup = this->lookUpData_;
+        return [&lookup](const FieldPropsManager& fieldPropManager, const std::string& propString, bool needsTranslation)
+        {
+            return lookup.template assignFieldPropsIntOnLeaf<IntType>(fieldPropManager, propString, needsTranslation);
+        };
     }
 
     void readMaterialParameters_()
@@ -1985,7 +2063,9 @@ protected:
         // fluid-matrix interactions (saturation functions; relperm/capillary pressure)
         materialLawManager_ = std::make_shared<EclMaterialLawManager>();
         materialLawManager_->initFromState(eclState);
-        materialLawManager_->initParamsForElements(eclState, this->model().numGridDof());
+        materialLawManager_->initParamsForElements(eclState, this->model().numGridDof(),
+                                                   this-> template fieldPropIntTypeOnLeafAssigner_<int>(),
+                                                   this-> lookupIdxOnLevelZeroAssigner_());
         ////////////////////////////////
     }
 
@@ -1999,7 +2079,9 @@ protected:
 
             // fluid-matrix interactions (saturation functions; relperm/capillary pressure)
             thermalLawManager_ = std::make_shared<EclThermalLawManager>();
-            thermalLawManager_->initParamsForElements(eclState, this->model().numGridDof());
+            thermalLawManager_->initParamsForElements(eclState, this->model().numGridDof(),
+                                                      this-> fieldPropDoubleOnLeafAssigner_(),
+                                                      this-> template fieldPropIntTypeOnLeafAssigner_<unsigned int>());
         }
     }
 
@@ -2015,7 +2097,6 @@ protected:
 
         const auto& fp = eclState.fieldProps();
         const std::vector<double> porvData = fp.porv(false);
-        const std::vector<int> actnumData = fp.actnum();
         for (std::size_t dofIdx = 0; dofIdx < numDof; ++dofIdx) {
             Scalar poreVolume = porvData[dofIdx];
 
@@ -2054,8 +2135,8 @@ protected:
                 this->maxWaterSaturation_[elemIdx] = std::max(this->maxWaterSaturation_[elemIdx], fs.saturation(waterPhaseIdx));
             if (!this->maxOilSaturation_.empty())
                 this->maxOilSaturation_[elemIdx] = std::max(this->maxOilSaturation_[elemIdx], fs.saturation(oilPhaseIdx));
-            if (!this->minOilPressure_.empty())
-                this->minOilPressure_[elemIdx] = std::min(this->minOilPressure_[elemIdx], fs.pressure(oilPhaseIdx));
+            if (!this->minRefPressure_.empty())
+                this->minRefPressure_[elemIdx] = std::min(this->minRefPressure_[elemIdx], fs.pressure(refPressurePhaseIdx_()));
         }
 
 
@@ -2105,8 +2186,10 @@ protected:
 
         std::size_t numElems = this->model().numGridDof();
         initialFluidStates_.resize(numElems);
-        if constexpr (enableSolvent)
+        if constexpr (enableSolvent) {
             this->solventSaturation_.resize(numElems, 0.0);
+            this->solventRsw_.resize(numElems, 0.0);
+        }
 
         if constexpr (enablePolymer)
             this->polymer_.concentration.resize(numElems, 0.0);
@@ -2142,8 +2225,10 @@ protected:
 
                 processRestartSaturations_(elemFluidState, ssol);
 
-                if constexpr (enableSolvent)
+                if constexpr (enableSolvent) {
                     this->solventSaturation_[elemIdx] = ssol;
+                    this->solventRsw_[elemIdx] = eclWriter_->eclOutputModule().getSolventRsw(elemIdx);
+                }
             }
 
             this->mixControls_.updateLastValues(elemIdx, elemFluidState.Rs(), elemFluidState.Rv());
@@ -2459,6 +2544,15 @@ protected:
         }
     }
 
+    Scalar getRockCompTransMultVal(std::size_t dofIdx) const
+    {
+        if (this->rockCompTransMultVal_.empty())
+            return 1.0;
+
+        return this->rockCompTransMultVal_[dofIdx];
+    }
+
+
 private:
     struct PffDofData_
     {
@@ -2621,6 +2715,69 @@ private:
         }
     }
 
+    int refPressurePhaseIdx_() const {
+        if (FluidSystem::phaseIsActive(oilPhaseIdx)) {
+            return oilPhaseIdx;
+        }
+        else if (FluidSystem::phaseIsActive(gasPhaseIdx)) {
+            return gasPhaseIdx;
+        }
+        else {
+            return waterPhaseIdx;
+        }
+    }
+
+    void updateRockCompTransMultVal_()
+    {
+        const auto& model = this->simulator().model();
+        std::size_t numGridDof = this->model().numGridDof();
+        this->rockCompTransMultVal_.resize(numGridDof, 1.0);
+        for (std::size_t elementIdx = 0; elementIdx < numGridDof; ++elementIdx) {
+            const auto& iq = *model.cachedIntensiveQuantities(elementIdx, /*timeIdx=*/ 0);
+            Scalar trans_mult = computeRockCompTransMultiplier_<Scalar>(iq, elementIdx);
+            this->rockCompTransMultVal_[elementIdx] = trans_mult;
+        }
+    }
+
+    /*!
+     * \brief Calculate the transmissibility multiplier due to water induced rock compaction.
+     *
+     * TODO: The API of this is a bit ad-hoc, it would be better to use context objects.
+     */
+    template <class LhsEval>
+    LhsEval computeRockCompTransMultiplier_(const IntensiveQuantities& intQuants, unsigned elementIdx) const
+    {
+        OPM_TIMEBLOCK_LOCAL(computeRockCompTransMultiplier);
+        if (this->rockCompTransMult_.empty() && this->rockCompTransMultWc_.empty())
+            return 1.0;
+
+        unsigned tableIdx = 0;
+        if (!this->rockTableIdx_.empty())
+            tableIdx = this->rockTableIdx_[elementIdx];
+
+        const auto& fs = intQuants.fluidState();
+        LhsEval effectivePressure = decay<LhsEval>(fs.pressure(refPressurePhaseIdx_()));
+
+        if (!this->minRefPressure_.empty())
+            // The pore space change is irreversible
+            effectivePressure =
+                min(decay<LhsEval>(fs.pressure(refPressurePhaseIdx_())),
+                    this->minRefPressure_[elementIdx]);
+
+        if (!this->overburdenPressure_.empty())
+            effectivePressure -= this->overburdenPressure_[elementIdx];
+
+        if (!this->rockCompTransMult_.empty())
+            return this->rockCompTransMult_[tableIdx].eval(effectivePressure, /*extrapolation=*/true);
+
+        // water compaction
+        assert(!this->rockCompTransMultWc_.empty());
+        LhsEval SwMax = max(decay<LhsEval>(fs.saturation(waterPhaseIdx)), this->maxWaterSaturation_[elementIdx]);
+        LhsEval SwDeltaMax = SwMax - initialFluidStates_[elementIdx].saturation(waterPhaseIdx);
+
+        return this->rockCompTransMultWc_[tableIdx].eval(effectivePressure, SwDeltaMax, /*extrapolation=*/true);
+    }
+
     typename Vanguard::TransmissibilityType transmissibilities_;
 
     std::shared_ptr<EclMaterialLawManager> materialLawManager_;
@@ -2648,7 +2805,7 @@ private:
     PffGridVector<GridView, Stencil, PffDofData_, DofMapper> pffDofData_;
     TracerModel tracerModel_;
 
-    EclActionHandler actionHandler_;
+    ActionHandler actionHandler_;
 
     template<class T>
     struct BCData

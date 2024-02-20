@@ -31,12 +31,17 @@
 #include <opm/output/data/Solution.hpp>
 
 #include <opm/input/eclipse/EclipseState/EclipseState.hpp>
+#include <opm/input/eclipse/EclipseState/Runspec.hpp>
 #include <opm/input/eclipse/EclipseState/SummaryConfig/SummaryConfig.hpp>
+#include <opm/input/eclipse/EclipseState/Tables/Regdims.hpp>
+#include <opm/input/eclipse/EclipseState/Tables/Tabdims.hpp>
+
 #include <opm/input/eclipse/Schedule/RFTConfig.hpp>
 #include <opm/input/eclipse/Schedule/Schedule.hpp>
 #include <opm/input/eclipse/Schedule/SummaryState.hpp>
 #include <opm/input/eclipse/Schedule/Well/Well.hpp>
 #include <opm/input/eclipse/Schedule/Well/WellConnections.hpp>
+
 #include <opm/input/eclipse/Units/Units.hpp>
 
 #include <opm/simulators/utils/PressureAverage.hpp>
@@ -45,9 +50,6 @@
 #include <cassert>
 #include <cstddef>
 #include <functional>
-#include <initializer_list>
-#include <iomanip>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -113,6 +115,21 @@ std::string EclString(const Opm::Inplace::Phase phase)
     case Opm::Inplace::Phase::WaterInWaterPhase:
         return "WIPL";
 
+    case Opm::Inplace::Phase::CO2Mass:
+        return "GMIP";
+
+    case Opm::Inplace::Phase::CO2MassInWaterPhase:
+        return "GMGP";
+
+    case Opm::Inplace::Phase::CO2MassInGasPhase:
+        return "GMDS";
+
+    case Opm::Inplace::Phase::CO2MassInGasPhaseInMob:
+        return "GMTR";
+        
+    case Opm::Inplace::Phase::CO2MassInGasPhaseMob:
+        return "GMMO";
+
     default:
         throw std::logic_error {
             fmt::format("Phase enum with integer value: "
@@ -126,11 +143,11 @@ std::string EclString(const Opm::Inplace::Phase phase)
         return eclState.fieldProps().get_int("FIPNUM").size();
     }
 
-    std::vector<Opm::EclInterRegFlowMap::SingleRegion>
+    std::vector<Opm::InterRegFlowMap::SingleRegion>
     defineInterRegionFlowArrays(const Opm::EclipseState&  eclState,
                                 const Opm::SummaryConfig& summaryConfig)
     {
-        auto regions = std::vector<Opm::EclInterRegFlowMap::SingleRegion>{};
+        auto regions = std::vector<Opm::InterRegFlowMap::SingleRegion>{};
 
         const auto& fprops = eclState.fieldProps();
         for (const auto& arrayName : summaryConfig.fip_regions_interreg_flow()) {
@@ -138,6 +155,12 @@ std::string EclString(const Opm::Inplace::Phase phase)
         }
 
         return regions;
+    }
+
+    std::size_t declaredMaxRegionID(const Opm::Runspec& rspec)
+    {
+        return std::max(rspec.tabdims().getNumFIPRegions(),
+                        rspec.regdims().getNTFIP());
     }
 }
 
@@ -149,6 +172,7 @@ EclGenericOutputBlackoilModule(const EclipseState& eclState,
                            const Schedule& schedule,
                            const SummaryConfig& summaryConfig,
                            const SummaryState& summaryState,
+                           const std::string& moduleVersion,
                            bool enableEnergy,
                            bool enableTemperature,
                            bool enableMech,
@@ -163,8 +187,10 @@ EclGenericOutputBlackoilModule(const EclipseState& eclState,
     , schedule_(schedule)
     , summaryConfig_(summaryConfig)
     , summaryState_(summaryState)
-    , interRegionFlows_(numCells(eclState), defineInterRegionFlowArrays(eclState, summaryConfig))
-    , logOutput_(eclState, schedule, summaryState)
+    , interRegionFlows_(numCells(eclState),
+                        defineInterRegionFlowArrays(eclState, summaryConfig),
+                        declaredMaxRegionID(eclState.runspec()))
+    , logOutput_(eclState, schedule, summaryState, moduleVersion)
     , enableEnergy_(enableEnergy)
     , enableTemperature_(enableTemperature)
     , enableMech_(enableMech)
@@ -180,8 +206,9 @@ EclGenericOutputBlackoilModule(const EclipseState& eclState,
     const auto& fp = eclState_.fieldProps();
 
     this->regions_["FIPNUM"] = fp.get_int("FIPNUM");
-    for (const auto& region : summaryConfig_.fip_regions())
+    for (const auto& region : fp.fip_regions()) {
         this->regions_[region] = fp.get_int(region);
+    }
 
     this->RPRNodes_  = summaryConfig_.keywords("RPR*");
     this->RPRPNodes_ = summaryConfig_.keywords("RPRP*");
@@ -202,7 +229,7 @@ EclGenericOutputBlackoilModule(const EclipseState& eclState,
     enableFlows_ = false;
     enableFlowsn_ = false;
 
-    for (const auto& block : this->schedule_) { // Uses Schedule::begin() and Schedule::end()
+    for (const auto& block : this->schedule_) {
         const auto& rstkw = block.rst_config().keywords;
 
         if (! anyFlores_) {
@@ -228,54 +255,66 @@ EclGenericOutputBlackoilModule<FluidSystem,Scalar>::
 
 template<class FluidSystem, class Scalar>
 void EclGenericOutputBlackoilModule<FluidSystem,Scalar>::
-outputCumLog(std::size_t reportStepNum, const bool substep, bool forceDisableCumOutput)
+outputTimeStamp(const std::string& lbl, double elapsed, int rstep, boost::posix_time::ptime currentDate)
 {
-    if (!substep && !forceDisableCumOutput) {
-        logOutput_.cumulative(reportStepNum,
-                              [this](const std::string& name)
-                              { return this->isDefunctParallelWell(name); });
-    }
+    logOutput_.timeStamp(lbl, elapsed, rstep, currentDate);
+}
+
+template<class FluidSystem, class Scalar>
+void EclGenericOutputBlackoilModule<FluidSystem,Scalar>::
+outputCumLog(std::size_t reportStepNum)
+{
+    this->logOutput_.cumulative(reportStepNum);
 }
 
 template<class FluidSystem,class Scalar>
 void EclGenericOutputBlackoilModule<FluidSystem,Scalar>::
-outputProdLog(std::size_t reportStepNum,
-              const bool substep,
-              bool forceDisableProdOutput)
+outputProdLog(std::size_t reportStepNum)
 {
-    if (!substep && !forceDisableProdOutput) {
-        logOutput_.production(reportStepNum,
-                              [this](const std::string& name)
-                              { return this->isDefunctParallelWell(name); });
-    }
+    this->logOutput_.production(reportStepNum);
 }
 
 template<class FluidSystem,class Scalar>
 void EclGenericOutputBlackoilModule<FluidSystem,Scalar>::
-outputInjLog(std::size_t reportStepNum, const bool substep, bool forceDisableInjOutput)
+outputInjLog(std::size_t reportStepNum)
 {
-    if (!substep && !forceDisableInjOutput) {
-        logOutput_.injection(reportStepNum,
-                             [this](const std::string& name)
-                             { return this->isDefunctParallelWell(name); });
-    }
+    this->logOutput_.injection(reportStepNum);
 }
+
 
 template<class FluidSystem,class Scalar>
 Inplace EclGenericOutputBlackoilModule<FluidSystem,Scalar>::
-outputFipLog(std::map<std::string, double>& miscSummaryData,
+calc_inplace(std::map<std::string, double>& miscSummaryData,
              std::map<std::string, std::vector<double>>& regionData,
-             const std::size_t reportStepNum,
-             const bool substep,
              const Parallel::Communication& comm)
 {
     auto inplace = this->accumulateRegionSums(comm);
+    
     if (comm.rank() != 0)
         return inplace;
 
     updateSummaryRegionValues(inplace,
                               miscSummaryData,
                               regionData);
+
+    
+    return inplace;
+}
+
+
+template<class FluidSystem,class Scalar>
+void EclGenericOutputBlackoilModule<FluidSystem,Scalar>::
+outputFipAndResvLog(const Inplace& inplace,
+                         const std::size_t reportStepNum,
+                         double elapsed,
+                         boost::posix_time::ptime currentDate,
+                         const bool substep,
+                         const Parallel::Communication& comm)
+{
+
+    if (comm.rank() != 0)
+        return;
+
 
     // For report step 0 we use the RPTSOL config, else derive from RPTSCHED
     std::unique_ptr<FIPConfig> fipSched;
@@ -287,53 +326,34 @@ outputFipLog(std::map<std::string, double>& miscSummaryData,
                                                : *fipSched;
 
     if (!substep && !forceDisableFipOutput_ && fipc.output(FIPConfig::OutputField::FIELD)) {
-        logOutput_.fip(inplace, this->initialInplace(), "");
-        if (fipc.output(FIPConfig::OutputField::FIPNUM)) {
-            logOutput_.fip(inplace, this->initialInplace(), "FIPNUM");
+
+        logOutput_.timeStamp("BALANCE", elapsed, reportStepNum, currentDate);
+
+        logOutput_.fip(inplace, this->initialInplace(), "");  
+        
+        if (fipc.output(FIPConfig::OutputField::FIPNUM)) { 
+            logOutput_.fip(inplace, this->initialInplace(), "FIPNUM");    
+            
+            if (fipc.output(FIPConfig::OutputField::RESV))
+                logOutput_.fipResv(inplace, "FIPNUM"); 
         }
+        
         if (fipc.output(FIPConfig::OutputField::FIP)) {
             for (const auto& reg : this->regions_) {
                 if (reg.first != "FIPNUM") {
+                    std::ostringstream ss;
+                    ss << "BAL" << reg.first.substr(3);
+                    logOutput_.timeStamp(ss.str(), elapsed, reportStepNum, currentDate);
                     logOutput_.fip(inplace, this->initialInplace(), reg.first);
+                    
+                    if (fipc.output(FIPConfig::OutputField::RESV))
+                        logOutput_.fipResv(inplace, reg.first); 
                 }
             }
         }
     }
-
-    return inplace;
 }
 
-template<class FluidSystem,class Scalar>
-Inplace EclGenericOutputBlackoilModule<FluidSystem,Scalar>::
-outputFipresvLog(std::map<std::string, double>& miscSummaryData,
-                 std::map<std::string, std::vector<double>>& regionData,
-                 const std::size_t reportStepNum,
-                 const bool substep,
-                 const Parallel::Communication& comm)
-{
-    auto inplace = this->accumulateRegionSums(comm);
-    if (comm.rank() != 0)
-        return inplace;
-
-    updateSummaryRegionValues(inplace,
-                              miscSummaryData,
-                              regionData);
-
-    // For report step 0 we use the RPTSOL config, else derive from RPTSCHED
-    std::unique_ptr<FIPConfig> fipSched;
-    if (reportStepNum != 0) {
-        const auto& rpt = this->schedule_[reportStepNum].rpt_config.get();
-        fipSched = std::make_unique<FIPConfig>(rpt);
-    }
-    const FIPConfig& fipc = reportStepNum == 0 ? this->eclState_.getEclipseConfig().fip()
-                                               : *fipSched;
-
-    if (!substep && !forceDisableFipresvOutput_ && fipc.output(FIPConfig::OutputField::RESV)) {
-        logOutput_.fipResv(inplace);
-    }
-
-    return inplace;
-}
 
 template<class FluidSystem,class Scalar>
 void EclGenericOutputBlackoilModule<FluidSystem,Scalar>::
@@ -409,15 +429,15 @@ assignToSolution(data::Solution& sol)
         DataEntry{"1OVERBG",  UnitSystem::measure::gas_inverse_formation_volume_factor,   invB_[gasPhaseIdx]},
         DataEntry{"1OVERBO",  UnitSystem::measure::oil_inverse_formation_volume_factor,   invB_[oilPhaseIdx]},
         DataEntry{"1OVERBW",  UnitSystem::measure::water_inverse_formation_volume_factor, invB_[waterPhaseIdx]},
-        DataEntry{"FLRGASI+", UnitSystem::measure::rate,                                  floresi_[gasCompIdx]},
-        DataEntry{"FLRGASJ+", UnitSystem::measure::rate,                                  floresj_[gasCompIdx]},
-        DataEntry{"FLRGASK+", UnitSystem::measure::rate,                                  floresk_[gasCompIdx]},
-        DataEntry{"FLROILI+", UnitSystem::measure::rate,                                  floresi_[oilCompIdx]},
-        DataEntry{"FLROILJ+", UnitSystem::measure::rate,                                  floresj_[oilCompIdx]},
-        DataEntry{"FLROILK+", UnitSystem::measure::rate,                                  floresk_[oilCompIdx]},
-        DataEntry{"FLRWATI+", UnitSystem::measure::rate,                                  floresi_[waterCompIdx]},
-        DataEntry{"FLRWATJ+", UnitSystem::measure::rate,                                  floresj_[waterCompIdx]},
-        DataEntry{"FLRWATK+", UnitSystem::measure::rate,                                  floresk_[waterCompIdx]},
+        DataEntry{"FLRGASI+", UnitSystem::measure::rate,                                  flores_[FaceDir::ToIntersectionIndex(Dir::XPlus)][gasCompIdx]},
+        DataEntry{"FLRGASJ+", UnitSystem::measure::rate,                                  flores_[FaceDir::ToIntersectionIndex(Dir::YPlus)][gasCompIdx]},
+        DataEntry{"FLRGASK+", UnitSystem::measure::rate,                                  flores_[FaceDir::ToIntersectionIndex(Dir::ZPlus)][gasCompIdx]},
+        DataEntry{"FLROILI+", UnitSystem::measure::rate,                                  flores_[FaceDir::ToIntersectionIndex(Dir::XPlus)][oilCompIdx]},
+        DataEntry{"FLROILJ+", UnitSystem::measure::rate,                                  flores_[FaceDir::ToIntersectionIndex(Dir::YPlus)][oilCompIdx]},
+        DataEntry{"FLROILK+", UnitSystem::measure::rate,                                  flores_[FaceDir::ToIntersectionIndex(Dir::ZPlus)][oilCompIdx]},
+        DataEntry{"FLRWATI+", UnitSystem::measure::rate,                                  flores_[FaceDir::ToIntersectionIndex(Dir::XPlus)][waterCompIdx]},
+        DataEntry{"FLRWATJ+", UnitSystem::measure::rate,                                  flores_[FaceDir::ToIntersectionIndex(Dir::YPlus)][waterCompIdx]},
+        DataEntry{"FLRWATK+", UnitSystem::measure::rate,                                  flores_[FaceDir::ToIntersectionIndex(Dir::ZPlus)][waterCompIdx]},
         DataEntry{"FOAM",     UnitSystem::measure::identity,                              cFoam_},
         DataEntry{"GASKR",    UnitSystem::measure::identity,                              relativePermeability_[gasPhaseIdx]},
         DataEntry{"GAS_DEN",  UnitSystem::measure::density,                               density_[gasPhaseIdx]},
@@ -426,6 +446,7 @@ assignToSolution(data::Solution& sol)
         DataEntry{"OIL_DEN",  UnitSystem::measure::density,                               density_[oilPhaseIdx]},
         DataEntry{"OIL_VISC", UnitSystem::measure::viscosity,                             viscosity_[oilPhaseIdx]},
         DataEntry{"PBUB",     UnitSystem::measure::pressure,                              bubblePointPressure_},
+        DataEntry{"PCGW",     UnitSystem::measure::pressure,                              pcgw_},
         DataEntry{"PCOG",     UnitSystem::measure::pressure,                              pcog_},
         DataEntry{"PCOW",     UnitSystem::measure::pressure,                              pcow_},
         DataEntry{"PDEW",     UnitSystem::measure::pressure,                              dewPointPressure_},
@@ -433,6 +454,7 @@ assignToSolution(data::Solution& sol)
         DataEntry{"PPCW",     UnitSystem::measure::pressure,                              ppcw_},
         DataEntry{"PRESROCC", UnitSystem::measure::pressure,                              minimumOilPressure_},
         DataEntry{"PRESSURE", UnitSystem::measure::pressure,                              fluidPressure_},
+        DataEntry{"RPORV",    UnitSystem::measure::volume,                                rPorV_},
         DataEntry{"RS",       UnitSystem::measure::gas_oil_ratio,                         rs_},
         DataEntry{"RSSAT",    UnitSystem::measure::gas_oil_ratio,                         gasDissolutionFactor_},
         DataEntry{"RV",       UnitSystem::measure::oil_gas_ratio,                         rv_},
@@ -448,15 +470,33 @@ assignToSolution(data::Solution& sol)
 
     // Separate these as flows*_ may be defined due to BFLOW[I|J|K] even without FLOWS in RPTRST
     const auto flowsSolutionArrays = std::array {
-        DataEntry{"FLOGASI+", UnitSystem::measure::gas_surface_rate,                      flowsi_[gasCompIdx]},
-        DataEntry{"FLOGASJ+", UnitSystem::measure::gas_surface_rate,                      flowsj_[gasCompIdx]},
-        DataEntry{"FLOGASK+", UnitSystem::measure::gas_surface_rate,                      flowsk_[gasCompIdx]},
-        DataEntry{"FLOOILI+", UnitSystem::measure::liquid_surface_rate,                   flowsi_[oilCompIdx]},
-        DataEntry{"FLOOILJ+", UnitSystem::measure::liquid_surface_rate,                   flowsj_[oilCompIdx]},
-        DataEntry{"FLOOILK+", UnitSystem::measure::liquid_surface_rate,                   flowsk_[oilCompIdx]},
-        DataEntry{"FLOWATI+", UnitSystem::measure::liquid_surface_rate,                   flowsi_[waterCompIdx]},
-        DataEntry{"FLOWATJ+", UnitSystem::measure::liquid_surface_rate,                   flowsj_[waterCompIdx]},
-        DataEntry{"FLOWATK+", UnitSystem::measure::liquid_surface_rate,                   flowsk_[waterCompIdx]},
+        DataEntry{"FLOGASI+", UnitSystem::measure::gas_surface_rate,                      flows_[FaceDir::ToIntersectionIndex(Dir::XPlus)][gasCompIdx]},
+        DataEntry{"FLOGASJ+", UnitSystem::measure::gas_surface_rate,                      flows_[FaceDir::ToIntersectionIndex(Dir::YPlus)][gasCompIdx]},
+        DataEntry{"FLOGASK+", UnitSystem::measure::gas_surface_rate,                      flows_[FaceDir::ToIntersectionIndex(Dir::ZPlus)][gasCompIdx]},
+        DataEntry{"FLOOILI+", UnitSystem::measure::liquid_surface_rate,                   flows_[FaceDir::ToIntersectionIndex(Dir::XPlus)][oilCompIdx]},
+        DataEntry{"FLOOILJ+", UnitSystem::measure::liquid_surface_rate,                   flows_[FaceDir::ToIntersectionIndex(Dir::YPlus)][oilCompIdx]},
+        DataEntry{"FLOOILK+", UnitSystem::measure::liquid_surface_rate,                   flows_[FaceDir::ToIntersectionIndex(Dir::ZPlus)][oilCompIdx]},
+        DataEntry{"FLOWATI+", UnitSystem::measure::liquid_surface_rate,                   flows_[FaceDir::ToIntersectionIndex(Dir::XPlus)][waterCompIdx]},
+        DataEntry{"FLOWATJ+", UnitSystem::measure::liquid_surface_rate,                   flows_[FaceDir::ToIntersectionIndex(Dir::YPlus)][waterCompIdx]},
+        DataEntry{"FLOWATK+", UnitSystem::measure::liquid_surface_rate,                   flows_[FaceDir::ToIntersectionIndex(Dir::ZPlus)][waterCompIdx]},
+        DataEntry{"FLOGASI-", UnitSystem::measure::gas_surface_rate,                      flows_[FaceDir::ToIntersectionIndex(Dir::XMinus)][gasCompIdx]},
+        DataEntry{"FLOGASJ-", UnitSystem::measure::gas_surface_rate,                      flows_[FaceDir::ToIntersectionIndex(Dir::YMinus)][gasCompIdx]},
+        DataEntry{"FLOGASK-", UnitSystem::measure::gas_surface_rate,                      flows_[FaceDir::ToIntersectionIndex(Dir::ZMinus)][gasCompIdx]},
+        DataEntry{"FLOOILI-", UnitSystem::measure::liquid_surface_rate,                   flows_[FaceDir::ToIntersectionIndex(Dir::XMinus)][oilCompIdx]},
+        DataEntry{"FLOOILJ-", UnitSystem::measure::liquid_surface_rate,                   flows_[FaceDir::ToIntersectionIndex(Dir::YMinus)][oilCompIdx]},
+        DataEntry{"FLOOILK-", UnitSystem::measure::liquid_surface_rate,                   flows_[FaceDir::ToIntersectionIndex(Dir::ZMinus)][oilCompIdx]},
+        DataEntry{"FLOWATI-", UnitSystem::measure::liquid_surface_rate,                   flows_[FaceDir::ToIntersectionIndex(Dir::XMinus)][waterCompIdx]},
+        DataEntry{"FLOWATJ-", UnitSystem::measure::liquid_surface_rate,                   flows_[FaceDir::ToIntersectionIndex(Dir::YMinus)][waterCompIdx]},
+        DataEntry{"FLOWATK-", UnitSystem::measure::liquid_surface_rate,                   flows_[FaceDir::ToIntersectionIndex(Dir::ZMinus)][waterCompIdx]},
+        DataEntry{"FLRGASI-", UnitSystem::measure::rate,                                  flores_[FaceDir::ToIntersectionIndex(Dir::XMinus)][gasCompIdx]},
+        DataEntry{"FLRGASJ-", UnitSystem::measure::rate,                                  flores_[FaceDir::ToIntersectionIndex(Dir::YMinus)][gasCompIdx]},
+        DataEntry{"FLRGASK-", UnitSystem::measure::rate,                                  flores_[FaceDir::ToIntersectionIndex(Dir::ZMinus)][gasCompIdx]},
+        DataEntry{"FLROILI-", UnitSystem::measure::rate,                                  flores_[FaceDir::ToIntersectionIndex(Dir::XMinus)][oilCompIdx]},
+        DataEntry{"FLROILJ-", UnitSystem::measure::rate,                                  flores_[FaceDir::ToIntersectionIndex(Dir::YMinus)][oilCompIdx]},
+        DataEntry{"FLROILK-", UnitSystem::measure::rate,                                  flores_[FaceDir::ToIntersectionIndex(Dir::ZMinus)][oilCompIdx]},
+        DataEntry{"FLRWATI-", UnitSystem::measure::rate,                                  flores_[FaceDir::ToIntersectionIndex(Dir::XMinus)][waterCompIdx]},
+        DataEntry{"FLRWATJ-", UnitSystem::measure::rate,                                  flores_[FaceDir::ToIntersectionIndex(Dir::YMinus)][waterCompIdx]},
+        DataEntry{"FLRWATK-", UnitSystem::measure::rate,                                  flores_[FaceDir::ToIntersectionIndex(Dir::ZMinus)][waterCompIdx]},
     };
 
     const auto extendedSolutionArrays = std::array {
@@ -484,6 +524,7 @@ assignToSolution(data::Solution& sol)
         DataEntry{"PRESPOTF", UnitSystem::measure::pressure,           mechPotentialPressForce_},
         DataEntry{"PRES_OVB", UnitSystem::measure::pressure,           overburdenPressure_},
         DataEntry{"RSW",      UnitSystem::measure::gas_oil_ratio,      rsw_},
+        DataEntry{"RSWSOL",   UnitSystem::measure::gas_oil_ratio,      rswSol_},
         DataEntry{"RVW",      UnitSystem::measure::oil_gas_ratio,      rvw_},
         DataEntry{"SALTP",    UnitSystem::measure::identity,           pSalt_},
         DataEntry{"SS_X",     UnitSystem::measure::identity,           extboX_},
@@ -643,23 +684,29 @@ setRestart(const data::Solution& sol,
 {
     Scalar so = 1.0;
     if (!saturation_[waterPhaseIdx].empty() && sol.has("SWAT")) {
-        saturation_[waterPhaseIdx][elemIdx] = sol.data("SWAT")[globalDofIndex];
-        so -= sol.data("SWAT")[globalDofIndex];
+        saturation_[waterPhaseIdx][elemIdx] = sol.data<double>("SWAT")[globalDofIndex];
+        so -= sol.data<double>("SWAT")[globalDofIndex];
     }
     if (!saturation_[gasPhaseIdx].empty() && sol.has("SGAS")) {
-        saturation_[gasPhaseIdx][elemIdx] = sol.data("SGAS")[globalDofIndex];
-        so -= sol.data("SGAS")[globalDofIndex];
+        saturation_[gasPhaseIdx][elemIdx] = sol.data<double>("SGAS")[globalDofIndex];
+        so -= sol.data<double>("SGAS")[globalDofIndex];
     }
 
     if (!sSol_.empty()) {
         // keep the SSOL option for backward compatibility
         // should be removed after 10.2018 release
         if (sol.has("SSOL"))
-            sSol_[elemIdx] = sol.data("SSOL")[globalDofIndex];
+            sSol_[elemIdx] = sol.data<double>("SSOL")[globalDofIndex];
         else if (sol.has("SSOLVENT"))
-            sSol_[elemIdx] = sol.data("SSOLVENT")[globalDofIndex];
+            sSol_[elemIdx] = sol.data<double>("SSOLVENT")[globalDofIndex];
 
         so -= sSol_[elemIdx];
+    }
+
+    if (!rswSol_.empty()) {
+        if (sol.has("RSWSOL"))
+            rswSol_[elemIdx] = sol.data<Scalar>("RSWSOL")[globalDofIndex];
+
     }
 
     assert(!saturation_[oilPhaseIdx].empty());
@@ -670,7 +717,7 @@ setRestart(const data::Solution& sol,
 
     {
         if (!data.empty() && sol.has(name)) {
-            data[elemIdx] = sol.data(name)[globalDofIndex];
+            data[elemIdx] = sol.data<double>(name)[globalDofIndex];
         }
     };
 
@@ -717,8 +764,13 @@ regionSum(const ScalarBuffer& property,
         if (property.empty())
             return totals;
 
-        assert(regionId.size() == property.size());
-        for (std::size_t j = 0; j < regionId.size(); ++j) {
+        // the regionId contains the ghost cells
+        // the property does not contain the ghostcells
+        // This code assumes that that the ghostcells are
+        // added after the interior cells
+        // OwnerCellsFirst = True
+        assert(regionId.size() >= property.size());
+        for (std::size_t j = 0; j < property.size(); ++j) {
             const int regionIdx = regionId[j] - 1;
             // the cell is not attributed to any region. ignore it!
             if (regionIdx < 0)
@@ -847,9 +899,9 @@ doAllocBuffers(const unsigned bufferSize,
 
         for (unsigned ii = 0; ii < phaseIdxs.size(); ++ii) {
             if (FluidSystem::phaseIsActive(phaseIdxs[ii])) {
-                flowsi_[compIdxs[ii]].resize(bufferSize, 0.0);
-                flowsj_[compIdxs[ii]].resize(bufferSize, 0.0);
-                flowsk_[compIdxs[ii]].resize(bufferSize, 0.0);
+                flows_[FaceDir::ToIntersectionIndex(Dir::XPlus)][compIdxs[ii]].resize(bufferSize, 0.0);
+                flows_[FaceDir::ToIntersectionIndex(Dir::YPlus)][compIdxs[ii]].resize(bufferSize, 0.0);
+                flows_[FaceDir::ToIntersectionIndex(Dir::ZPlus)][compIdxs[ii]].resize(bufferSize, 0.0);
             }
         }
     }
@@ -976,6 +1028,9 @@ doAllocBuffers(const unsigned bufferSize,
 
     if (enableSolvent_) {
         sSol_.resize(bufferSize, 0.0);
+        if (eclState_.getSimulationConfig().hasDISGASW()) {
+            rswSol_.resize(bufferSize, 0.0);
+        }
     }
 
     if (enablePolymer_) {
@@ -1049,6 +1104,10 @@ doAllocBuffers(const unsigned bufferSize,
         rstKeywords["BG"] = 0;
         invB_[gasPhaseIdx].resize(bufferSize, 0.0);
     }
+    if (rstKeywords["RPORV"] > 0) {
+        rstKeywords["RPORV"] = 0;
+        rPorV_.resize(bufferSize, 0.0);
+    }
 
     enableFlows_ = false;
     enableFlowsn_ = false;
@@ -1064,9 +1123,15 @@ doAllocBuffers(const unsigned bufferSize,
         for (unsigned ii = 0; ii < phaseIdxs.size(); ++ii) {
             if (FluidSystem::phaseIsActive(phaseIdxs[ii])) {
                 if (!blockFlows_) { // Already allocated if summary vectors requested
-                    flowsi_[compIdxs[ii]].resize(bufferSize, 0.0);
-                    flowsj_[compIdxs[ii]].resize(bufferSize, 0.0);
-                    flowsk_[compIdxs[ii]].resize(bufferSize, 0.0);
+                    flows_[FaceDir::ToIntersectionIndex(Dir::XPlus)][compIdxs[ii]].resize(bufferSize, 0.0);
+                    flows_[FaceDir::ToIntersectionIndex(Dir::YPlus)][compIdxs[ii]].resize(bufferSize, 0.0);
+                    flows_[FaceDir::ToIntersectionIndex(Dir::ZPlus)][compIdxs[ii]].resize(bufferSize, 0.0);
+                }
+
+                if (rstKeywords["FLOWS-"] > 0) {
+                    flows_[FaceDir::ToIntersectionIndex(Dir::XMinus)][compIdxs[ii]].resize(bufferSize, 0.0);
+                    flows_[FaceDir::ToIntersectionIndex(Dir::YMinus)][compIdxs[ii]].resize(bufferSize, 0.0);
+                    flows_[FaceDir::ToIntersectionIndex(Dir::ZMinus)][compIdxs[ii]].resize(bufferSize, 0.0);  
                 }
 
                 if (numOutputNnc > 0) {
@@ -1077,6 +1142,9 @@ doAllocBuffers(const unsigned bufferSize,
                     flowsn_[compIdxs[ii]].second.second.resize(numOutputNnc, 0.0);
                 }
             }
+        }
+        if (rstKeywords["FLOWS-"] > 0) {
+            rstKeywords["FLOWS-"] = 0;
         }
     }
 
@@ -1092,9 +1160,15 @@ doAllocBuffers(const unsigned bufferSize,
 
         for (unsigned ii = 0; ii < phaseIdxs.size(); ++ii) {
             if (FluidSystem::phaseIsActive(phaseIdxs[ii])) {
-                floresi_[compIdxs[ii]].resize(bufferSize, 0.0);
-                floresj_[compIdxs[ii]].resize(bufferSize, 0.0);
-                floresk_[compIdxs[ii]].resize(bufferSize, 0.0);
+                flores_[FaceDir::ToIntersectionIndex(Dir::XPlus)][compIdxs[ii]].resize(bufferSize, 0.0);
+                flores_[FaceDir::ToIntersectionIndex(Dir::YPlus)][compIdxs[ii]].resize(bufferSize, 0.0);
+                flores_[FaceDir::ToIntersectionIndex(Dir::ZPlus)][compIdxs[ii]].resize(bufferSize, 0.0);
+
+                if (rstKeywords["FLORES-"] > 0) {
+                    flores_[FaceDir::ToIntersectionIndex(Dir::XMinus)][compIdxs[ii]].resize(bufferSize, 0.0);
+                    flores_[FaceDir::ToIntersectionIndex(Dir::YMinus)][compIdxs[ii]].resize(bufferSize, 0.0);
+                    flores_[FaceDir::ToIntersectionIndex(Dir::ZMinus)][compIdxs[ii]].resize(bufferSize, 0.0);  
+                }
 
                 if (numOutputNnc > 0) {
                     enableFloresn_ = true;
@@ -1104,6 +1178,9 @@ doAllocBuffers(const unsigned bufferSize,
                     floresn_[compIdxs[ii]].second.second.resize(numOutputNnc, 0.0);
                 }
             }
+        }
+        if (rstKeywords["FLORES-"] > 0) {
+            rstKeywords["FLORES-"] = 0;
         }
     }
 
@@ -1164,6 +1241,10 @@ doAllocBuffers(const unsigned bufferSize,
         relativePermeability_[gasPhaseIdx].resize(bufferSize, 0.0);
     }
 
+    if (FluidSystem::phaseIsActive(gasPhaseIdx) && FluidSystem::phaseIsActive(waterPhaseIdx) && rstKeywords["PCGW"] > 0) {
+        rstKeywords["PCGW"] = 0;
+        pcgw_.resize(bufferSize, 0.0);
+    }
     if (FluidSystem::phaseIsActive(oilPhaseIdx) && FluidSystem::phaseIsActive(waterPhaseIdx) && rstKeywords["PCOW"] > 0) {
         rstKeywords["PCOW"] = 0;
         pcow_.resize(bufferSize, 0.0);
@@ -1214,7 +1295,7 @@ doAllocBuffers(const unsigned bufferSize,
             if (keyValue.second > 0) {
                 std::string logstring = "Keyword '";
                 logstring.append(keyValue.first);
-                logstring.append("' is unhandled for output to file.");
+                logstring.append("' is unhandled for output to restart file.");
                 OpmLog::warning("Unhandled output keyword", logstring);
             }
         }
@@ -1448,6 +1529,21 @@ setupBlockData(std::function<bool(int)> isCartIdxOnThisRank)
                                      std::forward_as_tuple(node.keyword(),
                                                            node.number()),
                                      std::forward_as_tuple(0.0));
+        }
+    }
+}
+
+template<class FluidSystem, class Scalar>
+void EclGenericOutputBlackoilModule<FluidSystem,Scalar>::
+assignGlobalFieldsToSolution(data::Solution& sol)
+{
+    if (!this->cnvData_.empty()) {
+        constexpr const std::array names{"CNV_OIL", "CNV_GAS", "CNV_WAT",
+                                         "CNV_PLY", "CNV_SAL", "CNV_SOL"};
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            if (!this->cnvData_[i].empty()) {
+                sol.insert(names[i], this->cnvData_[i], data::TargetType::RESTART_SOLUTION);
+            }
         }
     }
 }

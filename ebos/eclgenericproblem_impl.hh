@@ -103,9 +103,10 @@ serializationTestObject(const EclipseState& eclState,
     EclGenericProblem result(eclState, schedule, gridView);
     result.maxOilSaturation_ = {1.0, 2.0};
     result.maxWaterSaturation_ = {6.0};
-    result.minOilPressure_ = {7.0, 8.0, 9.0, 10.0};
+    result.minRefPressure_ = {7.0, 8.0, 9.0, 10.0};
     result.overburdenPressure_ = {11.0};
     result.solventSaturation_ = {15.0};
+    result.solventRsw_ = {18.0};
     result.polymer_ = PolymerSolutionContainer<Scalar>::serializationTestObject();
     result.micp_ = MICPSolutionContainer<Scalar>::serializationTestObject();
     result.mixControls_ = EclMixingRateControls<FluidSystem,Scalar>::serializationTestObject(schedule);
@@ -191,7 +192,7 @@ readRockParameters_(const std::vector<Scalar>& cellCenterDepths,
 
         rockTableIdx_ = this->lookUpData_.template assignFieldPropsIntOnLeaf<short unsigned int>(eclState_.fieldProps(),
                                                                                                  rock_config.rocknum_property(),
-                                                                                                 numElem, true /*needsTranslation*/,
+                                                                                                 true /*needsTranslation*/,
                                                                                                  valueCheck);
     }
 
@@ -237,7 +238,7 @@ readRockCompactionParameters_()
     case RockConfig::Hysteresis::IRREVERS:
         // interpolate the porv volume multiplier using the minimum pressure in the cell
         // i.e. don't allow re-inflation.
-        minOilPressure_.resize(numElem, 1e99);
+        minRefPressure_.resize(numElem, 1e99);
         break;
     default:
         throw std::runtime_error("Not support ROCKOMP hysteresis option ");
@@ -369,7 +370,6 @@ updateNum(const std::string& name, std::vector<T>& numbers, std::size_t num_regi
     if (!eclState_.fieldProps().has_int(name))
         return;
 
-    unsigned numElems = gridView_.size(/*codim=*/0);
     std::function<void(T, int)> valueCheck = [num_regions,name](T fieldPropValue, [[maybe_unused]] int fieldPropIdx) {
         if ( fieldPropValue > (int)num_regions) {
             throw std::runtime_error("Values larger than maximum number of regions "
@@ -380,7 +380,7 @@ updateNum(const std::string& name, std::vector<T>& numbers, std::size_t num_regi
         }
     };
 
-    numbers = this->lookUpData_.template assignFieldPropsIntOnLeaf<T>(eclState_.fieldProps(), name, numElems,
+    numbers = this->lookUpData_.template assignFieldPropsIntOnLeaf<T>(eclState_.fieldProps(), name,
                                                                       true /*needsTranslation*/, valueCheck);
 }
 
@@ -529,6 +529,11 @@ readBlackoilExtentionsInitialConditions_(std::size_t numDof,
             solventSaturation_ = eclState_.fieldProps().get_double("SSOL");
         else
             solventSaturation_.resize(numDof, 0.0);
+
+        //if (eclState_.fieldProps().has_double("SSOL"))
+        //    solventRsw_ = eclState_.fieldProps().get_double("SSOL");
+        //else
+            solventRsw_.resize(numDof, 0.0);
     }
 
     if (enablePolymer) {
@@ -591,10 +596,10 @@ template<class GridView, class FluidSystem, class Scalar>
 Scalar EclGenericProblem<GridView,FluidSystem,Scalar>::
 minOilPressure(unsigned globalDofIdx) const
 {
-    if (minOilPressure_.empty())
+    if (minRefPressure_.empty())
         return 0.0;
 
-    return minOilPressure_[globalDofIdx];
+    return minRefPressure_[globalDofIdx];
 }
 
 template<class GridView, class FluidSystem, class Scalar>
@@ -615,6 +620,17 @@ solventSaturation(unsigned elemIdx) const
         return 0;
 
     return solventSaturation_[elemIdx];
+}
+
+
+template<class GridView, class FluidSystem, class Scalar>
+Scalar EclGenericProblem<GridView,FluidSystem,Scalar>::
+solventRsw(unsigned elemIdx) const
+{
+    if (solventRsw_.empty())
+        return 0;
+
+    return solventRsw_[elemIdx];
 }
 
 template<class GridView, class FluidSystem, class Scalar>
@@ -758,9 +774,10 @@ bool EclGenericProblem<GridView,FluidSystem,Scalar>::
 operator==(const EclGenericProblem& rhs) const
 {
     return this->maxWaterSaturation_ == rhs.maxWaterSaturation_ &&
-           this->minOilPressure_ == rhs.minOilPressure_ &&
+           this->minRefPressure_ == rhs.minRefPressure_ &&
            this->overburdenPressure_ == rhs.overburdenPressure_ &&
            this->solventSaturation_ == rhs.solventSaturation_ &&
+           this->solventRsw_ == rhs.solventRsw_ &&
            this->polymer_ == rhs.polymer_ &&
            this->micp_ == rhs.micp_ &&
            this->mixControls_ == rhs.mixControls_;

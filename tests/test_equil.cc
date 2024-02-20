@@ -39,7 +39,7 @@
 #include <opm/models/utils/start.hh>
 #include <opm/simulators/linalg/parallelbicgstabbackend.hh>
 
-#include <opm/simulators/flow/BlackoilModelParametersEbos.hpp>
+#include <opm/simulators/flow/BlackoilModelParameters.hpp>
 #include <opm/simulators/wells/BlackoilWellModel.hpp>
 
 #if HAVE_DUNE_FEM
@@ -49,18 +49,13 @@
 #endif
 
 #include <array>
-#include <cmath>
 #include <cstdlib>
-#include <exception>
+#include <cstring>
 #include <iostream>
-#include <limits>
 #include <memory>
 #include <numeric>
-#include <sstream>
-#include <stdexcept>
 #include <string>
 #include <vector>
-#include <string.h>
 
 #include <boost/test/unit_test.hpp>
 #include <boost/version.hpp>
@@ -238,8 +233,8 @@ struct EquilFixture {
         Dune::MPIHelper::instance(argc, argv);
 #endif
         Opm::EclGenericVanguard::setCommunication(std::make_unique<Opm::Parallel::Communication>());
-        Opm::BlackoilModelParametersEbos<TypeTag>::registerParameters();
-        Opm::AdaptiveTimeSteppingEbos<TypeTag>::registerParameters();
+        Opm::BlackoilModelParameters<TypeTag>::registerParameters();
+        Opm::AdaptiveTimeStepping<TypeTag>::registerParameters();
         Opm::Parameters::registerParam<TypeTag, bool>("EnableTerminalOutput",
                                                       "EnableTerminalOutput",
                                                       Opm::getPropValue<TypeTag, Opm::Properties::EnableTerminalOutput>(),
@@ -275,6 +270,9 @@ BOOST_AUTO_TEST_CASE(PhasePressure)
     std::vector<double> y = {0.0,0.0};
     Opm::Tabulated1DFunction<double> trivialSaltVdTable{2,x,y};
 
+    std::vector<double> yT = {298.15,298.15};
+    Opm::Tabulated1DFunction<double> trivialTempVdTable{2, x, yT};
+
     auto simulator = initSimulator<TypeTag>("equil_base.DATA");
     initDefaultFluidSystem<TypeTag>();
 
@@ -283,6 +281,7 @@ BOOST_AUTO_TEST_CASE(PhasePressure)
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
+        trivialTempVdTable,
         trivialSaltVdTable,
         0
     };
@@ -334,12 +333,16 @@ BOOST_AUTO_TEST_CASE(CellSubset)
     std::vector<double> y = {0.0,0.0};
     Opm::Tabulated1DFunction<double> trivialSaltVdTable{2, x, y};
 
+    std::vector<double> yT = {298.15,298.15};
+    Opm::Tabulated1DFunction<double> trivialTempVdTable{2, x, yT};
+
     const Opm::EQUIL::EquilReg region[] =
     {
         Opm::EQUIL::EquilReg(record[0],
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
+        trivialTempVdTable,
         trivialSaltVdTable,
         0)
         ,
@@ -347,6 +350,7 @@ BOOST_AUTO_TEST_CASE(CellSubset)
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
+        trivialTempVdTable,
         trivialSaltVdTable,
         0)
         ,
@@ -354,6 +358,7 @@ BOOST_AUTO_TEST_CASE(CellSubset)
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
+        trivialTempVdTable,
         trivialSaltVdTable,
         0)
         ,
@@ -361,6 +366,7 @@ BOOST_AUTO_TEST_CASE(CellSubset)
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
+        trivialTempVdTable,
         trivialSaltVdTable,
         0)
     };
@@ -441,12 +447,16 @@ BOOST_AUTO_TEST_CASE(RegMapping)
     std::vector<double> y = {0.0,0.0};
     Opm::Tabulated1DFunction<double> trivialSaltVdTable{2, x, y};
 
+    std::vector<double> yT = {298.15,298.15};
+    Opm::Tabulated1DFunction<double> trivialTempVdTable{2, x, yT};
+
     const Opm::EQUIL::EquilReg region[] =
     {
         Opm::EQUIL::EquilReg(record[0],
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
+        trivialTempVdTable,
         trivialSaltVdTable,
         0)
         ,
@@ -454,6 +464,7 @@ BOOST_AUTO_TEST_CASE(RegMapping)
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
+        trivialTempVdTable,
         trivialSaltVdTable,
         0)
         ,
@@ -461,6 +472,7 @@ BOOST_AUTO_TEST_CASE(RegMapping)
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
+        trivialTempVdTable,
         trivialSaltVdTable,
         0)
         ,
@@ -468,6 +480,7 @@ BOOST_AUTO_TEST_CASE(RegMapping)
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
         std::make_shared<Opm::EQUIL::Miscibility::NoMixing>(),
+        trivialTempVdTable,
         trivialSaltVdTable,
         0)
         };

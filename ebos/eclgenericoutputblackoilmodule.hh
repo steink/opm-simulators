@@ -23,10 +23,11 @@
 #ifndef EWOMS_ECL_GENERIC_OUTPUT_BLACK_OIL_MODULE_HH
 #define EWOMS_ECL_GENERIC_OUTPUT_BLACK_OIL_MODULE_HH
 
+#include <opm/input/eclipse/EclipseState/Grid/FaceDir.hpp>
 #include <opm/output/data/Wells.hpp>
 #include <opm/output/eclipse/Inplace.hpp>
 
-#include <opm/simulators/flow/EclInterRegFlows.hpp>
+#include <opm/simulators/flow/InterRegFlows.hpp>
 #include <opm/simulators/flow/LogOutputHelper.hpp>
 #include <opm/simulators/utils/ParallelCommunication.hpp>
 
@@ -34,9 +35,7 @@
 #include <cstddef>
 #include <functional>
 #include <map>
-#include <numeric>
 #include <optional>
-#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -61,34 +60,29 @@ public:
         return (this->fluidPressure_.size()) ;
     };
 
+    void outputTimeStamp(const std::string& lbl, double elapsed, int rstep, boost::posix_time::ptime currentDate);
+
     // write cumulative production and injection reports to output
-    void outputCumLog(std::size_t reportStepNum,
-                      const bool substep,
-                      bool forceDisableCumOutput);
+    void outputCumLog(std::size_t reportStepNum);
 
     // write production report to output
-    void outputProdLog(std::size_t reportStepNum,
-                       const bool substep,
-                       bool forceDisableProdOutput);
+    void outputProdLog(std::size_t reportStepNum);
 
     // write injection report to output
-    void outputInjLog(std::size_t reportStepNum,
-                      const bool substep,
-                      bool forceDisableInjOutput);
+    void outputInjLog(std::size_t reportStepNum);
 
-    // write Fluid In Place to output log
-    Inplace outputFipLog(std::map<std::string, double>& miscSummaryData,
+    // calculate Fluid In Place
+    Inplace calc_inplace(std::map<std::string, double>& miscSummaryData,
                          std::map<std::string, std::vector<double>>& regionData,
+                         const Parallel::Communication& comm);
+
+    void outputFipAndResvLog(const Inplace& inplace,
                          const std::size_t reportStepNum,
+                         double elapsed,
+                         boost::posix_time::ptime currentDate,
                          const bool substep,
                          const Parallel::Communication& comm);
 
-    // write Reservoir Volumes to output log
-    Inplace outputFipresvLog(std::map<std::string, double>& miscSummaryData,
-                         std::map<std::string, std::vector<double>>& regionData,
-                         const std::size_t reportStepNum,
-                         const bool substep,
-                         const Parallel::Communication& comm);
 
     void outputErrorLog(const Parallel::Communication& comm) const;
 
@@ -108,6 +102,14 @@ public:
     {
         if (sSol_.size() > elemIdx)
             return sSol_[elemIdx];
+
+        return 0;
+    }
+
+    Scalar getSolventRsw(unsigned elemIdx) const
+    {
+        if (rswSol_.size() > elemIdx)
+            return rswSol_[elemIdx];
 
         return 0;
     }
@@ -264,6 +266,11 @@ public:
         local_data_valid_ = true;
     }
 
+    void setCnvData(const std::vector<std::vector<int>>& data)
+    {
+        cnvData_ = data;
+    }
+
     // Virtual destructor for safer inheritance.
     virtual ~EclGenericOutputBlackoilModule();
 
@@ -272,6 +279,12 @@ public:
     {
         serializer(initialInplace_);
     }
+
+    //! \brief Assign fields that are in global numbering to the solution.
+    //! \detail This is used to add fields that for some reason cannot be collected
+    //!         using the regular collect mechanism to the solution. In particular this
+    //!         is used with RPTRST CONV output.
+    void assignGlobalFieldsToSolution(data::Solution& sol);
 
 protected:
     using ScalarBuffer = std::vector<Scalar>;
@@ -284,11 +297,13 @@ protected:
     enum { gasCompIdx = FluidSystem::gasCompIdx };
     enum { oilCompIdx = FluidSystem::oilCompIdx };
     enum { waterCompIdx = FluidSystem::waterCompIdx };
+    using Dir = FaceDir::DirEnum;
 
     EclGenericOutputBlackoilModule(const EclipseState& eclState,
                                    const Schedule& schedule,
                                    const SummaryConfig& summaryConfig,
                                    const SummaryState& summaryState,
+                                   const std::string& moduleVersionName,
                                    bool enableEnergy,
                                    bool enableTemperature,
                                    bool enableMech,
@@ -348,7 +363,7 @@ protected:
     const SummaryConfig& summaryConfig_;
     const SummaryState& summaryState_;
 
-    EclInterRegFlowMap interRegionFlows_;
+    InterRegFlowMap interRegionFlows_;
     LogOutputHelper<Scalar> logOutput_;
 
     bool enableEnergy_;
@@ -391,6 +406,7 @@ protected:
     ScalarBuffer pressureTimesPoreVolume_;
     ScalarBuffer pressureTimesHydrocarbonVolume_;
     ScalarBuffer dynamicPoreVolume_;
+    ScalarBuffer rPorV_;
     ScalarBuffer fluidPressure_;
     ScalarBuffer temperature_;
     ScalarBuffer rs_;
@@ -401,6 +417,7 @@ protected:
     ScalarBuffer oilSaturationPressure_;
     ScalarBuffer drsdtcon_;
     ScalarBuffer sSol_;
+    ScalarBuffer rswSol_;
     ScalarBuffer cPolymer_;
     ScalarBuffer cFoam_;
     ScalarBuffer cSalt_;
@@ -432,6 +449,7 @@ protected:
     ScalarBuffer cUrea_;
     ScalarBuffer cBiofilm_;
     ScalarBuffer cCalcite_;
+    ScalarBuffer pcgw_;
     ScalarBuffer pcow_;
     ScalarBuffer pcog_;
 
@@ -472,13 +490,8 @@ protected:
 
     std::array<ScalarBuffer, numPhases> residual_;
 
-
-    std::array<ScalarBuffer, numPhases> flowsi_;
-    std::array<ScalarBuffer, numPhases> flowsj_;
-    std::array<ScalarBuffer, numPhases> flowsk_;
-    std::array<ScalarBuffer, numPhases> floresi_;
-    std::array<ScalarBuffer, numPhases> floresj_;
-    std::array<ScalarBuffer, numPhases> floresk_;
+    std::array<std::array<ScalarBuffer, numPhases>, 6> flows_;
+    std::array<std::array<ScalarBuffer, numPhases>, 6> flores_;
 
     std::array<std::pair<std::string, std::pair<std::vector<int>, ScalarBuffer>>, 3> floresn_;
     std::array<std::pair<std::string, std::pair<std::vector<int>, ScalarBuffer>>, 3> flowsn_;
@@ -487,6 +500,8 @@ protected:
     std::map<std::size_t, Scalar> waterConnectionSaturations_;
     std::map<std::size_t, Scalar> gasConnectionSaturations_;
     std::map<std::pair<std::string, int>, double> blockData_;
+
+    std::vector<std::vector<int>> cnvData_; //!< Data for CNV_xxx arrays
 
     std::optional<Inplace> initialInplace_;
     bool local_data_valid_;

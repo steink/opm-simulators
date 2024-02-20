@@ -60,7 +60,7 @@
 #include <opm/models/utils/parametersystem.hh>
 
 #include <opm/simulators/flow/Banners.hpp>
-#include <opm/simulators/flow/FlowMainEbos.hpp>
+#include <opm/simulators/flow/FlowMain.hpp>
 
 #if HAVE_DUNE_FEM
 #include <dune/fem/misc/mpimanager.hh>
@@ -72,8 +72,13 @@
 #include <opm/simulators/utils/ParallelEclipseState.hpp>
 #endif
 
+#if HAVE_DAMARIS
+#include <opm/simulators/utils/DamarisKeywords.hpp>
+#endif
+
 #include <cassert>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -108,7 +113,7 @@ int flowEbosMain(int argc, char** argv, bool outputCout, bool outputFiles)
     // with incorrect locale settings.
     resetLocale();
 
-    FlowMainEbos<TypeTag> mainfunc(argc, argv, outputCout, outputFiles);
+    FlowMain<TypeTag> mainfunc(argc, argv, outputCout, outputFiles);
     return mainfunc.execute();
 }
 
@@ -122,7 +127,7 @@ int flowEbosMain(int argc, char** argv, bool outputCout, bool outputFiles)
 class Main
 {
 public:
-    Main(int argc, char** argv);
+    Main(int argc, char** argv, bool ownMPI = true);
 
     // This constructor can be called from Python
     Main(const std::string& filename);
@@ -165,12 +170,12 @@ public:
         return exitCode;
     }
 
-    using FlowMainEbosType = FlowMainEbos<Properties::TTag::EclFlowProblemTPFA>;
+    using FlowMainType = FlowMain<Properties::TTag::EclFlowProblemTPFA>;
     // To be called from the Python interface code. Only do the
     // initialization and then return a pointer to the FlowEbosMain
     // object that can later be accessed directly from the Python interface
     // to e.g. advance the simulator one report step
-    std::unique_ptr<FlowMainEbosType> initFlowEbosBlackoil(int& exitCode)
+    std::unique_ptr<FlowMainType> initFlowEbosBlackoil(int& exitCode)
     {
         exitCode = EXIT_SUCCESS;
         if (initialize_<Properties::TTag::FlowEarlyBird>(exitCode)) {
@@ -181,8 +186,16 @@ public:
                 argc_, argv_, outputCout_, outputFiles_);
         } else {
             //NOTE: exitCode was set by initialize_() above;
-            return std::unique_ptr<FlowMainEbosType>(); // nullptr
+            return std::unique_ptr<FlowMainType>(); // nullptr
         }
+    }
+
+    //! \brief Used for test_outputdir.
+    int justInitialize()
+    {
+        int exitCode = EXIT_SUCCESS;
+        initialize_<Properties::TTag::FlowEarlyBird>(exitCode);
+        return exitCode;
     }
 
 private:
@@ -300,7 +313,7 @@ private:
         using PreProblem = GetPropType<PreTypeTag, Properties::Problem>;
 
         PreProblem::setBriefDescription("Flow, an advanced reservoir simulator for ECL-decks provided by the Open Porous Media project.");
-        int status = FlowMainEbos<PreTypeTag>::setupParameters_(argc_, argv_, EclGenericVanguard::comm());
+        int status = FlowMain<PreTypeTag>::setupParameters_(argc_, argv_, EclGenericVanguard::comm());
         if (status != 0) {
             // if setupParameters_ returns a value smaller than 0, there was no error, but
             // the program should abort. This is the case e.g. for the --help and the
@@ -326,6 +339,7 @@ private:
 
 #if HAVE_DAMARIS
         enableDamarisOutput_ = EWOMS_GET_PARAM(PreTypeTag, bool, EnableDamarisOutput);
+        
         // Reset to false as we cannot use Damaris if there is only one rank.
         if ((enableDamarisOutput_ == true) && (EclGenericVanguard::comm().size() == 1)) {
             std::string msg ;
@@ -333,10 +347,20 @@ private:
             OpmLog::warning(msg);
             enableDamarisOutput_ = false ;
         }
-        
+
         if (enableDamarisOutput_) {
-            this->setupDamaris(outputDir,
-                               EWOMS_GET_PARAM(PreTypeTag, bool, EnableDamarisOutputCollective));
+            // Deal with empty (defaulted) output dir, should be deck dir
+            auto damarisOutputDir = outputDir;
+            if (outputDir.empty()) {
+                auto odir = std::filesystem::path{deckFilename}.parent_path();
+                if (odir.empty()) {
+                    damarisOutputDir = ".";
+                } else {
+                    damarisOutputDir = odir.generic_string();
+                }
+            }
+            // Damaris server ranks will block here until damaris_stop() is called by client ranks
+            this->setupDamaris(damarisOutputDir);
         }
 #endif // HAVE_DAMARIS
 
@@ -393,7 +417,7 @@ private:
                            !EWOMS_GET_PARAM(PreTypeTag, bool, SchedRestart),
                            EWOMS_GET_PARAM(PreTypeTag, bool,  EnableLoggingFalloutWarning),
                            EWOMS_GET_PARAM(PreTypeTag, std::string, ParsingStrictness),
-                           mpiRank,
+                           getNumThreads<PreTypeTag>(),
                            EWOMS_GET_PARAM(PreTypeTag, int, EclOutputInterval),
                            cmdline_params,
                            Opm::moduleVersion(),
@@ -667,7 +691,7 @@ private:
                   const bool init_from_restart_file,
                   const bool allRanksDbgPrtLog,
                   const std::string& parsingStrictness,
-                  const int mpiRank,
+                  const std::size_t numThreads,
                   const int output_param,
                   const std::string& parameters,
                   std::string_view moduleVersion,
@@ -704,12 +728,12 @@ private:
     }
 
 #if HAVE_DAMARIS
-    void setupDamaris(const std::string& outputDir,
-                      const bool enableDamarisOutputCollective);
+    void setupDamaris(const std::string& outputDir);
 #endif
 
     int argc_{0};
     char** argv_{nullptr};
+    bool ownMPI_{true}; //!< True if we "own" MPI and should init / finalize
     bool outputCout_{false};
     bool outputFiles_{false};
     double setupTime_{0.0};

@@ -168,6 +168,11 @@ public:
     Scalar solventSaturation(unsigned elemIdx) const;
 
     /*!
+     * \brief Returns the initial solvent dissolved in water for a given a cell index
+     */
+    Scalar solventRsw(unsigned elemIdx) const;
+
+    /*!
      * \brief Returns the dynamic drsdt convective mixing value
      */
     Scalar drsdtcon(unsigned elemIdx, int episodeIdx) const;
@@ -277,9 +282,10 @@ public:
         serializer(maxOilSaturation_);
         serializer(polymer_);
         serializer(maxWaterSaturation_);
-        serializer(minOilPressure_);
+        serializer(minRefPressure_);
         serializer(overburdenPressure_);
         serializer(solventSaturation_);
+        serializer(solventRsw_);
         serializer(micp_);
         serializer(mixControls_);
     }
@@ -353,13 +359,15 @@ protected:
     std::vector<TabulatedTwoDFunction> rockCompTransMultWc_;
     std::vector<TabulatedFunction> rockCompPoroMult_;
     std::vector<TabulatedFunction> rockCompTransMult_;
+    std::vector<Scalar> rockCompTransMultVal_;
 
     PolymerSolutionContainer<Scalar> polymer_;
     std::vector<Scalar> maxOilSaturation_;
     std::vector<Scalar> maxWaterSaturation_;
-    std::vector<Scalar> minOilPressure_;
+    std::vector<Scalar> minRefPressure_;
     std::vector<Scalar> overburdenPressure_;
     std::vector<Scalar> solventSaturation_;
+    std::vector<Scalar> solventRsw_;
     MICPSolutionContainer<Scalar> micp_;
 
     EclMixingRateControls<FluidSystem, Scalar> mixControls_;
@@ -377,10 +385,13 @@ protected:
     using LookUpData = Opm::LookUpData<Grid,GridView>;
     const LookUpData lookUpData_;
 
-    auto getLookUpData(unsigned elemIdx) const
+    // \brief Function to assign the origin cell index on level zero, for a cell on the leaf grid view.
+    //
+    // For CpGrid with local grid refinement, the field property of a cell on the leaf
+    // is inherited from its parent or equivalent (when has no parent) cell on level zero.
+    std::function<unsigned(unsigned)> lookupIdxOnLevelZeroAssigner_()
     {
-        using GridType = std::remove_cv_t< typename std::remove_reference<decltype(gridView_.grid())>::type>;
-        return lookUpData_.template getFieldPropIdx<GridType>(elemIdx);
+        return [this](unsigned elemIdx) { return lookUpData_.template getFieldPropIdx<Grid>(elemIdx);};
     }
 
 private:

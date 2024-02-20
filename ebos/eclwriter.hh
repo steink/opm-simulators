@@ -41,6 +41,8 @@
 
 #include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
 #include <opm/simulators/utils/ParallelRestart.hpp>
+#include <opm/simulators/flow/countGlobalCells.hpp>
+#include <opm/simulators/timestepping/SimulatorTimer.hpp>
 
 #include <opm/common/OpmLog/OpmLog.hpp>
 
@@ -121,6 +123,7 @@ class EclWriter : public EclGenericWriter<GetPropType<TypeTag, Properties::Grid>
     enum { enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>() };
 
 public:
+
     static void registerParameters()
     {
         EclOutputBlackOilModule<TypeTag>::registerParameters();
@@ -174,6 +177,7 @@ public:
     {
         OPM_TIMEBLOCK(evalSummaryState);
         const int reportStepNum = simulator_.episodeIndex() + 1;
+        
         /*
           The summary data is not evaluated for timestep 0, that is
           implemented with a:
@@ -191,6 +195,7 @@ public:
           "Correct" in this context means unchanged behavior, might very
           well be more correct to actually remove this if test.
         */
+        
         if (reportStepNum == 0)
             return;
 
@@ -243,21 +248,22 @@ public:
             OPM_END_PARALLEL_TRY_CATCH("Collect to I/O rank: ",
                                        this->simulator_.vanguard().grid().comm());
         }
+        
 
         std::map<std::string, double> miscSummaryData;
         std::map<std::string, std::vector<double>> regionData;
         Inplace inplace;
+        
         {
             OPM_TIMEBLOCK(outputFipLogAndFipresvLog);
-            inplace = eclOutputModule_->outputFipLog(miscSummaryData, regionData, reportStepNum,
-                                                     isSubStep, simulator_.gridView().comm());
-            eclOutputModule_->outputFipresvLog(miscSummaryData, regionData, reportStepNum,
-                                               isSubStep, simulator_.gridView().comm());
-        }
-        bool forceDisableProdOutput = false;
-        bool forceDisableInjOutput = false;
-        bool forceDisableCumOutput = false;
 
+            inplace = eclOutputModule_->calc_inplace(miscSummaryData, regionData, simulator_.gridView().comm());
+            
+            if (this->collectToIORank_.isIORank()){
+                inplace_ = inplace;
+            }
+        }
+        
         // Add TCPU
         if (totalCpuTime != 0.0) {
             miscSummaryData["TCPU"] = totalCpuTime;
@@ -310,13 +316,6 @@ public:
                               this->summaryState(),
                               this->udqState());
         }
-
-        {
-        OPM_TIMEBLOCK(outputXXX);
-        eclOutputModule_->outputProdLog(reportStepNum, isSubStep, forceDisableProdOutput);
-        eclOutputModule_->outputInjLog(reportStepNum, isSubStep, forceDisableInjOutput);
-        eclOutputModule_->outputCumLog(reportStepNum, isSubStep, forceDisableCumOutput);
-        }
     }
 
     //! \brief Writes the initial FIP report as configured in RPTSOL.
@@ -329,15 +328,16 @@ public:
         }
 
         const auto& gridView = simulator_.vanguard().gridView();
-        const int numElements = gridView.size(/*codim=*/0);
+        const int num_interior = detail::
+            countLocalInteriorCellsGridView(gridView);
 
         this->eclOutputModule_->
-            allocBuffers(numElements, 0, false, false, /*isRestart*/ false);
+            allocBuffers(num_interior, 0, false, false, /*isRestart*/ false);
 
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-        for (int dofIdx = 0; dofIdx < numElements; ++dofIdx) {
+        for (int dofIdx = 0; dofIdx < num_interior; ++dofIdx) {
             const auto& intQuants = *simulator_.model().cachedIntensiveQuantities(dofIdx, /*timeIdx=*/0);
             const auto totVolume = simulator_.model().dofTotalVolume(dofIdx);
 
@@ -349,14 +349,21 @@ public:
         Inplace inplace;
         {
             OPM_TIMEBLOCK(outputFipLogAndFipresvLog);
-            inplace = eclOutputModule_->outputFipLog(miscSummaryData, regionData, 0,
+            
+            boost::posix_time::ptime start_time = boost::posix_time::from_time_t(simulator_.vanguard().schedule().getStartTime());
+
+            inplace = eclOutputModule_->calc_inplace(miscSummaryData, regionData, simulator_.gridView().comm());
+
+            if (this->collectToIORank_.isIORank()){
+                inplace_ = inplace;
+                
+                eclOutputModule_->outputFipAndResvLog(inplace_, 0, 0.0, start_time, 
                                                      false, simulator_.gridView().comm());
-            eclOutputModule_->outputFipresvLog(miscSummaryData, regionData, 0,
-                                               false, simulator_.gridView().comm());
+            }
         }
     }
 
-    void writeOutput(data::Solution&& localCellData, bool isSubStep)
+    void writeOutput(data::Solution&& localCellData, const SimulatorTimer& timer, bool isSubStep)
     {
         OPM_TIMEBLOCK(writeOutput);
 
@@ -380,6 +387,23 @@ public:
 
         // data::Solution localCellData = {};
         if (! isSubStep) {
+            
+            auto rstep = timer.reportStepNum();
+            
+            if ((rstep > 0) && (this->collectToIORank_.isIORank())){
+
+                eclOutputModule_->outputFipAndResvLog(inplace_, rstep, timer.simulationTimeElapsed(),
+                                                     timer.currentDateTime(), false, simulator_.gridView().comm()); 
+
+
+                eclOutputModule_->outputTimeStamp("WELLS", timer.simulationTimeElapsed(), rstep, timer.currentDateTime()); 
+                                                             
+                eclOutputModule_->outputProdLog(reportStepNum);
+                eclOutputModule_->outputInjLog(reportStepNum);
+                eclOutputModule_->outputCumLog(reportStepNum);
+
+                OpmLog::note("");   // Blank line after all reports.
+            }
             
             if (localCellData.empty()) {
                 this->eclOutputModule_->assignToSolution(localCellData);
@@ -407,6 +431,11 @@ public:
                                            /* interRegFlows = */ {},
                                            flowsn,
                                            floresn);
+            if (this->collectToIORank_.isIORank()) {
+                this->eclOutputModule_->assignGlobalFieldsToSolution(this->collectToIORank_.globalCellData());
+            }
+        } else {
+            this->eclOutputModule_->assignGlobalFieldsToSolution(localCellData);
         }
 
         if (this->collectToIORank_.isIORank()) {
@@ -487,7 +516,7 @@ public:
             auto& tracer_model = simulator_.problem().tracerModel();
             for (int tracer_index = 0; tracer_index < tracer_model.numTracers(); tracer_index++) {
                 const auto& tracer_name = tracer_model.fname(tracer_index);
-                const auto& tracer_solution = restartValues.solution.data(tracer_name);
+                const auto& tracer_solution = restartValues.solution.template data<double>(tracer_name);
                 for (unsigned elemIdx = 0; elemIdx < numElements; ++elemIdx) {
                     unsigned globalIdx = this->collectToIORank_.localIdxToGlobalIdx(elemIdx);
                     tracer_model.setTracerConcentration(tracer_index, globalIdx, tracer_solution[globalIdx]);
@@ -557,11 +586,12 @@ private:
         }
 
         const auto& gridView = simulator_.vanguard().gridView();
-        const int numElements = gridView.size(/*codim=*/0);
         const bool log = this->collectToIORank_.isIORank();
 
+        const int num_interior = detail::
+            countLocalInteriorCellsGridView(gridView);
         this->eclOutputModule_->
-            allocBuffers(numElements, reportStepNum,
+            allocBuffers(num_interior, reportStepNum,
                          isSubStep, log, /*isRestart*/ false);
 
         ElementContext elemCtx(simulator_);
@@ -570,7 +600,7 @@ private:
 
         {
             OPM_TIMEBLOCK(prepareCellBasedData);
-            for (const auto& elem : elements(gridView)) {
+            for (const auto& elem : elements(gridView, Dune::Partitions::interior)) {
                 elemCtx.updatePrimaryStencil(elem);
                 elemCtx.updatePrimaryIntensiveQuantities(/*timeIdx=*/0);
 
@@ -581,7 +611,7 @@ private:
         if constexpr (enableMech) {
             if (simulator_.vanguard().eclState().runspec().mech()) {
                 OPM_TIMEBLOCK(prepareMechData);
-                for (const auto& elem : elements(gridView)) {
+                for (const auto& elem : elements(gridView, Dune::Partitions::interior)) {
                     elemCtx.updatePrimaryStencil(elem);
                     elemCtx.updatePrimaryIntensiveQuantities(/*timeIdx=*/0);
                     eclOutputModule_->processElementMech(elemCtx);
@@ -591,7 +621,7 @@ private:
 
         if (! this->simulator_.model().linearizer().getFlowsInfo().empty()) {
             OPM_TIMEBLOCK(prepareFlowsData);
-            for (const auto& elem : elements(gridView)) {
+            for (const auto& elem : elements(gridView, Dune::Partitions::interior)) {
                 elemCtx.updatePrimaryStencil(elem);
                 elemCtx.updatePrimaryIntensiveQuantities(/*timeIdx=*/0);
 
@@ -601,7 +631,7 @@ private:
 
         {
             OPM_TIMEBLOCK(prepareBlockData);
-            for (const auto& elem : elements(gridView)) {
+            for (const auto& elem : elements(gridView, Dune::Partitions::interior)) {
                 elemCtx.updatePrimaryStencil(elem);
                 elemCtx.updatePrimaryIntensiveQuantities(/*timeIdx=*/0);
 
@@ -615,7 +645,7 @@ private:
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-            for (int dofIdx = 0; dofIdx < numElements; ++dofIdx) {
+            for (int dofIdx = 0; dofIdx < num_interior; ++dofIdx) {
                 const auto& intQuants = *simulator_.model().cachedIntensiveQuantities(dofIdx, /*timeIdx=*/0);
                 const auto totVolume = simulator_.model().dofTotalVolume(dofIdx);
 
@@ -671,6 +701,7 @@ private:
     std::unique_ptr<EclOutputBlackOilModule<TypeTag> > eclOutputModule_;
     Scalar restartTimeStepSize_;
     int rank_ ;
+    Inplace inplace_;
 };
 
 } // namespace Opm
