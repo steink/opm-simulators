@@ -15,10 +15,10 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "config.h"
-#include <flow/flow_ebos_extbo.hpp>
+#include <flow/flow_extbo.hpp>
 
 
 int main(int argc, char** argv)
 {
-    return Opm::flowEbosExtboMainStandalone(argc, argv);
+    return Opm::flowExtboMainStandalone(argc, argv);
 }

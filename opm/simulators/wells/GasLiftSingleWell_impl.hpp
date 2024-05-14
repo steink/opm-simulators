@@ -17,46 +17,53 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+// Improve IDE experience
+#ifndef OPM_GASLIFT_SINGLE_WELL_HEADER_INCLUDED
+#define OPM_GASLIFT_SINGLE_WELL_IMPL_HEADER_INCLUDED
+#include <config.h>
+#include <opm/simulators/wells/GasLiftSingleWell.hpp>
+#endif
+
 #include <opm/input/eclipse/Schedule/GasLiftOpt.hpp>
 #include <fmt/format.h>
+
+#include <string>
+#include <vector>
 
 namespace Opm {
 
 template<typename TypeTag>
 GasLiftSingleWell<TypeTag>::
-GasLiftSingleWell(const WellInterface<TypeTag> &well,
-                  const Simulator &ebos_simulator,
-                  const SummaryState &summary_state,
-                  DeferredLogger &deferred_logger,
-                  WellState &well_state,
-                  const GroupState &group_state,
-                  GasLiftGroupInfo &group_info,
+GasLiftSingleWell(const WellInterface<TypeTag>& well,
+                  const Simulator& simulator,
+                  const SummaryState& summary_state,
+                  DeferredLogger& deferred_logger,
+                  WellState<Scalar>& well_state,
+                  const GroupState<Scalar>& group_state,
+                  GasLiftGroupInfo<Scalar>& group_info,
                   GLiftSyncGroups &sync_groups,
                   const Parallel::Communication& comm,
-                  bool glift_debug
-                 )
+                  bool glift_debug)
     // The parent class GasLiftSingleWellGeneric contains all stuff
     //   that is not dependent on TypeTag
-    : GasLiftSingleWellGeneric(
-        deferred_logger,
-        well_state,
-        group_state,
-        well.wellEcl(),
-        summary_state,
-        group_info,
-        well.phaseUsage(),
-        ebos_simulator.vanguard().schedule(),
-        ebos_simulator.episodeIndex(),
-        sync_groups,
-        comm,
-        glift_debug
-    )
-   , ebos_simulator_{ebos_simulator}
+    : GasLiftSingleWellGeneric<Scalar>(deferred_logger,
+                                       well_state,
+                                       group_state,
+                                       well.wellEcl(),
+                                       summary_state,
+                                       group_info,
+                                       well.phaseUsage(),
+                                       simulator.vanguard().schedule(),
+                                       simulator.episodeIndex(),
+                                       sync_groups,
+                                       comm,
+                                       glift_debug)
+   , simulator_{simulator}
    , well_{well}
 {
-    const auto& gl_well = *gl_well_;
-    if(useFixedAlq_(gl_well)) {
-        updateWellStateAlqFixedValue_(gl_well);
+    const auto& gl_well = *this->gl_well_;
+    if (this->useFixedAlq_(gl_well)) {
+        this->updateWellStateAlqFixedValue_(gl_well);
         this->optimize_ = false; // lift gas supply is fixed
     }
     else {
@@ -70,14 +77,14 @@ GasLiftSingleWell(const WellInterface<TypeTag> &well,
     //   If gas lift optimization has not been applied to this well yet, the
     //   default value is used.
     this->orig_alq_ = this->well_state_.getALQ(this->well_name_);
-    if(this->optimize_) {
-        setAlqMinRate_(gl_well);
+    if (this->optimize_) {
+        this->setAlqMinRate_(gl_well);
         // NOTE: According to item 4 in WLIFTOPT, this value does not
         //    have to be positive.
         // TODO: Does it make sense to have a negative value?
         this->alpha_w_ = gl_well.weight_factor();
         if (this->alpha_w_ <= 0 ) {
-            displayWarning_("Nonpositive value for alpha_w ignored");
+            this->displayWarning_("Nonpositive value for alpha_w ignored");
             this->alpha_w_ = 1.0;
         }
 
@@ -100,23 +107,25 @@ GasLiftSingleWell(const WellInterface<TypeTag> &well,
  ****************************************/
 
 template<typename TypeTag>
-GasLiftSingleWellGeneric::BasicRates
+typename GasLiftSingleWell<TypeTag>::BasicRates
 GasLiftSingleWell<TypeTag>::
-computeWellRates_( double bhp, bool bhp_is_limited, bool debug_output ) const
+computeWellRates_(Scalar bhp, bool bhp_is_limited, bool debug_output ) const
 {
-    std::vector<double> potentials(NUM_PHASES, 0.0);
-    this->well_.computeWellRatesWithBhp(
-        this->ebos_simulator_, bhp, potentials, this->deferred_logger_);
+    std::vector<Scalar> potentials(this->NUM_PHASES, 0.0);
+    this->well_.computeWellRatesWithBhp(this->simulator_,
+                                        bhp,
+                                        potentials,
+                                        this->deferred_logger_);
     if (debug_output) {
         const std::string msg = fmt::format("computed well potentials given bhp {}, "
             "oil: {}, gas: {}, water: {}", bhp,
             -potentials[this->oil_pos_], -potentials[this->gas_pos_],
             -potentials[this->water_pos_]);
-        displayDebugMessage_(msg);
+        this->displayDebugMessage_(msg);
     }
 
     for (auto& potential : potentials) {
-        potential = std::min(0.0, potential);
+        potential = std::min(Scalar{0.0}, potential);
     }
     return {-potentials[this->oil_pos_],
             -potentials[this->gas_pos_],
@@ -126,12 +135,12 @@ computeWellRates_( double bhp, bool bhp_is_limited, bool debug_output ) const
 }
 
 template<typename TypeTag>
-std::optional<double>
+std::optional<typename GasLiftSingleWell<TypeTag>::Scalar>
 GasLiftSingleWell<TypeTag>::
-computeBhpAtThpLimit_(double alq, bool debug_output) const
+computeBhpAtThpLimit_(Scalar alq, bool debug_output) const
 {
     auto bhp_at_thp_limit = this->well_.computeBhpAtThpLimitProdWithAlq(
-        this->ebos_simulator_,
+        this->simulator_,
         this->summary_state_,
         alq,
         this->deferred_logger_);
@@ -143,7 +152,7 @@ computeBhpAtThpLimit_(double alq, bool debug_output) const
                     " Using bhp limit instead",
                     *bhp_at_thp_limit, this->controls_.bhp_limit, alq
                 );
-                displayDebugMessage_(msg);
+                this->displayDebugMessage_(msg);
             }
             bhp_at_thp_limit = this->controls_.bhp_limit;
         }
@@ -152,7 +161,7 @@ computeBhpAtThpLimit_(double alq, bool debug_output) const
     else {
         const std::string msg = fmt::format(
             "Failed in getting converged bhp potential from thp limit (ALQ = {})", alq);
-        displayDebugMessage_(msg);
+        this->displayDebugMessage_(msg);
     }
     return bhp_at_thp_limit;
 }
@@ -191,15 +200,15 @@ setupPhaseVariables_()
         }
     }
     assert(num_phases_ok);
-    this->oil_pos_ = pu.phase_pos[Oil];
-    this->gas_pos_ = pu.phase_pos[Gas];
-    this->water_pos_ = pu.phase_pos[Water];
+    this->oil_pos_ = pu.phase_pos[this->Oil];
+    this->gas_pos_ = pu.phase_pos[this->Gas];
+    this->water_pos_ = pu.phase_pos[this->Water];
 }
 
 template<typename TypeTag>
 void
 GasLiftSingleWell<TypeTag>::
-setAlqMaxRate_(const GasLiftWell &well)
+setAlqMaxRate_(const GasLiftWell& well)
 {
     auto& max_alq_optional = well.max_rate();
     if (max_alq_optional) {
@@ -233,7 +242,7 @@ checkThpControl_() const
     thp_control = thp_control || well.thpLimitViolatedButNotSwitched();
     if (this->debug) {
         if (!thp_control) {
-            displayDebugMessage_("Well is not under THP control, skipping iteration..");
+            this->displayDebugMessage_("Well is not under THP control, skipping iteration..");
         }
     }
     return thp_control;

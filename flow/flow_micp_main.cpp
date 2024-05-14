@@ -15,10 +15,10 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "config.h"
-#include <flow/flow_ebos_micp.hpp>
+#include <flow/flow_micp.hpp>
 
 
 int main(int argc, char** argv)
 {
-    return Opm::flowEbosMICPMainStandalone(argc, argv);
+    return Opm::flowMICPMainStandalone(argc, argv);
 }

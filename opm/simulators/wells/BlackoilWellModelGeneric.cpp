@@ -76,7 +76,8 @@
 
 namespace Opm {
 
-BlackoilWellModelGeneric::
+template<class Scalar>
+BlackoilWellModelGeneric<Scalar>::
 BlackoilWellModelGeneric(Schedule& schedule,
                          const SummaryState& summaryState,
                          const EclipseState& eclState,
@@ -115,22 +116,22 @@ BlackoilWellModelGeneric(Schedule& schedule,
     }
 }
 
-int
-BlackoilWellModelGeneric::
+template<class Scalar>
+int BlackoilWellModelGeneric<Scalar>::
 numLocalWells() const
 {
     return wells_ecl_.size();
 }
 
-int
-BlackoilWellModelGeneric::
+template<class Scalar>
+int BlackoilWellModelGeneric<Scalar>::
 numPhases() const
 {
     return phase_usage_.num_phases;
 }
 
-bool
-BlackoilWellModelGeneric::
+template<class Scalar>
+bool BlackoilWellModelGeneric<Scalar>::
 hasWell(const std::string& wname) const
 {
     return std::any_of(this->wells_ecl_.begin(), this->wells_ecl_.end(),
@@ -140,22 +141,22 @@ hasWell(const std::string& wname) const
     });
 }
 
-bool
-BlackoilWellModelGeneric::
+template<class Scalar>
+bool BlackoilWellModelGeneric<Scalar>::
 wellsActive() const
 {
     return wells_active_;
 }
 
-bool
-BlackoilWellModelGeneric::
+template<class Scalar>
+bool BlackoilWellModelGeneric<Scalar>::
 networkActive() const
 {
     return network_active_;
 }
 
-bool
-BlackoilWellModelGeneric::
+template<class Scalar>
+bool BlackoilWellModelGeneric<Scalar>::
 anyMSWellOpenLocal() const
 {
     for (const auto& well : wells_ecl_) {
@@ -166,8 +167,8 @@ anyMSWellOpenLocal() const
     return false;
 }
 
-const Well&
-BlackoilWellModelGeneric::
+template<class Scalar>
+const Well& BlackoilWellModelGeneric<Scalar>::
 getWellEcl(const std::string& well_name) const
 {
     // finding the iterator of the well in wells_ecl
@@ -182,8 +183,8 @@ getWellEcl(const std::string& well_name) const
     return *well_ecl;
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 initFromRestartFile(const RestartValue& restartValues,
                     WellTestState wtestState,
                     const std::size_t numCells,
@@ -204,32 +205,33 @@ initFromRestartFile(const RestartValue& restartValues,
     this->initializeWellProdIndCalculators();
     initializeWellPerfData();
 
-    if (! this->wells_ecl_.empty()) {
-        handle_ms_well &= anyMSWellOpenLocal();
-        // Resize for restart step
-        this->wellState().resize(this->wells_ecl_, this->local_parallel_well_info_,
-                                 this->schedule(), handle_ms_well, numCells,
-                                 this->well_perf_data_, this->summaryState_);
+    handle_ms_well &= anyMSWellOpenLocal();
+    // Resize for restart step
+    this->wellState().resize(this->wells_ecl_, this->local_parallel_well_info_,
+                             this->schedule(), handle_ms_well, numCells,
+                             this->well_perf_data_, this->summaryState_);
 
-        BlackoilWellModelRestart(*this).loadRestartData(restartValues.wells,
-                                                        restartValues.grp_nwrk,
-                                                        handle_ms_well,
-                                                        this->wellState(),
-                                                        this->groupState());
+    BlackoilWellModelRestart(*this).
+        loadRestartData(restartValues.wells,
+                        restartValues.grp_nwrk,
+                        handle_ms_well,
+                        this->wellState(),
+                        this->groupState());
 
-        if (config.has_model()) {
-            BlackoilWellModelRestart(*this).loadRestartGuideRates(report_step,
-                                                                  config.model().target(),
-                                                                  restartValues.wells,
-                                                                  this->guideRate_);
-        }
+    if (config.has_model()) {
+        BlackoilWellModelRestart(*this).
+            loadRestartGuideRates(report_step,
+                                  config.model().target(),
+                                  restartValues.wells,
+                                  this->guideRate_);
     }
 
     if (config.has_model()) {
-        BlackoilWellModelRestart(*this).loadRestartGuideRates(report_step,
-                                                              config,
-                                                              restartValues.grp_nwrk.groupData,
-                                                              this->guideRate_);
+        BlackoilWellModelRestart(*this).
+            loadRestartGuideRates(report_step,
+                                  config,
+                                  restartValues.grp_nwrk.groupData,
+                                  this->guideRate_);
 
         this->guideRate_.updateGuideRateExpiration(this->schedule().seconds(report_step), report_step);
     }
@@ -239,8 +241,8 @@ initFromRestartFile(const RestartValue& restartValues,
     initial_step_ = false;
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 prepareDeserialize(int report_step, const std::size_t numCells, bool handle_ms_well)
 {
     // wells_ecl_ should only contain wells on this processor.
@@ -262,8 +264,8 @@ prepareDeserialize(int report_step, const std::size_t numCells, bool handle_ms_w
     this->updateNupcolWGState();
 }
 
-std::vector<Well>
-BlackoilWellModelGeneric::
+template<class Scalar>
+std::vector<Well> BlackoilWellModelGeneric<Scalar>::
 getLocalWells(const int timeStepIdx) const
 {
     auto w = schedule().getWells(timeStepIdx);
@@ -271,8 +273,9 @@ getLocalWells(const int timeStepIdx) const
     return w;
 }
 
+template<class Scalar>
 std::vector<std::reference_wrapper<ParallelWellInfo>>
-BlackoilWellModelGeneric::
+BlackoilWellModelGeneric<Scalar>::
 createLocalParallelWellInfo(const std::vector<Well>& wells)
 {
     std::vector<std::reference_wrapper<ParallelWellInfo>> local_parallel_well_info;
@@ -290,8 +293,8 @@ createLocalParallelWellInfo(const std::vector<Well>& wells)
     return local_parallel_well_info;
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 initializeWellProdIndCalculators()
 {
     this->prod_index_calc_.clear();
@@ -301,8 +304,8 @@ initializeWellProdIndCalculators()
     }
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 initializeWellPerfData()
 {
     well_perf_data_.resize(wells_ecl_.size());
@@ -354,13 +357,12 @@ initializeWellPerfData()
                         hasFirstConnection = true;
                     }
 
-                    auto pd = PerforationData{};
+                    auto& pd = well_perf_data_[well_index].emplace_back();
+
                     pd.cell_index = active_index;
                     pd.connection_transmissibility_factor = connection.CF();
                     pd.satnum_id = connection.satTableId();
                     pd.ecl_index = connection_index;
-
-                    well_perf_data_[well_index].push_back(pd);
 
                     parallelWellInfo.pushBackEclIndex(connection_index_above,
                                                       connection_index);
@@ -393,8 +395,8 @@ initializeWellPerfData()
     }
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 checkGEconLimits(
         const Group& group,
         const double simulation_time,
@@ -412,7 +414,7 @@ checkGEconLimits(
         return;
     }
 
-    GroupEconomicLimitsChecker checker {
+    GroupEconomicLimitsChecker<Scalar> checker {
         *this, wellTestState(), group, simulation_time, report_step_idx, deferred_logger
     };
     if (checker.minOilRate() || checker.minGasRate()) {
@@ -428,10 +430,10 @@ checkGEconLimits(
     }
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 checkGconsaleLimits(const Group& group,
-                    WellState& well_state,
+                    WellState<Scalar>& well_state,
                     const int reportStepIdx,
                     DeferredLogger& deferred_logger)
 {
@@ -455,15 +457,24 @@ checkGconsaleLimits(const Group& group,
     const Group::ProductionCMode& oldProductionControl = this->groupState().production_control(group.name());
 
     int gasPos = phase_usage_.phase_pos[BlackoilPhases::Vapour];
-    double production_rate = WellGroupHelpers::sumWellSurfaceRates(group, schedule(), well_state, reportStepIdx, gasPos, /*isInjector*/false);
-    double injection_rate = WellGroupHelpers::sumWellSurfaceRates(group, schedule(), well_state, reportStepIdx, gasPos, /*isInjector*/true);
-
+    Scalar production_rate = WellGroupHelpers<Scalar>::sumWellSurfaceRates(group,
+                                                                           schedule(),
+                                                                           well_state,
+                                                                           reportStepIdx,
+                                                                           gasPos,
+                                                                           /*isInjector*/false);
+    Scalar injection_rate = WellGroupHelpers<Scalar>::sumWellSurfaceRates(group,
+                                                                          schedule(),
+                                                                          well_state,
+                                                                          reportStepIdx,
+                                                                          gasPos,
+                                                                          /*isInjector*/true);
     // sum over all nodes
     injection_rate = comm_.sum(injection_rate);
     production_rate = comm_.sum(production_rate);
 
-    double sales_rate = production_rate - injection_rate;
-    double production_target = gconsale.sales_target + injection_rate;
+    Scalar sales_rate = production_rate - injection_rate;
+    Scalar production_target = gconsale.sales_target + injection_rate;
 
     // add import rate and subtract consumption rate for group for gas
     if (schedule()[reportStepIdx].gconsump().has(group.name())) {
@@ -477,7 +488,7 @@ checkGconsaleLimits(const Group& group,
     }
 
     if (sales_rate > gconsale.max_sales_rate) {
-        switch(gconsale.max_proc) {
+        switch (gconsale.max_proc) {
         case GConSale::MaxProcedure::NONE: {
             if (oldProductionControl != Group::ProductionCMode::GRAT && oldProductionControl != Group::ProductionCMode::NONE) {
                 ss = fmt::format("Group sales exceed maximum limit, but the action is NONE for {}. Nothing happens",
@@ -549,8 +560,8 @@ checkGconsaleLimits(const Group& group,
         deferred_logger.info(ss);
 }
 
-bool
-BlackoilWellModelGeneric::
+template<class Scalar>
+bool BlackoilWellModelGeneric<Scalar>::
 checkGroupHigherConstraints(const Group& group,
                             DeferredLogger& deferred_logger,
                             const int reportStepIdx)
@@ -581,16 +592,21 @@ checkGroupHigherConstraints(const Group& group,
             ->first;
     }
 
-    std::vector<double> rates(phase_usage_.num_phases, 0.0);
+    std::vector<Scalar> rates(phase_usage_.num_phases, 0.0);
 
     bool isField = group.name() == "FIELD";
     if (!isField && group.isInjectionGroup()) {
         // Obtain rates for group.
-        std::vector<double> resv_coeff_inj(phase_usage_.num_phases, 0.0);
+        std::vector<Scalar> resv_coeff_inj(phase_usage_.num_phases, 0.0);
         calcInjRates(fipnum, pvtreg, resv_coeff_inj);
 
         for (int phasePos = 0; phasePos < phase_usage_.num_phases; ++phasePos) {
-            const double local_current_rate = WellGroupHelpers::sumWellSurfaceRates(group, schedule(), this->wellState(), reportStepIdx, phasePos, /* isInjector */ true);
+            const Scalar local_current_rate = WellGroupHelpers<Scalar>::sumWellSurfaceRates(group,
+                                                                                            schedule(),
+                                                                                            this->wellState(),
+                                                                                            reportStepIdx,
+                                                                                            phasePos,
+                                                                                            /* isInjector */ true);
             // Sum over all processes
             rates[phasePos] = comm_.sum(local_current_rate);
         }
@@ -600,29 +616,35 @@ checkGroupHigherConstraints(const Group& group,
             auto currentControl = this->groupState().injection_control(group.name(), phase);
             if (currentControl != Group::InjectionCMode::FLD && group.injectionGroupControlAvailable(phase)) {
                 const Group& parentGroup = schedule().getGroup(group.parent(), reportStepIdx);
-                const auto [is_changed, scaling_factor] = WellGroupHelpers::checkGroupConstraintsInj(
-                group.name(),
-                group.parent(),
-                parentGroup,
-                this->wellState(),
-                this->groupState(),
-                reportStepIdx,
-                &guideRate_,
-                rates.data(),
-                phase,
-                phase_usage_,
-                group.getGroupEfficiencyFactor(),
-                schedule(),
-                summaryState_,
-                resv_coeff_inj,
-                deferred_logger);
+                const auto [is_changed, scaling_factor] =
+                    WellGroupHelpers<Scalar>::checkGroupConstraintsInj(group.name(),
+                                                                       group.parent(),
+                                                                       parentGroup,
+                                                                       this->wellState(),
+                                                                       this->groupState(),
+                                                                       reportStepIdx,
+                                                                       &guideRate_,
+                                                                       rates.data(),
+                                                                       phase,
+                                                                       phase_usage_,
+                                                                       group.getGroupEfficiencyFactor(),
+                                                                       schedule(),
+                                                                       summaryState_,
+                                                                       resv_coeff_inj,
+                                                                       deferred_logger);
                 if (is_changed) {
                     switched_inj_groups_.insert_or_assign({group.name(), phase}, Group::InjectionCMode2String(Group::InjectionCMode::FLD));
                     BlackoilWellModelConstraints(*this).
                         actionOnBrokenConstraints(group, Group::InjectionCMode::FLD,
                                                   phase, this->groupState(),
                                                   deferred_logger);
-                    WellGroupHelpers::updateWellRatesFromGroupTargetScale(scaling_factor, group, schedule(), reportStepIdx, /* isInjector */ true, this->groupState(), this->wellState());
+                    WellGroupHelpers<Scalar>::updateWellRatesFromGroupTargetScale(scaling_factor,
+                                                                                  group,
+                                                                                  schedule(),
+                                                                                  reportStepIdx,
+                                                                                  /* isInjector */ true,
+                                                                                  this->groupState(),
+                                                                                  this->wellState());
                     changed = true;
                 }
             }
@@ -632,41 +654,58 @@ checkGroupHigherConstraints(const Group& group,
     if (!isField && group.isProductionGroup()) {
         // Obtain rates for group.
         for (int phasePos = 0; phasePos < phase_usage_.num_phases; ++phasePos) {
-            const double local_current_rate = WellGroupHelpers::sumWellSurfaceRates(group, schedule(), this->wellState(), reportStepIdx, phasePos, /* isInjector */ false);
+            const Scalar local_current_rate = WellGroupHelpers<Scalar>::sumWellSurfaceRates(group,
+                                                                                            schedule(),
+                                                                                            this->wellState(),
+                                                                                            reportStepIdx,
+                                                                                            phasePos,
+                                                                                            /* isInjector */ false);
             // Sum over all processes
             rates[phasePos] = -comm_.sum(local_current_rate);
         }
-        std::vector<double> resv_coeff(phase_usage_.num_phases, 0.0);
+        std::vector<Scalar> resv_coeff(phase_usage_.num_phases, 0.0);
         calcRates(fipnum, pvtreg, this->groupState().production_rates(group.name()), resv_coeff);
         // Check higher up only if under individual (not FLD) control.
         const Group::ProductionCMode& currentControl = this->groupState().production_control(group.name());
         if (currentControl != Group::ProductionCMode::FLD && group.productionGroupControlAvailable()) {
             const Group& parentGroup = schedule().getGroup(group.parent(), reportStepIdx);
-            const auto [is_changed, scaling_factor] = WellGroupHelpers::checkGroupConstraintsProd(
-                group.name(),
-                group.parent(),
-                parentGroup,
-                this->wellState(),
-                this->groupState(),
-                reportStepIdx,
-                &guideRate_,
-                rates.data(),
-                phase_usage_,
-                group.getGroupEfficiencyFactor(),
-                schedule(),
-                summaryState_,
-                resv_coeff,
-                deferred_logger);
+            const auto [is_changed, scaling_factor] =
+                WellGroupHelpers<Scalar>::checkGroupConstraintsProd(group.name(),
+                                                                    group.parent(),
+                                                                    parentGroup,
+                                                                    this->wellState(),
+                                                                    this->groupState(),
+                                                                    reportStepIdx,
+                                                                    &guideRate_,
+                                                                    rates.data(),
+                                                                    phase_usage_,
+                                                                    group.getGroupEfficiencyFactor(),
+                                                                    schedule(),
+                                                                    summaryState_,
+                                                                    resv_coeff,
+                                                                    deferred_logger);
             if (is_changed) {
-                switched_prod_groups_.insert_or_assign(group.name(), Group::ProductionCMode2String(Group::ProductionCMode::FLD));
                 const auto group_limit_action = group.productionControls(summaryState_).group_limit_action;
-                BlackoilWellModelConstraints(*this).
-                        actionOnBrokenConstraints(group, group_limit_action,
+                std::optional<std::string> worst_offending_well = std::nullopt; 
+                changed = BlackoilWellModelConstraints(*this).
+                        actionOnBrokenConstraints(group, reportStepIdx, group_limit_action,
                                                   Group::ProductionCMode::FLD,
+                                                  this->wellState(),
+                                                  worst_offending_well,
                                                   this->groupState(),
                                                   deferred_logger);
-                WellGroupHelpers::updateWellRatesFromGroupTargetScale(scaling_factor, group, schedule(), reportStepIdx, /* isInjector */ false, this->groupState(), this->wellState());
-                changed = true;
+
+                if (changed) {
+                    switched_prod_groups_.insert_or_assign(group.name(),
+                                                           Group::ProductionCMode2String(Group::ProductionCMode::FLD));
+                    WellGroupHelpers<Scalar>::updateWellRatesFromGroupTargetScale(scaling_factor,
+                                                                                  group,
+                                                                                  schedule(),
+                                                                                  reportStepIdx,
+                                                                                  /* isInjector */ false,
+                                                                                  this->groupState(),
+                                                                                  this->wellState());
+                }
             }
         }
     }
@@ -674,8 +713,8 @@ checkGroupHigherConstraints(const Group& group,
     return changed;
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 updateEclWells(const int timeStepIdx,
                const SimulatorUpdate& sim_update,
                const SummaryState& st)
@@ -723,8 +762,8 @@ updateEclWells(const int timeStepIdx,
     this->wellStructureChangedDynamically_ = sim_update.well_structure_changed;
 }
 
-double
-BlackoilWellModelGeneric::
+template<class Scalar>
+Scalar BlackoilWellModelGeneric<Scalar>::
 wellPI(const int well_index) const
 {
     const auto& pu = this->phase_usage_;
@@ -755,8 +794,8 @@ wellPI(const int well_index) const
     }
 }
 
-double
-BlackoilWellModelGeneric::
+template<class Scalar>
+Scalar BlackoilWellModelGeneric<Scalar>::
 wellPI(const std::string& well_name) const
 {
     auto well_iter = std::find_if(this->wells_ecl_.begin(), this->wells_ecl_.end(),
@@ -773,19 +812,27 @@ wellPI(const std::string& well_name) const
     return this->wellPI(well_index);
 }
 
-bool
-BlackoilWellModelGeneric::
+template<class Scalar>
+bool BlackoilWellModelGeneric<Scalar>::
 wasDynamicallyShutThisTimeStep(const int well_index) const
 {
-    return this->closed_this_step_.find(this->wells_ecl_[well_index].name()) !=
+    return wasDynamicallyShutThisTimeStep(this->wells_ecl_[well_index].name());
+}
+
+template<class Scalar>
+bool
+BlackoilWellModelGeneric<Scalar>::
+wasDynamicallyShutThisTimeStep(const std::string& well_name) const
+{
+    return this->closed_this_step_.find(well_name) !=
            this->closed_this_step_.end();
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 updateWsolvent(const Group& group,
                const int reportStepIdx,
-               const WellState& wellState)
+               const WellState<Scalar>& wellState)
 {
     for (const std::string& groupName : group.groups()) {
         const Group& groupTmp = schedule_.getGroup(groupName, reportStepIdx);
@@ -800,13 +847,22 @@ updateWsolvent(const Group& group,
         int gasPos = phase_usage_.phase_pos[BlackoilPhases::Vapour];
         const auto& controls = group.injectionControls(Phase::GAS, summaryState_);
         const Group& groupRein = schedule_.getGroup(controls.reinj_group, reportStepIdx);
-        double gasProductionRate = WellGroupHelpers::sumWellSurfaceRates(groupRein, schedule_, wellState, reportStepIdx, gasPos, /*isInjector*/false);
-        double solventProductionRate = WellGroupHelpers::sumSolventRates(groupRein, schedule_, wellState, reportStepIdx, /*isInjector*/false);
+        Scalar gasProductionRate = WellGroupHelpers<Scalar>::sumWellSurfaceRates(groupRein,
+                                                                                 schedule_,
+                                                                                 wellState,
+                                                                                 reportStepIdx,
+                                                                                 gasPos,
+                                                                                 /*isInjector*/false);
+        Scalar solventProductionRate = WellGroupHelpers<Scalar>::sumSolventRates(groupRein,
+                                                                                 schedule_,
+                                                                                 wellState,
+                                                                                 reportStepIdx,
+                                                                                 /*isInjector*/false);
 
         solventProductionRate = comm_.sum(solventProductionRate);
         gasProductionRate = comm_.sum(gasProductionRate);
 
-        double wsolvent = 0.0;
+        Scalar wsolvent = 0.0;
         if (std::abs(gasProductionRate) > 1e-6)
             wsolvent = solventProductionRate / gasProductionRate;
 
@@ -814,11 +870,11 @@ updateWsolvent(const Group& group,
     }
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 setWsolvent(const Group& group,
             const int reportStepIdx,
-            double wsolvent)
+            Scalar wsolvent)
 {
     for (const std::string& groupName : group.groups()) {
         const Group& groupTmp = schedule_.getGroup(groupName, reportStepIdx);
@@ -834,8 +890,8 @@ setWsolvent(const Group& group,
     }
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 assignShutConnections(data::Wells& wsrpt,
                       const int reportStepIndex) const
 {
@@ -879,8 +935,8 @@ assignShutConnections(data::Wells& wsrpt,
     }
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 assignGroupControl(const Group& group,
                    data::GroupData& gdata) const
 {
@@ -910,8 +966,8 @@ assignGroupControl(const Group& group,
     }
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 assignGroupValues(const int                               reportStepIdx,
                   std::map<std::string, data::GroupData>& gvalues) const
 {
@@ -927,9 +983,10 @@ assignGroupValues(const int                               reportStepIdx,
     }
 }
 
-void
-BlackoilWellModelGeneric::
-assignNodeValues(std::map<std::string, data::NodeData>& nodevalues, const int reportStepIdx) const
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
+assignNodeValues(std::map<std::string, data::NodeData>& nodevalues,
+                 const int reportStepIdx) const
 {
     nodevalues.clear();
     if (reportStepIdx < 0) return;
@@ -938,52 +995,59 @@ assignNodeValues(std::map<std::string, data::NodeData>& nodevalues, const int re
         nodevalues.emplace(node, data::NodeData{pressure});
         // Assign node values of well groups to GPR:WELLNAME
         const auto& sched = schedule();
-        if (!sched.hasGroup(node, reportStepIdx)) continue;
+        if (!sched.hasGroup(node, reportStepIdx)) {
+            continue;
+        }
         const auto& group = sched.getGroup(node, reportStepIdx);
         for (const std::string& wellname : group.wells()) {
-                nodevalues.emplace(wellname, data::NodeData{pressure});
+            nodevalues.emplace(wellname, data::NodeData{pressure});
         }
     }
 
     const auto& network = schedule()[reportStepIdx].network();
-    if (!network.active()) return;
+    if (!network.active()) {
+        return;
+    }
 
-    auto converged_pressures = WellGroupHelpers::computeNetworkPressures(network,
-                                                                this->wellState(),
-                                                                this->groupState(),
-                                                                *(vfp_properties_->getProd()),
-                                                                schedule(),
-                                                                reportStepIdx);
+    auto converged_pressures = WellGroupHelpers<Scalar>::computeNetworkPressures(network,
+                                                                                 this->wellState(),
+                                                                                 this->groupState(),
+                                                                                 *(vfp_properties_->getProd()),
+                                                                                 schedule(),
+                                                                                 reportStepIdx);
     for (const auto& [node, converged_pressure] : converged_pressures) {
         auto it = nodevalues.find(node);
         assert(it != nodevalues.end() );
         it->second.converged_pressure = converged_pressure;
         // Assign node values of group to GPR:WELLNAME
         const auto& sched = schedule();
-        if (!sched.hasGroup(node, reportStepIdx)) continue;
+        if (!sched.hasGroup(node, reportStepIdx)) {
+            continue;
+        }
         const auto& group = sched.getGroup(node, reportStepIdx);
         for (const std::string& wellname : group.wells()) {
-                auto it2 = nodevalues.find(wellname);
-                assert(it2 != nodevalues.end());
-                it2->second.converged_pressure = converged_pressure;
+            auto it2 = nodevalues.find(wellname);
+            assert(it2 != nodevalues.end());
+            it2->second.converged_pressure = converged_pressure;
         }
     }
 }
 
+template<class Scalar>
 data::GroupAndNetworkValues
-BlackoilWellModelGeneric::
+BlackoilWellModelGeneric<Scalar>::
 groupAndNetworkData(const int reportStepIdx) const
 {
     auto grp_nwrk_values = data::GroupAndNetworkValues{};
 
     this->assignGroupValues(reportStepIdx, grp_nwrk_values.groupData);
-    this->assignNodeValues(grp_nwrk_values.nodeData, reportStepIdx-1); // Schedule state info at previous step
+    this->assignNodeValues(grp_nwrk_values.nodeData, reportStepIdx - 1); // Schedule state info at previous step
 
     return grp_nwrk_values;
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 updateAndCommunicateGroupData(const int reportStepIdx,
                               const int iterationIdx)
 {
@@ -1002,21 +1066,64 @@ updateAndCommunicateGroupData(const int reportStepIdx,
     const auto& well_state_nupcol = this->nupcolWellState();
     // the group target reduction rates needs to be update since wells may have switched to/from GRUP control
     // The group target reduction does not honor NUPCOL.
-    std::vector<double> groupTargetReduction(numPhases(), 0.0);
-    WellGroupHelpers::updateGroupTargetReduction(fieldGroup, schedule(), reportStepIdx, /*isInjector*/ false, phase_usage_, guideRate_, well_state, this->groupState(), groupTargetReduction);
-    std::vector<double> groupTargetReductionInj(numPhases(), 0.0);
-    WellGroupHelpers::updateGroupTargetReduction(fieldGroup, schedule(), reportStepIdx, /*isInjector*/ true, phase_usage_, guideRate_, well_state, this->groupState(), groupTargetReductionInj);
+    std::vector<Scalar> groupTargetReduction(numPhases(), 0.0);
+    WellGroupHelpers<Scalar>::updateGroupTargetReduction(fieldGroup,
+                                                         schedule(),
+                                                         reportStepIdx,
+                                                         /*isInjector*/ false,
+                                                         phase_usage_,
+                                                         guideRate_,
+                                                         well_state,
+                                                         this->groupState(),
+                                                         groupTargetReduction);
+    std::vector<Scalar> groupTargetReductionInj(numPhases(), 0.0);
+    WellGroupHelpers<Scalar>::updateGroupTargetReduction(fieldGroup,
+                                                         schedule(),
+                                                         reportStepIdx,
+                                                         /*isInjector*/ true,
+                                                         phase_usage_,
+                                                         guideRate_,
+                                                         well_state,
+                                                         this->groupState(),
+                                                         groupTargetReductionInj);
 
-    WellGroupHelpers::updateREINForGroups(fieldGroup, schedule(), reportStepIdx, phase_usage_, summaryState_, well_state_nupcol, this->groupState(), comm_.rank()==0);
-    WellGroupHelpers::updateVREPForGroups(fieldGroup, schedule(), reportStepIdx, well_state_nupcol, this->groupState());
+    WellGroupHelpers<Scalar>::updateREINForGroups(fieldGroup,
+                                                  schedule(),
+                                                  reportStepIdx,
+                                                  phase_usage_,
+                                                  summaryState_,
+                                                  well_state_nupcol,
+                                                  this->groupState(),
+                                                  comm_.rank() == 0);
+    WellGroupHelpers<Scalar>::updateVREPForGroups(fieldGroup,
+                                                  schedule(),
+                                                  reportStepIdx,
+                                                  well_state_nupcol,
+                                                  this->groupState());
 
-    WellGroupHelpers::updateReservoirRatesInjectionGroups(fieldGroup, schedule(), reportStepIdx, well_state_nupcol, this->groupState());
-    WellGroupHelpers::updateSurfaceRatesInjectionGroups(fieldGroup, schedule(), reportStepIdx, well_state_nupcol, this->groupState());
+    WellGroupHelpers<Scalar>::updateReservoirRatesInjectionGroups(fieldGroup,
+                                                                  schedule(),
+                                                                  reportStepIdx,
+                                                                  well_state_nupcol,
+                                                                  this->groupState());
+    WellGroupHelpers<Scalar>::updateSurfaceRatesInjectionGroups(fieldGroup,
+                                                                schedule(),
+                                                                reportStepIdx,
+                                                                well_state_nupcol,
+                                                                this->groupState());
 
-    WellGroupHelpers::updateGroupProductionRates(fieldGroup, schedule(), reportStepIdx, well_state_nupcol, this->groupState());
+    WellGroupHelpers<Scalar>::updateGroupProductionRates(fieldGroup,
+                                                         schedule(),
+                                                         reportStepIdx,
+                                                         well_state_nupcol,
+                                                         this->groupState());
 
     // We use the rates from the previous time-step to reduce oscillations
-    WellGroupHelpers::updateWellRates(fieldGroup, schedule(), reportStepIdx, this->prevWellState(), well_state);
+    WellGroupHelpers<Scalar>::updateWellRates(fieldGroup,
+                                              schedule(),
+                                              reportStepIdx,
+                                              this->prevWellState(),
+                                              well_state);
 
     // Set ALQ for off-process wells to zero
     for (const auto& wname : schedule().wellNames(reportStepIdx)) {
@@ -1031,15 +1138,15 @@ updateAndCommunicateGroupData(const int reportStepIdx,
     this->groupState().communicate_rates(comm_);
 }
 
-bool
-BlackoilWellModelGeneric::
+template<class Scalar>
+bool BlackoilWellModelGeneric<Scalar>::
 hasTHPConstraints() const
 {
     return BlackoilWellModelConstraints(*this).hasTHPConstraints();
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 updateNetworkActiveState(const int report_step) {
     const auto& network = schedule()[report_step].network();
     if (!network.active()) {
@@ -1059,8 +1166,8 @@ updateNetworkActiveState(const int report_step) {
     this->network_active_ = comm_.max(network_active);
 }
 
-bool
-BlackoilWellModelGeneric::
+template<class Scalar>
+bool BlackoilWellModelGeneric<Scalar>::
 needPreStepNetworkRebalance(const int report_step) const
 {
     const auto& network = schedule()[report_step].network();
@@ -1078,8 +1185,8 @@ needPreStepNetworkRebalance(const int report_step) const
     return network_rebalance_necessary;
 }
 
-bool
-BlackoilWellModelGeneric::
+template<class Scalar>
+bool BlackoilWellModelGeneric<Scalar>::
 forceShutWellByName(const std::string& wellname,
                     const double simulation_time)
 {
@@ -1111,8 +1218,8 @@ forceShutWellByName(const std::string& wellname,
     return (well_was_shut == 1);
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 inferLocalShutWells()
 {
     this->local_shut_wells_.clear();
@@ -1131,8 +1238,8 @@ inferLocalShutWells()
     }
 }
 
-double
-BlackoilWellModelGeneric::
+template<class Scalar>
+Scalar BlackoilWellModelGeneric<Scalar>::
 updateNetworkPressures(const int reportStepIdx)
 {
     // Get the network and return if inactive (no wells in network at this time)
@@ -1143,15 +1250,15 @@ updateNetworkPressures(const int reportStepIdx)
 
     const auto previous_node_pressures = node_pressures_;
 
-    node_pressures_ = WellGroupHelpers::computeNetworkPressures(network,
-                                                                this->wellState(),
-                                                                this->groupState(),
-                                                                *(vfp_properties_->getProd()),
-                                                                schedule(),
-                                                                reportStepIdx);
+    node_pressures_ = WellGroupHelpers<Scalar>::computeNetworkPressures(network,
+                                                                        this->wellState(),
+                                                                        this->groupState(),
+                                                                        *(vfp_properties_->getProd()),
+                                                                        schedule(),
+                                                                        reportStepIdx);
 
     // here, the network imbalance is the difference between the previous nodal pressure and the new nodal pressure
-    double network_imbalance = 0.;
+    Scalar network_imbalance = 0.;
     if (!this->networkActive())
         return network_imbalance;
 
@@ -1164,18 +1271,18 @@ updateNetworkPressures(const int reportStepIdx)
                 continue;
             }
             const auto pressure = previous_node_pressures.at(name);
-            const double change = (new_pressure - pressure);
+            const Scalar change = (new_pressure - pressure);
             if (std::abs(change) > network_imbalance) {
                 network_imbalance = std::abs(change);
             }
             // we dampen the amount of the nodal pressure can change during one iteration
             // due to the fact our nodal pressure calculation is somewhat explicit
             // TODO: the following parameters are subject to adjustment for optimization purpose
-            constexpr double upper_update_bound = 5.0 * unit::barsa;
+            constexpr Scalar upper_update_bound = 5.0 * unit::barsa;
             // relative dampening factor based on update value
-            constexpr double damping_factor = 0.1;
-            const double damped_change = std::min(damping_factor * std::abs(change), upper_update_bound);                                                
-            const double sign = change > 0 ? 1. : -1.;
+            constexpr Scalar damping_factor = 0.1;
+            const Scalar damped_change = std::min(damping_factor * std::abs(change), upper_update_bound);
+            const Scalar sign = change > 0 ? 1. : -1.;
             node_pressures_[name] = pressure + sign * damped_change;
         }
     } else {
@@ -1196,9 +1303,9 @@ updateNetworkPressures(const int reportStepIdx)
             if (it != node_pressures_.end()) {
                 // The well belongs to a group with has a network pressure constraint,
                 // set the dynamic THP constraint of the well accordingly.
-                const double new_limit = it->second;
+                const Scalar new_limit = it->second;
                 well->setDynamicThpLimit(new_limit);
-                SingleWellState& ws = this->wellState()[well->indexOfWell()];
+                SingleWellState<Scalar>& ws = this->wellState()[well->indexOfWell()];
                 const bool thp_is_limit = ws.production_cmode == Well::ProducerCMode::THP;
                 // TODO: not sure why the thp is NOT updated properly elsewhere
                 if (thp_is_limit) {
@@ -1210,20 +1317,25 @@ updateNetworkPressures(const int reportStepIdx)
     return network_imbalance;
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 calculateEfficiencyFactors(const int reportStepIdx)
 {
     for (auto& well : well_container_generic_) {
         const Well& wellEcl = well->wellEcl();
-        double well_efficiency_factor = wellEcl.getEfficiencyFactor();
-        WellGroupHelpers::accumulateGroupEfficiencyFactor(schedule().getGroup(wellEcl.groupName(), reportStepIdx), schedule(), reportStepIdx, well_efficiency_factor);
+        Scalar well_efficiency_factor = wellEcl.getEfficiencyFactor();
+        WellGroupHelpers<Scalar>::accumulateGroupEfficiencyFactor(schedule().getGroup(wellEcl.groupName(),
+                                                                                      reportStepIdx),
+                                                                  schedule(),
+                                                                  reportStepIdx,
+                                                                  well_efficiency_factor);
         well->setWellEfficiencyFactor(well_efficiency_factor);
     }
 }
 
+template<class Scalar>
 WellInterfaceGeneric*
-BlackoilWellModelGeneric::
+BlackoilWellModelGeneric<Scalar>::
 getGenWell(const std::string& well_name)
 {
     // finding the iterator of the well in wells_ecl
@@ -1238,8 +1350,8 @@ getGenWell(const std::string& well_name)
     return *well;
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 setRepRadiusPerfLength()
 {
     for (const auto& well : well_container_generic_) {
@@ -1247,8 +1359,8 @@ setRepRadiusPerfLength()
     }
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 gliftDebug(const std::string& msg,
            DeferredLogger& deferred_logger) const
 {
@@ -1259,9 +1371,8 @@ gliftDebug(const std::string& msg,
     }
 }
 
-
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 gliftDebugShowALQ(DeferredLogger& deferred_logger)
 {
     for (auto& well : this->well_container_generic_) {
@@ -1281,12 +1392,12 @@ gliftDebugShowALQ(DeferredLogger& deferred_logger)
 // currently has the largest weighted incremental gradient. The
 // procedure takes account of any limits on the group production
 // rate or lift gas supply applied to any level of group.
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 gasLiftOptimizationStage2(DeferredLogger& deferred_logger,
                           GLiftProdWells& prod_wells,
                           GLiftOptWells& glift_wells,
-                          GasLiftGroupInfo& group_info,
+                          GasLiftGroupInfo<Scalar>& group_info,
                           GLiftWellStateMap& glift_well_state_map,
                           const int episodeIndex)
 {
@@ -1306,8 +1417,8 @@ gasLiftOptimizationStage2(DeferredLogger& deferred_logger,
     glift.runOptimize();
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 updateWellPotentials(const int reportStepIdx,
                      const bool onlyAfterEvent,
                      const SummaryConfig& summaryConfig,
@@ -1365,11 +1476,10 @@ updateWellPotentials(const int reportStepIdx,
     logAndCheckForExceptionsAndThrow(deferred_logger, exc_type,
                                      "computeWellPotentials() failed: " + exc_msg,
                                      terminal_output_, comm_);
-
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 runWellPIScaling(const int reportStepIdx,
                  DeferredLogger& local_deferredLogger)
 {
@@ -1406,10 +1516,9 @@ runWellPIScaling(const int reportStepIdx,
         this->prod_index_calc_[well_index].reInit(well);
     };
 
-
     auto rescaleWellPI =
         [this, reportStepIdx](const int    well_index,
-                              const double newWellPI) -> void
+                              const Scalar newWellPI) -> void
     {
         const auto& wname = this->wells_ecl_[well_index].name();
 
@@ -1443,8 +1552,8 @@ runWellPIScaling(const int reportStepIdx,
     this->last_run_wellpi_ = reportStepIdx;
 }
 
-bool
-BlackoilWellModelGeneric::
+template<class Scalar>
+bool BlackoilWellModelGeneric<Scalar>::
 shouldBalanceNetwork(const int reportStepIdx, const int iterationIdx) const
 {
     // if network is not active, we do not need to balance the network
@@ -1468,10 +1577,8 @@ shouldBalanceNetwork(const int reportStepIdx, const int iterationIdx) const
     }
 }
 
-
-
-std::vector<int>
-BlackoilWellModelGeneric::
+template<class Scalar>
+std::vector<int> BlackoilWellModelGeneric<Scalar>::
 getCellsForConnections(const Well& well) const
 {
     std::vector<int> wellCells;
@@ -1490,9 +1597,10 @@ getCellsForConnections(const Well& well) const
     return wellCells;
 }
 
-std::vector<std::string>
-BlackoilWellModelGeneric::getWellsForTesting(const int timeStepIdx,
-                                             const double simulationTime)
+template<class Scalar>
+std::vector<std::string> BlackoilWellModelGeneric<Scalar>::
+getWellsForTesting(const int timeStepIdx,
+                   const double simulationTime)
 {
   const auto& wtest_config = schedule()[timeStepIdx].wtest_config();
   if (!wtest_config.empty()) { // there is a WTEST request
@@ -1501,8 +1609,8 @@ BlackoilWellModelGeneric::getWellsForTesting(const int timeStepIdx,
       return {};
 }
 
-void
-BlackoilWellModelGeneric::
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
 assignWellTracerRates(data::Wells& wsrpt,
                       const WellTracerRates& wellTracerRates) const
 {
@@ -1516,13 +1624,13 @@ assignWellTracerRates(data::Wells& wsrpt,
             continue;
         }
         std::string tracerName = wTR.first.second;
-        double rate = wTR.second;
+        Scalar rate = wTR.second;
         xwPos->second.rates.set(data::Rates::opt::tracer, rate, tracerName);
     }
 }
 
- std::vector<std::vector<int>>
-BlackoilWellModelGeneric::
+template<class Scalar>
+std::vector<std::vector<int>> BlackoilWellModelGeneric<Scalar>::
 getMaxWellConnections() const
 {
     std::vector<std::vector<int>> wells;
@@ -1532,7 +1640,7 @@ getMaxWellConnections() const
     wells.reserve(schedule_wells.size());
 
     // initialize the additional cell connections introduced by wells.
-    for ( const auto& well : schedule_wells )
+    for (const auto& well : schedule_wells)
     {
         std::vector<int> compressed_well_perforations = this->getCellsForConnections(well);
 
@@ -1545,26 +1653,29 @@ getMaxWellConnections() const
     return wells;
 }
 
-int BlackoilWellModelGeneric::numLocalWellsEnd() const
+template<class Scalar>
+int BlackoilWellModelGeneric<Scalar>::numLocalWellsEnd() const
 {
     auto w = schedule().getWellsatEnd();
     w.erase(std::remove_if(w.begin(), w.end(), not_on_process_), w.end());
     return w.size();
 }
 
-int BlackoilWellModelGeneric::numLocalNonshutWells() const
+template<class Scalar>
+int BlackoilWellModelGeneric<Scalar>::numLocalNonshutWells() const
 {
     return well_container_generic_.size();
 }
 
-
-void BlackoilWellModelGeneric::initInjMult() {
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::initInjMult()
+{
     for (auto& well : this->well_container_generic_) {
         if (well->isInjector() && well->wellEcl().getInjMultMode() != Well::InjMultMode::NONE) {
             const auto& ws = this->wellState().well(well->indexOfWell());
             const auto& perf_data = ws.perf_data;
 
-            auto &values = this->prev_inj_multipliers_[well->name()];
+            auto& values = this->prev_inj_multipliers_[well->name()];
             if (values.empty()) {
                 values.assign(perf_data.size(), 1.0);
             }
@@ -1573,13 +1684,14 @@ void BlackoilWellModelGeneric::initInjMult() {
     }
 }
 
-
-void BlackoilWellModelGeneric::updateFiltrationParticleVolume(const double dt,
-                                                              const std::size_t water_index)
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
+updateFiltrationParticleVolume(const double dt,
+                               const std::size_t water_index)
 {
     for (auto& well : this->well_container_generic_) {
         if (well->isInjector()) {
-            const double conc = well->wellEcl().evalFilterConc(this->summaryState_);
+            const Scalar conc = well->wellEcl().evalFilterConc(this->summaryState_);
             if (conc > 0.) {
                 auto fc = this->filter_cake_
                         .emplace(std::piecewise_construct,
@@ -1593,7 +1705,9 @@ void BlackoilWellModelGeneric::updateFiltrationParticleVolume(const double dt,
     }
 }
 
-void BlackoilWellModelGeneric::updateInjMult(DeferredLogger& deferred_logger)
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
+updateInjMult(DeferredLogger& deferred_logger)
 {
     for (const auto& well : this->well_container_generic_) {
         if (well->isInjector() && well->wellEcl().getInjMultMode() != Well::InjMultMode::NONE) {
@@ -1602,7 +1716,9 @@ void BlackoilWellModelGeneric::updateInjMult(DeferredLogger& deferred_logger)
     }
 }
 
-void BlackoilWellModelGeneric::updateInjFCMult(DeferredLogger& deferred_logger)
+template<class Scalar>
+void BlackoilWellModelGeneric<Scalar>::
+updateInjFCMult(DeferredLogger& deferred_logger)
 {
     for (auto& well : this->well_container_generic_) {
         if (well->isInjector()) {
@@ -1614,5 +1730,7 @@ void BlackoilWellModelGeneric::updateInjFCMult(DeferredLogger& deferred_logger)
         }
     }
 }
+
+template class BlackoilWellModelGeneric<double>;
 
 }

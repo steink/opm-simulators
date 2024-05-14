@@ -10,8 +10,6 @@
 #include <dune/istl/ilu.hh>
 #endif
 
-#include <ebos/ecltimesteppingparams.hh>
-
 #include <opm/common/Exceptions.hpp>
 #include <opm/common/ErrorMacros.hpp>
 #include <opm/common/OpmLog/OpmLog.hpp>
@@ -30,14 +28,18 @@
 #include <opm/models/utils/propertysystem.hh>
 
 #include <opm/simulators/timestepping/AdaptiveSimulatorTimer.hpp>
+#include <opm/simulators/timestepping/EclTimeSteppingParams.hpp>
 #include <opm/simulators/timestepping/SimulatorReport.hpp>
 #include <opm/simulators/timestepping/SimulatorTimer.hpp>
 #include <opm/simulators/timestepping/TimeStepControl.hpp>
 #include <opm/simulators/timestepping/TimeStepControlInterface.hpp>
 
+#include <fmt/format.h>
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -249,22 +251,23 @@ std::set<std::string> consistentlyFailingWells(const std::vector<StepReport>& sr
 
         //! \brief contructor taking parameter object
         AdaptiveTimeStepping(const UnitSystem& unitSystem,
+                             const double max_next_tstep = -1.0,
                              const bool terminalOutput = true)
             : timeStepControl_()
-            , restartFactor_(EWOMS_GET_PARAM(TypeTag, double, SolverRestartFactor)) // 0.33
-            , growthFactor_(EWOMS_GET_PARAM(TypeTag, double, SolverGrowthFactor)) // 2.0
-            , maxGrowth_(EWOMS_GET_PARAM(TypeTag, double, SolverMaxGrowth)) // 3.0
-            , maxTimeStep_(EWOMS_GET_PARAM(TypeTag, double, SolverMaxTimeStepInDays)*24*60*60) // 365.25
-            , minTimeStep_(unitSystem.to_si(UnitSystem::measure::time, EWOMS_GET_PARAM(TypeTag, double, SolverMinTimeStep))) // 1e-12;
-            , ignoreConvergenceFailure_(EWOMS_GET_PARAM(TypeTag, bool, SolverContinueOnConvergenceFailure)) // false;
-            , solverRestartMax_(EWOMS_GET_PARAM(TypeTag, int, SolverMaxRestarts)) // 10
-            , solverVerbose_(EWOMS_GET_PARAM(TypeTag, int, SolverVerbosity) > 0 && terminalOutput) // 2
-            , timestepVerbose_(EWOMS_GET_PARAM(TypeTag, int, TimeStepVerbosity) > 0 && terminalOutput) // 2
-            , suggestedNextTimestep_(EWOMS_GET_PARAM(TypeTag, double, InitialTimeStepInDays)*24*60*60) // 1.0
-            , fullTimestepInitially_(EWOMS_GET_PARAM(TypeTag, bool, FullTimeStepInitially)) // false
-            , timestepAfterEvent_(EWOMS_GET_PARAM(TypeTag, double, TimeStepAfterEventInDays)*24*60*60) // 1e30
+            , restartFactor_(Parameters::get<TypeTag, Properties::SolverRestartFactor>()) // 0.33
+            , growthFactor_(Parameters::get<TypeTag, Properties::SolverGrowthFactor>()) // 2.0
+            , maxGrowth_(Parameters::get<TypeTag, Properties::SolverMaxGrowth>()) // 3.0
+            , maxTimeStep_(Parameters::get<TypeTag, Properties::SolverMaxTimeStepInDays>() * 24 * 60 * 60) // 365.25
+            , minTimeStep_(unitSystem.to_si(UnitSystem::measure::time, Parameters::get<TypeTag, Properties::SolverMinTimeStep>())) // 1e-12;
+            , ignoreConvergenceFailure_(Parameters::get<TypeTag, Properties::SolverContinueOnConvergenceFailure>()) // false;
+            , solverRestartMax_(Parameters::get<TypeTag, Properties::SolverMaxRestarts>()) // 10
+            , solverVerbose_(Parameters::get<TypeTag, Properties::SolverVerbosity>() > 0 && terminalOutput) // 2
+            , timestepVerbose_(Parameters::get<TypeTag, Properties::TimeStepVerbosity>() > 0 && terminalOutput) // 2
+            , suggestedNextTimestep_((max_next_tstep <= 0 ? Parameters::get<TypeTag, Properties::InitialTimeStepInDays>() : max_next_tstep) * 24 * 60 * 60) // 1.0
+            , fullTimestepInitially_(Parameters::get<TypeTag, Properties::FullTimeStepInitially>()) // false
+            , timestepAfterEvent_(Parameters::get<TypeTag, Properties::TimeStepAfterEventInDays>() * 24 * 60 * 60) // 1e30
             , useNewtonIteration_(false)
-            , minTimeStepBeforeShuttingProblematicWells_(EWOMS_GET_PARAM(TypeTag, double, MinTimeStepBeforeShuttingProblematicWellsInDays)*unit::day)
+            , minTimeStepBeforeShuttingProblematicWells_(Parameters::get<TypeTag, Properties::MinTimeStepBeforeShuttingProblematicWellsInDays>() * unit::day)
 
         {
             init_(unitSystem);
@@ -286,14 +289,14 @@ std::set<std::string> consistentlyFailingWells(const std::vector<StepReport>& sr
             , maxTimeStep_(tuning.TSMAXZ) // 365.25
             , minTimeStep_(tuning.TSFMIN) // 0.1;
             , ignoreConvergenceFailure_(true)
-            , solverRestartMax_(EWOMS_GET_PARAM(TypeTag, int, SolverMaxRestarts)) // 10
-            , solverVerbose_(EWOMS_GET_PARAM(TypeTag, int, SolverVerbosity) > 0 && terminalOutput) // 2
-            , timestepVerbose_(EWOMS_GET_PARAM(TypeTag, int, TimeStepVerbosity) > 0 && terminalOutput) // 2
-            , suggestedNextTimestep_(max_next_tstep <= 0 ? EWOMS_GET_PARAM(TypeTag, double, InitialTimeStepInDays)*86400 : max_next_tstep) // 1.0
-            , fullTimestepInitially_(EWOMS_GET_PARAM(TypeTag, bool, FullTimeStepInitially)) // false
+            , solverRestartMax_(Parameters::get<TypeTag, Properties::SolverMaxRestarts>()) // 10
+            , solverVerbose_(Parameters::get<TypeTag, Properties::SolverVerbosity>() > 0 && terminalOutput) // 2
+            , timestepVerbose_(Parameters::get<TypeTag, Properties::TimeStepVerbosity>() > 0 && terminalOutput) // 2
+            , suggestedNextTimestep_(max_next_tstep <= 0 ? Parameters::get<TypeTag, Properties::InitialTimeStepInDays>() * 24 * 60 * 60 : max_next_tstep) // 1.0
+            , fullTimestepInitially_(Parameters::get<TypeTag, Properties::FullTimeStepInitially>()) // false
             , timestepAfterEvent_(tuning.TMAXWC) // 1e30
             , useNewtonIteration_(false)
-            , minTimeStepBeforeShuttingProblematicWells_(EWOMS_GET_PARAM(TypeTag, double, MinTimeStepBeforeShuttingProblematicWellsInDays)*unit::day)
+            , minTimeStepBeforeShuttingProblematicWells_(Parameters::get<TypeTag, Properties::MinTimeStepBeforeShuttingProblematicWellsInDays>() * unit::day)
         {
             init_(unitSystem);
         }
@@ -302,51 +305,71 @@ std::set<std::string> consistentlyFailingWells(const std::vector<StepReport>& sr
         {
             registerEclTimeSteppingParameters<TypeTag>();
             // TODO: make sure the help messages are correct (and useful)
-            EWOMS_REGISTER_PARAM(TypeTag, bool, SolverContinueOnConvergenceFailure,
-                                 "Continue instead of stop when minimum solver time step is reached");
-            EWOMS_REGISTER_PARAM(TypeTag, int, SolverMaxRestarts,
-                                 "The maximum number of breakdowns before a substep is given up and the simulator is terminated");
-            EWOMS_REGISTER_PARAM(TypeTag, int, SolverVerbosity,
-                                 "Specify the \"chattiness\" of the non-linear solver itself");
-            EWOMS_REGISTER_PARAM(TypeTag, int, TimeStepVerbosity,
-                                 "Specify the \"chattiness\" during the time integration");
-            EWOMS_REGISTER_PARAM(TypeTag, double, InitialTimeStepInDays,
-                                 "The size of the initial time step in days");
-            EWOMS_REGISTER_PARAM(TypeTag, bool, FullTimeStepInitially,
-                                 "Always attempt to finish a report step using a single substep");
-            EWOMS_REGISTER_PARAM(TypeTag, std::string, TimeStepControl,
-                                 "The algorithm used to determine time-step sizes. valid options are: 'pid' (default), 'pid+iteration', 'pid+newtoniteration', 'iterationcount', 'newtoniterationcount' and 'hardcoded'");
-            EWOMS_REGISTER_PARAM(TypeTag, double, TimeStepControlTolerance,
-                                 "The tolerance used by the time step size control algorithm");
-            EWOMS_REGISTER_PARAM(TypeTag, int, TimeStepControlTargetIterations,
-                                 "The number of linear iterations which the time step control scheme should aim for (if applicable)");
-            EWOMS_REGISTER_PARAM(TypeTag, int, TimeStepControlTargetNewtonIterations,
-                                 "The number of Newton iterations which the time step control scheme should aim for (if applicable)");
-            EWOMS_REGISTER_PARAM(TypeTag, double, TimeStepControlDecayRate,
-                                 "The decay rate of the time step size of the number of target iterations is exceeded");
-            EWOMS_REGISTER_PARAM(TypeTag, double, TimeStepControlGrowthRate,
-                                 "The growth rate of the time step size of the number of target iterations is undercut");
-            EWOMS_REGISTER_PARAM(TypeTag, double, TimeStepControlDecayDampingFactor,
-                                 "The decay rate of the time step decrease when the target iterations is exceeded");
-            EWOMS_REGISTER_PARAM(TypeTag, double, TimeStepControlGrowthDampingFactor,
-                                 "The growth rate of the time step increase when the target iterations is undercut");
-            EWOMS_REGISTER_PARAM(TypeTag, std::string, TimeStepControlFileName,
-                                 "The name of the file which contains the hardcoded time steps sizes");
-            EWOMS_REGISTER_PARAM(TypeTag, double, MinTimeStepBeforeShuttingProblematicWellsInDays,
-                                 "The minimum time step size in days for which problematic wells are not shut");
-            EWOMS_REGISTER_PARAM(TypeTag, double, MinTimeStepBasedOnNewtonIterations,
-                                 "The minimum time step size (in days for field and metric unit and hours for lab unit) can be reduced to based on newton iteration counts");
+            Parameters::registerParam<TypeTag, Properties::SolverContinueOnConvergenceFailure>
+                ("Continue instead of stop when minimum solver time step is reached");
+            Parameters::registerParam<TypeTag, Properties::SolverMaxRestarts>
+                ("The maximum number of breakdowns before a substep is given up and "
+                 "the simulator is terminated");
+            Parameters::registerParam<TypeTag, Properties::SolverVerbosity>
+                ("Specify the \"chattiness\" of the non-linear solver itself");
+            Parameters::registerParam<TypeTag, Properties::TimeStepVerbosity>
+                ("Specify the \"chattiness\" during the time integration");
+            Parameters::registerParam<TypeTag, Properties::InitialTimeStepInDays>
+                ("The size of the initial time step in days");
+            Parameters::registerParam<TypeTag, Properties::FullTimeStepInitially>
+                ("Always attempt to finish a report step using a single substep");
+            Parameters::registerParam<TypeTag, Properties::TimeStepControl>
+                ("The algorithm used to determine time-step sizes. "
+                 "Valid options are: "
+                 "'pid' (default), "
+                 "'pid+iteration', "
+                 "'pid+newtoniteration', "
+                 "'iterationcount', "
+                "'newtoniterationcount' "
+                "and 'hardcoded'");
+            Parameters::registerParam<TypeTag, Properties::TimeStepControlTolerance>
+                ("The tolerance used by the time step size control algorithm");
+            Parameters::registerParam<TypeTag, Properties::TimeStepControlTargetIterations>
+                ("The number of linear iterations which the time step control scheme "
+                 "should aim for (if applicable)");
+            Parameters::registerParam<TypeTag, Properties::TimeStepControlTargetNewtonIterations>
+                ("The number of Newton iterations which the time step control scheme "
+                 "should aim for (if applicable)");
+            Parameters::registerParam<TypeTag, Properties::TimeStepControlDecayRate>
+                ("The decay rate of the time step size of the number of "
+                 "target iterations is exceeded");
+            Parameters::registerParam<TypeTag, Properties::TimeStepControlGrowthRate>
+                ("The growth rate of the time step size of the number of "
+                 "target iterations is undercut");
+            Parameters::registerParam<TypeTag, Properties::TimeStepControlDecayDampingFactor>
+                ("The decay rate of the time step decrease when the "
+                 "target iterations is exceeded");
+            Parameters::registerParam<TypeTag, Properties::TimeStepControlGrowthDampingFactor>
+                ("The growth rate of the time step increase when the "
+                 "target iterations is undercut");
+            Parameters::registerParam<TypeTag, Properties::TimeStepControlFileName>
+                ("The name of the file which contains the hardcoded time steps sizes");
+            Parameters::registerParam<TypeTag, Properties::MinTimeStepBeforeShuttingProblematicWellsInDays>
+                ("The minimum time step size in days for which problematic wells are not shut");
+            Parameters::registerParam<TypeTag, Properties::MinTimeStepBasedOnNewtonIterations>
+                ("The minimum time step size (in days for field and metric unit and hours for lab unit) "
+                 "can be reduced to based on newton iteration counts");
         }
 
         /** \brief  step method that acts like the solver::step method
                     in a sub cycle of time steps
+            \param tuningUpdater Function used to update TUNING parameters before each
+                                 time step. ACTIONX might change tuning.
         */
         template <class Solver>
         SimulatorReport step(const SimulatorTimer& simulatorTimer,
                              Solver& solver,
                              const bool isEvent,
-                             const std::vector<int>* fipnum = nullptr)
+                             const std::vector<int>* fipnum = nullptr,
+                             const std::function<bool()> tuningUpdater = [](){return false;})
         {
+            // Maybe update tuning
+            tuningUpdater();
             SimulatorReport report;
             const double timestep = simulatorTimer.currentStepLength();
 
@@ -364,8 +387,8 @@ std::set<std::string> consistentlyFailingWells(const std::vector<StepReport>& sr
                 suggestedNextTimestep_ = timestepAfterEvent_;
             }
 
-            auto& modelSimulator = solver.model().simulator();
-            auto& ebosProblem = modelSimulator.problem();
+            auto& simulator = solver.model().simulator();
+            auto& problem = simulator.problem();
 
             // create adaptive step timer with previously used sub step size
             AdaptiveSimulatorTimer substepTimer(simulatorTimer, suggestedNextTimestep_, maxTimeStep_);
@@ -375,8 +398,15 @@ std::set<std::string> consistentlyFailingWells(const std::vector<StepReport>& sr
 
             // sub step time loop
             while (!substepTimer.done()) {
+                // Maybe update tuning
                 // get current delta t
-                const double dt = substepTimer.currentStepLength() ;
+                auto oldValue = suggestedNextTimestep_;
+                if (tuningUpdater()) {
+                    // Use provideTimeStepEstimate to make we sure don't simulate longer than the report step is.
+                    substepTimer.provideTimeStepEstimate(suggestedNextTimestep_);
+                    suggestedNextTimestep_ = oldValue;
+                }
+                const double dt = substepTimer.currentStepLength();
                 if (timestepVerbose_) {
                     detail::logTimer(substepTimer);
                 }
@@ -432,20 +462,23 @@ std::set<std::string> consistentlyFailingWells(const std::vector<StepReport>& sr
                 }
 
                 //Pass substep to eclwriter for summary output
-                modelSimulator.problem().setSubStepReport(substepReport);
+                simulator.problem().setSubStepReport(substepReport);
 
                 report += substepReport;
 
-                bool continue_on_uncoverged_solution = ignoreConvergenceFailure_ && !substepReport.converged && dt <= minTimeStep_;
+                bool continue_on_uncoverged_solution = ignoreConvergenceFailure_ &&
+                                                       !substepReport.converged  &&
+                                                       dt <= minTimeStep_;
 
-                if (continue_on_uncoverged_solution) {
-                    const auto msg = std::string("Solver failed to converge but timestep ")
-                            + std::to_string(dt) + " is smaller or equal to "
-                            + std::to_string(minTimeStep_) + "\n which is the minimum threshold given"
-                            +  "by option --solver-min-time-step= \n";
-                    if (solverVerbose_) {
-                        OpmLog::problem(msg);
-                    }
+                if (continue_on_uncoverged_solution && solverVerbose_) {
+                    const auto msg = fmt::format(
+                        "Solver failed to converge but timestep "
+                        "{} is smaller or equal to {}\n"
+                        "which is the minimum threshold given "
+                        "by option --solver-min-time-step\n",
+                        dt, minTimeStep_
+                    );
+                    OpmLog::problem(msg);
                 }
 
                 if (substepReport.converged || continue_on_uncoverged_solution) {
@@ -497,7 +530,7 @@ std::set<std::string> consistentlyFailingWells(const std::vector<StepReport>& sr
                         time::StopWatch perfTimer;
                         perfTimer.start();
 
-                        ebosProblem.writeOutput(simulatorTimer);
+                        problem.writeOutput(simulatorTimer);
 
                         report.success.output_write_time += perfTimer.secsSinceStart();
                     }
@@ -515,8 +548,10 @@ std::set<std::string> consistentlyFailingWells(const std::vector<StepReport>& sr
                     // If we have restarted (i.e. cut the timestep) too
                     // many times, we have failed and throw an exception.
                     if (restarts >= solverRestartMax_) {
-                        const auto msg = std::string("Solver failed to converge after cutting timestep ")
-                            + std::to_string(restarts) + " times.";
+                        const auto msg = fmt::format(
+                            "Solver failed to converge after cutting timestep {} times.",
+                            restarts
+                        );
                         if (solverVerbose_) {
                             OpmLog::error(msg);
                         }
@@ -531,9 +566,11 @@ std::set<std::string> consistentlyFailingWells(const std::vector<StepReport>& sr
                     // If we have restarted (i.e. cut the timestep) too
                     // much, we have failed and throw an exception.
                     if (newTimeStep < minTimeStep_) {
-                        const auto msg = std::string("Solver failed to converge after cutting timestep to ")
-                                + std::to_string(minTimeStep_) + "\n which is the minimum threshold given"
-                                +  "by option --solver-min-time-step= \n";
+                        const auto msg = fmt::format(
+                            "Solver failed to converge after cutting timestep to {}\n"
+                            "which is the minimum threshold given by option --solver-min-time-step\n",
+                            minTimeStep_
+                        );
                         if (solverVerbose_) {
                             OpmLog::error(msg);
                         }
@@ -545,9 +582,11 @@ std::set<std::string> consistentlyFailingWells(const std::vector<StepReport>& sr
                     auto chopTimestep = [&]() {
                         substepTimer.provideTimeStepEstimate(newTimeStep);
                         if (solverVerbose_) {
-                            std::string msg;
-                            msg = causeOfFailure + "\nTimestep chopped to "
-                                + std::to_string(unit::convert::to(substepTimer.currentStepLength(), unit::day)) + " days\n";
+                            const auto msg = fmt::format(
+                                "{}\nTimestep chopped to {} days\n",
+                                causeOfFailure,
+                                std::to_string(unit::convert::to(substepTimer.currentStepLength(), unit::day))
+                            );
                             OpmLog::problem(msg);
                         }
                         ++restarts;
@@ -592,7 +631,7 @@ std::set<std::string> consistentlyFailingWells(const std::vector<StepReport>& sr
                         }
                     }
                 }
-                ebosProblem.setNextTimeStepSize(substepTimer.currentStepLength());
+                problem.setNextTimeStepSize(substepTimer.currentStepLength());
             }
 
             // store estimated time step for next reportStep
@@ -625,11 +664,16 @@ std::set<std::string> consistentlyFailingWells(const std::vector<StepReport>& sr
             growthFactor_ = tuning.TFDIFF;
             maxGrowth_ = tuning.TSFMAX;
             maxTimeStep_ = tuning.TSMAXZ;
+            updateNEXTSTEP(max_next_tstep);
+            timestepAfterEvent_ = tuning.TMAXWC;
+        }
+
+        void updateNEXTSTEP(double max_next_tstep)
+        {
              // \Note Only update next suggested step if TSINIT was explicitly set in TUNING or NEXTSTEP is active. 
             if (max_next_tstep > 0) {
                 suggestedNextTimestep_ = max_next_tstep;
             }
-            timestepAfterEvent_ = tuning.TMAXWC;
         }
 
         template<class Serializer>
@@ -771,25 +815,25 @@ std::set<std::string> consistentlyFailingWells(const std::vector<StepReport>& sr
         void init_(const UnitSystem& unitSystem)
         {
             // valid are "pid" and "pid+iteration"
-            std::string control = EWOMS_GET_PARAM(TypeTag, std::string, TimeStepControl); // "pid"
+            std::string control = Parameters::get<TypeTag, Properties::TimeStepControl>(); // "pid"
 
-            const double tol =  EWOMS_GET_PARAM(TypeTag, double, TimeStepControlTolerance); // 1e-1
+            const double tol =  Parameters::get<TypeTag, Properties::TimeStepControlTolerance>(); // 1e-1
             if (control == "pid") {
                 timeStepControl_ = std::make_unique<PIDTimeStepControl>(tol);
                 timeStepControlType_ = TimeStepControlType::PID;
             }
             else if (control == "pid+iteration") {
-                const int iterations =  EWOMS_GET_PARAM(TypeTag, int, TimeStepControlTargetIterations); // 30
-                const double decayDampingFactor = EWOMS_GET_PARAM(TypeTag, double, TimeStepControlDecayDampingFactor); // 1.0
-                const double growthDampingFactor = EWOMS_GET_PARAM(TypeTag, double, TimeStepControlGrowthDampingFactor); // 3.2
+                const int iterations =  Parameters::get<TypeTag, Properties::TimeStepControlTargetIterations>(); // 30
+                const double decayDampingFactor = Parameters::get<TypeTag, Properties::TimeStepControlDecayDampingFactor>(); // 1.0
+                const double growthDampingFactor = Parameters::get<TypeTag, Properties::TimeStepControlGrowthDampingFactor>(); // 3.2
                 timeStepControl_ = std::make_unique<PIDAndIterationCountTimeStepControl>(iterations, decayDampingFactor, growthDampingFactor, tol);
                 timeStepControlType_ = TimeStepControlType::PIDAndIterationCount;
             }
             else if (control == "pid+newtoniteration") {
-                const int iterations =  EWOMS_GET_PARAM(TypeTag, int, TimeStepControlTargetNewtonIterations); // 8
-                const double decayDampingFactor = EWOMS_GET_PARAM(TypeTag, double, TimeStepControlDecayDampingFactor); // 1.0
-                const double growthDampingFactor = EWOMS_GET_PARAM(TypeTag, double, TimeStepControlGrowthDampingFactor); // 3.2
-                const double nonDimensionalMinTimeStepIterations = EWOMS_GET_PARAM(TypeTag, double, MinTimeStepBasedOnNewtonIterations); // 0.0 by default
+                const int iterations =  Parameters::get<TypeTag, Properties::TimeStepControlTargetNewtonIterations>(); // 8
+                const double decayDampingFactor = Parameters::get<TypeTag, Properties::TimeStepControlDecayDampingFactor>(); // 1.0
+                const double growthDampingFactor = Parameters::get<TypeTag, Properties::TimeStepControlGrowthDampingFactor>(); // 3.2
+                const double nonDimensionalMinTimeStepIterations = Parameters::get<TypeTag, Properties::MinTimeStepBasedOnNewtonIterations>(); // 0.0 by default
                 // the min time step can be reduced by the newton iteration numbers
                 double minTimeStepReducedByIterations = unitSystem.to_si(UnitSystem::measure::time, nonDimensionalMinTimeStepIterations);
                 timeStepControl_ = std::make_unique<PIDAndIterationCountTimeStepControl>(iterations, decayDampingFactor,
@@ -798,22 +842,22 @@ std::set<std::string> consistentlyFailingWells(const std::vector<StepReport>& sr
                 useNewtonIteration_ = true;
             }
             else if (control == "iterationcount") {
-                const int iterations =  EWOMS_GET_PARAM(TypeTag, int, TimeStepControlTargetIterations); // 30
-                const double decayrate = EWOMS_GET_PARAM(TypeTag, double, TimeStepControlDecayRate); // 0.75
-                const double growthrate = EWOMS_GET_PARAM(TypeTag, double, TimeStepControlGrowthRate); // 1.25
+                const int iterations =  Parameters::get<TypeTag, Properties::TimeStepControlTargetIterations>(); // 30
+                const double decayrate = Parameters::get<TypeTag, Properties::TimeStepControlDecayRate>(); // 0.75
+                const double growthrate = Parameters::get<TypeTag, Properties::TimeStepControlGrowthRate>(); // 1.25
                 timeStepControl_ = std::make_unique<SimpleIterationCountTimeStepControl>(iterations, decayrate, growthrate);
                 timeStepControlType_ = TimeStepControlType::SimpleIterationCount;
             }
             else if (control == "newtoniterationcount") {
-                const int iterations =  EWOMS_GET_PARAM(TypeTag, int, TimeStepControlTargetNewtonIterations); // 8
-                const double decayrate = EWOMS_GET_PARAM(TypeTag, double, TimeStepControlDecayRate); // 0.75
-                const double growthrate = EWOMS_GET_PARAM(TypeTag, double, TimeStepControlGrowthRate); // 1.25
+                const int iterations =  Parameters::get<TypeTag, Properties::TimeStepControlTargetNewtonIterations>(); // 8
+                const double decayrate = Parameters::get<TypeTag, Properties::TimeStepControlDecayRate>(); // 0.75
+                const double growthrate = Parameters::get<TypeTag, Properties::TimeStepControlGrowthRate>(); // 1.25
                 timeStepControl_ = std::make_unique<SimpleIterationCountTimeStepControl>(iterations, decayrate, growthrate);
                 useNewtonIteration_ = true;
                 timeStepControlType_ = TimeStepControlType::SimpleIterationCount;
             }
             else if (control == "hardcoded") {
-                const std::string filename = EWOMS_GET_PARAM(TypeTag, std::string, TimeStepControlFileName); // "timesteps"
+                const std::string filename = Parameters::get<TypeTag, Properties::TimeStepControlFileName>(); // "timesteps"
                 timeStepControl_ = std::make_unique<HardcodedTimeStepControl>(filename);
                 timeStepControlType_ = TimeStepControlType::HardCodedTimeStep;
             }
@@ -832,16 +876,16 @@ std::set<std::string> consistentlyFailingWells(const std::vector<StepReport>& sr
         double restartFactor_;               //!< factor to multiply time step with when solver fails to converge
         double growthFactor_;                //!< factor to multiply time step when solver recovered from failed convergence
         double maxGrowth_;                   //!< factor that limits the maximum growth of a time step
-        double maxTimeStep_;                //!< maximal allowed time step size in days
-        double minTimeStep_;                //!< minimal allowed time step size before throwing
-        bool ignoreConvergenceFailure_;     //!< continue instead of stop when minimum time step is reached
-        int solverRestartMax_;        //!< how many restart of solver are allowed
-        bool solverVerbose_;           //!< solver verbosity
-        bool timestepVerbose_;         //!< timestep verbosity
-        double suggestedNextTimestep_;      //!< suggested size of next timestep
-        bool fullTimestepInitially_;        //!< beginning with the size of the time step from data file
-        double timestepAfterEvent_;         //!< suggested size of timestep after an event
-        bool useNewtonIteration_;           //!< use newton iteration count for adaptive time step control
+        double maxTimeStep_;                 //!< maximal allowed time step size in days
+        double minTimeStep_;                 //!< minimal allowed time step size before throwing
+        bool ignoreConvergenceFailure_;      //!< continue instead of stop when minimum time step is reached
+        int solverRestartMax_;               //!< how many restart of solver are allowed
+        bool solverVerbose_;                 //!< solver verbosity
+        bool timestepVerbose_;               //!< timestep verbosity
+        double suggestedNextTimestep_;       //!< suggested size of next timestep
+        bool fullTimestepInitially_;         //!< beginning with the size of the time step from data file
+        double timestepAfterEvent_;          //!< suggested size of timestep after an event
+        bool useNewtonIteration_;            //!< use newton iteration count for adaptive time step control
         double minTimeStepBeforeShuttingProblematicWells_; //! < shut problematic wells when time step size in days are less than this
     };
 }

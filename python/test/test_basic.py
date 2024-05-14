@@ -1,6 +1,5 @@
 import os
 import unittest
-from contextlib import contextmanager
 from pathlib import Path
 from opm.simulators import BlackOilSimulator
 from .pytest_common import pushd
@@ -71,4 +70,5 @@ class TestBasic(unittest.TestCase):
             sim.step()
             poro2 = sim.get_porosity()
             self.assertAlmostEqual(poro2[0], 0.285, places=7, msg='value of porosity 2')
+
 

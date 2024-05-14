@@ -15,10 +15,10 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "config.h"
-#include <flow/flow_ebos_gasoil.hpp>
+#include <flow/flow_gasoil.hpp>
 
 
 int main(int argc, char** argv)
 {
-    return Opm::flowEbosGasOilMainStandalone(argc, argv);
+    return Opm::flowGasOilMainStandalone(argc, argv);
 }

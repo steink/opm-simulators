@@ -24,18 +24,13 @@
 #ifndef OPM_BLACKOILWELLMODEL_HEADER_INCLUDED
 #define OPM_BLACKOILWELLMODEL_HEADER_INCLUDED
 
-#include <ebos/eclproblem.hh>
 #include <opm/common/OpmLog/OpmLog.hpp>
 
-#include <cassert>
 #include <cstddef>
 #include <map>
 #include <memory>
 #include <optional>
-#include <set>
 #include <string>
-#include <tuple>
-#include <unordered_map>
 #include <vector>
 
 #include <opm/input/eclipse/Schedule/Group/Group.hpp>
@@ -43,8 +38,13 @@
 #include <opm/input/eclipse/Schedule/Schedule.hpp>
 #include <opm/input/eclipse/Schedule/Well/WellTestState.hpp>
 
+#include <opm/models/discretization/common/baseauxiliarymodule.hh>
+
 #include <opm/simulators/flow/countGlobalCells.hpp>
+#include <opm/simulators/flow/FlowBaseVanguard.hpp>
 #include <opm/simulators/flow/SubDomain.hpp>
+
+#include <opm/simulators/linalg/matrixblock.hh>
 
 #include <opm/simulators/wells/BlackoilWellModelGeneric.hpp>
 #include <opm/simulators/wells/BlackoilWellModelGuideRates.hpp>
@@ -89,10 +89,15 @@ struct EnableTerminalOutput {
 
 namespace Opm {
 
+#if COMPILE_BDA_BRIDGE
+class WellContributions;
+#endif
+
         /// Class for handling the blackoil well model.
         template<typename TypeTag>
         class BlackoilWellModel : public BaseAuxiliaryModule<TypeTag>
-                                , public BlackoilWellModelGeneric
+                                , public BlackoilWellModelGeneric<GetPropType<TypeTag,
+                                                                              Properties::Scalar>>
         {
         public:
             // ---------      Types      ---------
@@ -109,12 +114,12 @@ namespace Opm {
             using GlobalEqVector = GetPropType<TypeTag, Properties::GlobalEqVector>;
             using SparseMatrixAdapter = GetPropType<TypeTag, Properties::SparseMatrixAdapter>;
             using GasLiftSingleWell = typename WellInterface<TypeTag>::GasLiftSingleWell;
-            using GLiftOptWells = typename BlackoilWellModelGeneric::GLiftOptWells;
-            using GLiftProdWells = typename BlackoilWellModelGeneric::GLiftProdWells;
+            using GLiftOptWells = typename BlackoilWellModelGeneric<Scalar>::GLiftOptWells;
+            using GLiftProdWells = typename BlackoilWellModelGeneric<Scalar>::GLiftProdWells;
             using GLiftWellStateMap =
-                typename BlackoilWellModelGeneric::GLiftWellStateMap;
-            using GLiftEclWells = typename GasLiftGroupInfo::GLiftEclWells;
-            using GLiftSyncGroups = typename GasLiftSingleWellGeneric::GLiftSyncGroups;
+                typename BlackoilWellModelGeneric<Scalar>::GLiftWellStateMap;
+            using GLiftEclWells = typename GasLiftGroupInfo<Scalar>::GLiftEclWells;
+            using GLiftSyncGroups = typename GasLiftSingleWellGeneric<Scalar>::GLiftSyncGroups;
             constexpr static std::size_t pressureVarIndex = GetPropType<TypeTag, Properties::Indices>::pressureSwitchIdx;
             typedef typename BaseAuxiliaryModule<TypeTag>::NeighborSet NeighborSet;
 
@@ -143,7 +148,7 @@ namespace Opm {
 
             using Domain = SubDomain<Grid>;
 
-            BlackoilWellModel(Simulator& ebosSimulator);
+            BlackoilWellModel(Simulator& simulator);
 
             void init();
             void initWellContainer(const int reportStepIdx) override;
@@ -196,7 +201,7 @@ namespace Opm {
             void beginEpisode()
             {
                 OPM_TIMEBLOCK(beginEpsiode);
-                beginReportStep(ebosSimulator_.episodeIndex());
+                beginReportStep(simulator_.episodeIndex());
             }
 
             void beginTimeStep();
@@ -204,8 +209,8 @@ namespace Opm {
             void beginIteration()
             {
                 OPM_TIMEBLOCK(beginIteration);
-                assemble(ebosSimulator_.model().newtonMethod().numIterations(),
-                         ebosSimulator_.timeStepSize());
+                assemble(simulator_.model().newtonMethod().numIterations(),
+                         simulator_.timeStepSize());
             }
 
             void endIteration()
@@ -214,7 +219,7 @@ namespace Opm {
             void endTimeStep()
             {
                 OPM_TIMEBLOCK(endTimeStep);
-                timeStepSucceeded(ebosSimulator_.time(), ebosSimulator_.timeStepSize());
+                timeStepSucceeded(simulator_.time(), simulator_.timeStepSize());
             }
 
             void endEpisode()
@@ -234,16 +239,16 @@ namespace Opm {
 
             using WellInterfacePtr = std::shared_ptr<WellInterface<TypeTag> >;
 
-            using BlackoilWellModelGeneric::initFromRestartFile;
+            using BlackoilWellModelGeneric<Scalar>::initFromRestartFile;
             void initFromRestartFile(const RestartValue& restartValues)
             {
                 initFromRestartFile(restartValues,
-                                    this->ebosSimulator_.vanguard().transferWTestState(),
+                                    this->simulator_.vanguard().transferWTestState(),
                                     grid().size(0),
                                     param_.use_multisegment_well_);
             }
 
-            using BlackoilWellModelGeneric::prepareDeserialize;
+            using BlackoilWellModelGeneric<Scalar>::prepareDeserialize;
             void prepareDeserialize(const int report_step)
             {
                 prepareDeserialize(report_step, grid().size(0),
@@ -253,13 +258,13 @@ namespace Opm {
             data::Wells wellData() const
             {
                 auto wsrpt = this->wellState()
-                    .report(ebosSimulator_.vanguard().globalCell().data(),
+                    .report(simulator_.vanguard().globalCell().data(),
                             [this](const int well_index) -> bool
                 {
                     return this->wasDynamicallyShutThisTimeStep(well_index);
                 });
 
-                const auto& tracerRates = ebosSimulator_.problem().tracerModel().getWellTracerRates();
+                const auto& tracerRates = simulator_.problem().tracerModel().getWellTracerRates();
                 this->assignWellTracerRates(wsrpt, tracerRates);
 
 
@@ -280,8 +285,10 @@ namespace Opm {
             // subtract B*inv(D)*C * x from A*x
             void apply(const BVector& x, BVector& Ax) const;
 
+#if COMPILE_BDA_BRIDGE
             // accumulate the contributions of all Wells in the WellContributions object
             void getWellContributions(WellContributions& x) const;
+#endif
 
             // apply well model with scaling of alpha
             void applyScaleAdd(const Scalar alpha, const BVector& x, BVector& Ax) const;
@@ -332,7 +339,7 @@ namespace Opm {
             WellInterfacePtr getWell(const std::string& well_name) const;
             bool hasWell(const std::string& well_name) const;
 
-            using PressureMatrix = Dune::BCRSMatrix<Opm::MatrixBlock<double, 1, 1>>;
+            using PressureMatrix = Dune::BCRSMatrix<Opm::MatrixBlock<Scalar, 1, 1>>;
 
             void addWellPressureEquations(PressureMatrix& jacobian, const BVector& weights,const bool use_well_weights) const;
 
@@ -354,13 +361,13 @@ namespace Opm {
             void updateWellControlsDomain(DeferredLogger& deferred_logger, const Domain& domain);
 
             void logPrimaryVars() const;
-            std::vector<double> getPrimaryVarsDomain(const Domain& domain) const;
-            void setPrimaryVarsDomain(const Domain& domain, const std::vector<double>& vars);
+            std::vector<Scalar> getPrimaryVarsDomain(const Domain& domain) const;
+            void setPrimaryVarsDomain(const Domain& domain, const std::vector<Scalar>& vars);
 
             void setupDomains(const std::vector<Domain>& domains);
 
         protected:
-            Simulator& ebosSimulator_;
+            Simulator& simulator_;
 
             // a vector of all the wells.
             std::vector<WellInterfacePtr> well_container_{};
@@ -388,8 +395,8 @@ namespace Opm {
             std::size_t global_num_cells_{};
             // the number of the cells in the local grid
             std::size_t local_num_cells_{};
-            double gravity_{};
-            std::vector<double> depth_{};
+            Scalar gravity_{};
+            std::vector<Scalar> depth_{};
             bool alternative_well_rate_init_{};
 
             std::unique_ptr<RateConverterType> rateConverter_{};
@@ -417,13 +424,13 @@ namespace Opm {
             std::map<std::string, int> well_domain_;
 
             const Grid& grid() const
-            { return ebosSimulator_.vanguard().grid(); }
+            { return simulator_.vanguard().grid(); }
 
             const EquilGrid& equilGrid() const
-            { return ebosSimulator_.vanguard().equilGrid(); }
+            { return simulator_.vanguard().equilGrid(); }
 
             const EclipseState& eclState() const
-            { return ebosSimulator_.vanguard().eclState(); }
+            { return simulator_.vanguard().eclState(); }
 
             // compute the well fluxes and assemble them in to the reservoir equations as source terms
             // and in the well equations.
@@ -489,12 +496,12 @@ namespace Opm {
             void updateAverageFormationFactor();
 
             void computePotentials(const std::size_t widx,
-                                   const WellState& well_state_copy,
+                                   const WellState<Scalar>& well_state_copy,
                                    std::string& exc_msg,
                                    ExceptionType::ExcEnum& exc_type,
                                    DeferredLogger& deferred_logger) override;
 
-            const std::vector<double>& wellPerfEfficiencyFactors() const;
+            const std::vector<Scalar>& wellPerfEfficiencyFactors() const;
 
             void calculateProductivityIndexValuesShutWells(const int reportStepIdx, DeferredLogger& deferred_logger) override;
             void calculateProductivityIndexValues(DeferredLogger& deferred_logger) override;
@@ -517,15 +524,19 @@ namespace Opm {
             bool maybeDoGasLiftOptimize(DeferredLogger& deferred_logger);
 
             void gasLiftOptimizationStage1(DeferredLogger& deferred_logger,
-                GLiftProdWells &prod_wells, GLiftOptWells &glift_wells,
-                GasLiftGroupInfo &group_info, GLiftWellStateMap &state_map);
+                                           GLiftProdWells& prod_wells,
+                                           GLiftOptWells& glift_wells,
+                                           GasLiftGroupInfo<Scalar>& group_info,
+                                           GLiftWellStateMap& state_map);
 
             // cannot be const since it accesses the non-const WellState
-            void gasLiftOptimizationStage1SingleWell(WellInterface<TypeTag> *well,
-                DeferredLogger& deferred_logger,
-                GLiftProdWells &prod_wells, GLiftOptWells &glift_wells,
-                GasLiftGroupInfo &group_info, GLiftWellStateMap &state_map,
-                GLiftSyncGroups& groups_to_sync);
+            void gasLiftOptimizationStage1SingleWell(WellInterface<TypeTag>* well,
+                                                     DeferredLogger& deferred_logger,
+                                                     GLiftProdWells& prod_wells,
+                                                     GLiftOptWells& glift_wells,
+                                                     GasLiftGroupInfo<Scalar>& group_info,
+                                                     GLiftWellStateMap& state_map,
+                                                     GLiftSyncGroups& groups_to_sync);
 
             void extractLegacyCellPvtRegionIndex_();
 
@@ -538,25 +549,28 @@ namespace Opm {
 
             void calcRates(const int fipnum,
                            const int pvtreg,
-                           const std::vector<double>& production_rates,
-                           std::vector<double>& resv_coeff) override;
+                           const std::vector<Scalar>& production_rates,
+                           std::vector<Scalar>& resv_coeff) override;
 
             void calcInjRates(const int fipnum,
                            const int pvtreg,
-                           std::vector<double>& resv_coeff) override;
+                           std::vector<Scalar>& resv_coeff) override;
 
             void computeWellTemperature();
 
             int compressedIndexForInterior(int cartesian_cell_idx) const override {
-                return ebosSimulator_.vanguard().compressedIndexForInterior(cartesian_cell_idx);
+                return simulator_.vanguard().compressedIndexForInterior(cartesian_cell_idx);
             }
 
         private:
-            BlackoilWellModel(Simulator& ebosSimulator, const PhaseUsage& pu);
+            BlackoilWellModel(Simulator& simulator, const PhaseUsage& pu);
         };
 
 
 } // namespace Opm
 
+#ifndef OPM_BLACKOILWELLMODEL_IMPL_HEADER_INCLUDED
 #include "BlackoilWellModel_impl.hpp"
+#endif
+
 #endif

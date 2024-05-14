@@ -95,40 +95,40 @@ struct LoadFile
 };
 
 template<class TypeTag>
-struct EnableTerminalOutput<TypeTag, TTag::EclFlowProblem> {
+struct EnableTerminalOutput<TypeTag, TTag::FlowProblem> {
     static constexpr bool value = true;
 };
 template<class TypeTag>
-struct EnableAdaptiveTimeStepping<TypeTag, TTag::EclFlowProblem> {
+struct EnableAdaptiveTimeStepping<TypeTag, TTag::FlowProblem> {
     static constexpr bool value = true;
 };
 
 template <class TypeTag>
-struct OutputExtraConvergenceInfo<TypeTag, TTag::EclFlowProblem>
+struct OutputExtraConvergenceInfo<TypeTag, TTag::FlowProblem>
 {
     static constexpr auto* value = "none";
 };
 
 template <class TypeTag>
-struct SaveStep<TypeTag, TTag::EclFlowProblem>
+struct SaveStep<TypeTag, TTag::FlowProblem>
 {
     static constexpr auto* value = "";
 };
 
 template <class TypeTag>
-struct SaveFile<TypeTag, TTag::EclFlowProblem>
+struct SaveFile<TypeTag, TTag::FlowProblem>
 {
     static constexpr auto* value = "";
 };
 
 template <class TypeTag>
-struct LoadFile<TypeTag, TTag::EclFlowProblem>
+struct LoadFile<TypeTag, TTag::FlowProblem>
 {
     static constexpr auto* value = "";
 };
 
 template <class TypeTag>
-struct LoadStep<TypeTag, TTag::EclFlowProblem>
+struct LoadStep<TypeTag, TTag::FlowProblem>
 {
     static constexpr int value = -1;
 };
@@ -151,7 +151,7 @@ public:
     using MaterialLaw = GetPropType<TypeTag, Properties::MaterialLaw>;
     using SolutionVector = GetPropType<TypeTag, Properties::SolutionVector>;
     using MaterialLawParams = GetPropType<TypeTag, Properties::MaterialLawParams>;
-    using AquiferModel = GetPropType<TypeTag, Properties::EclAquiferModel>;
+    using AquiferModel = GetPropType<TypeTag, Properties::AquiferModel>;
 
     using TimeStepper = AdaptiveTimeStepping<TypeTag>;
     using PolymerModule = BlackOilPolymerModule<TypeTag>;
@@ -184,25 +184,24 @@ public:
     /// \param[in] eclipse_state the object which represents an internalized ECL deck
     /// \param[in] output_writer
     /// \param[in] threshold_pressures_by_face   if nonempty, threshold pressures that inhibit flow
-    SimulatorFullyImplicitBlackoil(Simulator& ebosSimulator)
-        : ebosSimulator_(ebosSimulator)
+    SimulatorFullyImplicitBlackoil(Simulator& simulator)
+        : simulator_(simulator)
         , serializer_(*this,
-                      EclGenericVanguard::comm(),
-                      ebosSimulator_.vanguard().eclState().getIOConfig(),
-                      EWOMS_GET_PARAM(TypeTag, std::string, SaveStep),
-                      EWOMS_GET_PARAM(TypeTag, int, LoadStep),
-                      EWOMS_GET_PARAM(TypeTag, std::string, SaveFile),
-                      EWOMS_GET_PARAM(TypeTag, std::string, LoadFile))
+                      FlowGenericVanguard::comm(),
+                      simulator_.vanguard().eclState().getIOConfig(),
+                      Parameters::get<TypeTag, Properties::SaveStep>(),
+                      Parameters::get<TypeTag, Properties::LoadStep>(),
+                      Parameters::get<TypeTag, Properties::SaveFile>(),
+                      Parameters::get<TypeTag, Properties::LoadFile>())
     {
         phaseUsage_ = phaseUsageFromDeck(eclState());
 
         // Only rank 0 does print to std::cout, and only if specifically requested.
         this->terminalOutput_ = false;
         if (this->grid().comm().rank() == 0) {
-            this->terminalOutput_ = EWOMS_GET_PARAM(TypeTag, bool, EnableTerminalOutput);
+            this->terminalOutput_ = Parameters::get<TypeTag, Properties::EnableTerminalOutput>();
 
-            this->startConvergenceOutputThread(EWOMS_GET_PARAM(TypeTag, std::string,
-                                                               OutputExtraConvergenceInfo),
+            this->startConvergenceOutputThread(Parameters::get<TypeTag, Properties::OutputExtraConvergenceInfo>(),
                                                R"(OutputExtraConvergenceInfo (--output-extra-convergence-info))");
         }
     }
@@ -219,38 +218,38 @@ public:
         SolverParameters::registerParameters();
         TimeStepper::registerParameters();
 
-        EWOMS_REGISTER_PARAM(TypeTag, bool, EnableTerminalOutput,
-                             "Print high-level information about the simulation's progress to the terminal");
-        EWOMS_REGISTER_PARAM(TypeTag, bool, EnableAdaptiveTimeStepping,
-                             "Use adaptive time stepping between report steps");
-        EWOMS_REGISTER_PARAM(TypeTag, std::string, OutputExtraConvergenceInfo,
-                             "Provide additional convergence output "
-                             "files for diagnostic purposes. "
-                             "\"none\" gives no extra output and "
-                             "overrides all other options, "
-                             "\"steps\" generates an INFOSTEP file, "
-                             "\"iterations\" generates an INFOITER file. "
-                             "Combine options with commas, e.g., "
-                             "\"steps,iterations\" for multiple outputs.");
-        EWOMS_REGISTER_PARAM(TypeTag, std::string, SaveStep,
-                             "Save serialized state to .OPMRST file. "
-                             "Either a specific report step, \"all\" to save "
-                             "all report steps or \":x\" to save every x'th step."
-                             "Use negative values of \"x\" to keep only the last "
-                             "written step, or \"last\" to save every step, keeping "
-                             "only the last.");
-        EWOMS_REGISTER_PARAM(TypeTag, int, LoadStep,
-                             "Load serialized state from .OPMRST file. "
-                             "Either a specific report step, or 0 to load last "
-                             "stored report step.");
-        EWOMS_REGISTER_PARAM(TypeTag, std::string, SaveFile,
-                             "FileName for .OPMRST file used for saving serialized state. "
-                             "If empty, CASENAME.OPMRST is used.");
-        EWOMS_HIDE_PARAM(TypeTag, SaveFile);
-        EWOMS_REGISTER_PARAM(TypeTag, std::string, LoadFile,
-                             "FileName for .OPMRST file used to load serialized state. "
-                             "If empty, CASENAME.OPMRST is used.");
-        EWOMS_HIDE_PARAM(TypeTag, LoadFile);
+        Parameters::registerParam<TypeTag, Properties::EnableTerminalOutput>
+            ("Print high-level information about the simulation's progress to the terminal");
+        Parameters::registerParam<TypeTag, Properties::EnableAdaptiveTimeStepping>
+            ("Use adaptive time stepping between report steps");
+        Parameters::registerParam<TypeTag, Properties::OutputExtraConvergenceInfo>
+            ("Provide additional convergence output "
+             "files for diagnostic purposes. "
+             "\"none\" gives no extra output and "
+             "overrides all other options, "
+             "\"steps\" generates an INFOSTEP file, "
+             "\"iterations\" generates an INFOITER file. "
+             "Combine options with commas, e.g., "
+             "\"steps,iterations\" for multiple outputs.");
+        Parameters::registerParam<TypeTag, Properties::SaveStep>
+            ("Save serialized state to .OPMRST file. "
+             "Either a specific report step, \"all\" to save "
+             "all report steps or \":x\" to save every x'th step."
+             "Use negative values of \"x\" to keep only the last "
+             "written step, or \"last\" to save every step, keeping "
+             "only the last.");
+        Parameters::registerParam<TypeTag, Properties::LoadStep>
+            ("Load serialized state from .OPMRST file. "
+             "Either a specific report step, or 0 to load last "
+             "stored report step.");
+        Parameters::registerParam<TypeTag, Properties::SaveFile>
+            ("FileName for .OPMRST file used for saving serialized state. "
+             "If empty, CASENAME.OPMRST is used.");
+        Parameters::hideParam<TypeTag, Properties::SaveFile>();
+        Parameters::registerParam<TypeTag, Properties::LoadFile>
+            ("FileName for .OPMRST file used to load serialized state. "
+             "If empty, CASENAME.OPMRST is used.");
+        Parameters::hideParam<TypeTag, Properties::LoadFile>();
     }
 
     /// Run the simulation.
@@ -263,7 +262,7 @@ public:
     {
         init(timer);
         // Make cache up to date. No need for updating it in elementCtx.
-        ebosSimulator_.model().invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/0);
+        simulator_.model().invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/0);
         // Main simulation loop.
         while (!timer.done()) {
             bool continue_looping = runStep(timer);
@@ -274,7 +273,7 @@ public:
 
     void init(SimulatorTimer &timer)
     {
-        ebosSimulator_.setEpisodeIndex(-1);
+        simulator_.setEpisodeIndex(-1);
 
         // Create timers and file for writing timing info.
         solverTimer_ = std::make_unique<time::StopWatch>();
@@ -282,25 +281,25 @@ public:
         totalTimer_->start();
 
         // adaptive time stepping
-        bool enableAdaptive = EWOMS_GET_PARAM(TypeTag, bool, EnableAdaptiveTimeStepping);
-        bool enableTUNING = EWOMS_GET_PARAM(TypeTag, bool, EnableTuning);
+        bool enableAdaptive = Parameters::get<TypeTag, Properties::EnableAdaptiveTimeStepping>();
+        bool enableTUNING = Parameters::get<TypeTag, Properties::EnableTuning>();
         if (enableAdaptive) {
-            const UnitSystem& unitSystem = this->ebosSimulator_.vanguard().eclState().getUnits();
+            const UnitSystem& unitSystem = this->simulator_.vanguard().eclState().getUnits();
+            const auto& sched_state = schedule()[timer.currentStepNum()];
+            auto max_next_tstep = sched_state.max_next_tstep(enableTUNING);
             if (enableTUNING) {
-                const auto& sched_state = schedule()[timer.currentStepNum()];
-                auto max_next_tstep = sched_state.max_next_tstep();
                 adaptiveTimeStepping_ = std::make_unique<TimeStepper>(max_next_tstep,
                                                                       sched_state.tuning(),
                                                                       unitSystem, terminalOutput_);
             }
             else {
-                adaptiveTimeStepping_ = std::make_unique<TimeStepper>(unitSystem, terminalOutput_);
+                adaptiveTimeStepping_ = std::make_unique<TimeStepper>(unitSystem, max_next_tstep, terminalOutput_);
             }
 
             if (isRestart()) {
-                // For restarts the ebosSimulator may have gotten some information
+                // For restarts the simulator may have gotten some information
                 // about the next timestep size from the OPMEXTRA field
-                adaptiveTimeStepping_->setSuggestedNextStep(ebosSimulator_.timeStepSize());
+                adaptiveTimeStepping_->setSuggestedNextStep(simulator_.timeStepSize());
             }
         }
     }
@@ -343,11 +342,11 @@ public:
             Dune::Timer perfTimer;
             perfTimer.start();
 
-            ebosSimulator_.setEpisodeIndex(-1);
-            ebosSimulator_.setEpisodeLength(0.0);
-            ebosSimulator_.setTimeStepSize(0.0);
+            simulator_.setEpisodeIndex(-1);
+            simulator_.setEpisodeLength(0.0);
+            simulator_.setTimeStepSize(0.0);
             wellModel_().beginReportStep(timer.currentStepNum());
-            ebosSimulator_.problem().writeOutput(timer);
+            simulator_.problem().writeOutput(timer);
 
             report_.success.output_write_time += perfTimer.stop();
         }
@@ -359,18 +358,21 @@ public:
             solver_ = createSolver(wellModel_());
         }
 
-        ebosSimulator_.startNextEpisode(
-            ebosSimulator_.startTime()
+        simulator_.startNextEpisode(
+            simulator_.startTime()
                + schedule().seconds(timer.currentStepNum()),
             timer.currentStepLength());
-        ebosSimulator_.setEpisodeIndex(timer.currentStepNum());
+        simulator_.setEpisodeIndex(timer.currentStepNum());
+
         if (serializer_.shouldLoad()) {
             wellModel_().prepareDeserialize(serializer_.loadStep() - 1);
             serializer_.loadState();
-            ebosSimulator_.model().invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/0);
+            simulator_.model().invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/0);
         }
-        solver_->model().beginReportStep();
-        bool enableTUNING = EWOMS_GET_PARAM(TypeTag, bool, EnableTuning);
+
+        this->solver_->model().beginReportStep();
+
+        const bool enableTUNING = Parameters::get<TypeTag, Properties::EnableTuning>();
 
         // If sub stepping is enabled allow the solver to sub cycle
         // in case the report steps are too large for the solver to converge
@@ -378,29 +380,43 @@ public:
         // \Note: The report steps are met in any case
         // \Note: The sub stepping will require a copy of the state variables
         if (adaptiveTimeStepping_) {
-            const auto& events = schedule()[timer.currentStepNum()].events();
-            if (enableTUNING) {
+            auto tuningUpdater = [enableTUNING, this, reportStep = timer.currentStepNum()]()
+            {
+                auto& schedule = this->simulator_.vanguard().schedule();
+                auto& events = this->schedule()[reportStep].events();
+
                 if (events.hasEvent(ScheduleEvents::TUNING_CHANGE)) {
-                    const auto& sched_state = schedule()[timer.currentStepNum()];
+                    // Unset the event to not trigger it again on the next sub step
+                    schedule.clear_event(ScheduleEvents::TUNING_CHANGE, reportStep);
+                    const auto& sched_state = schedule[reportStep];
+                    const auto& max_next_tstep = sched_state.max_next_tstep(enableTUNING);
                     const auto& tuning = sched_state.tuning();
-                    const auto& max_next_tstep = sched_state.max_next_tstep();
-                    adaptiveTimeStepping_->updateTUNING(max_next_tstep, tuning);
-                    // \Note: Assumes TUNING is only used with adaptive time-stepping
-                    // \Note: Need to update both solver (model) and simulator since solver is re-created each report step.
-                    solver_->model().updateTUNING(tuning);
-                    this->updateTUNING(tuning);
+
+                    if (enableTUNING) {
+                        adaptiveTimeStepping_->updateTUNING(max_next_tstep, tuning);
+                        // \Note: Assumes TUNING is only used with adaptive time-stepping
+                        // \Note: Need to update both solver (model) and simulator since solver is re-created each report step.
+                        solver_->model().updateTUNING(tuning);
+                        this->updateTUNING(tuning);
+                    } else {
+                        this->adaptiveTimeStepping_->updateNEXTSTEP(max_next_tstep);
+                    }
+                    return max_next_tstep >0;
                 }
-            }
+                return false;
+            };
+            tuningUpdater();
+            const auto& events = schedule()[timer.currentStepNum()].events();
             bool event = events.hasEvent(ScheduleEvents::NEW_WELL) ||
                 events.hasEvent(ScheduleEvents::INJECTION_TYPE_CHANGED) ||
                 events.hasEvent(ScheduleEvents::WELL_SWITCHED_INJECTOR_PRODUCER) ||
                 events.hasEvent(ScheduleEvents::PRODUCTION_UPDATE) ||
                 events.hasEvent(ScheduleEvents::INJECTION_UPDATE) ||
                 events.hasEvent(ScheduleEvents::WELL_STATUS_CHANGE);
-            auto stepReport = adaptiveTimeStepping_->step(timer, *solver_, event, nullptr);
+            auto stepReport = adaptiveTimeStepping_->step(timer, *solver_, event, nullptr, tuningUpdater);
             report_ += stepReport;
             //Pass simulation report to eclwriter for summary output
-            ebosSimulator_.problem().setSimulationReport(report_);
+            simulator_.problem().setSimulationReport(report_);
         } else {
             // solve for complete report step
             auto stepReport = solver_->step(timer);
@@ -416,8 +432,8 @@ public:
         Dune::Timer perfTimer;
         perfTimer.start();
         const double nextstep = adaptiveTimeStepping_ ? adaptiveTimeStepping_->suggestedNextStep() : -1.0;
-        ebosSimulator_.problem().setNextTimeStepSize(nextstep);
-        ebosSimulator_.problem().writeOutput(timer);
+        simulator_.problem().setNextTimeStepSize(nextstep);
+        simulator_.problem().writeOutput(timer);
         report_.success.output_write_time += perfTimer.stop();
 
         solver_->model().endReportStep();
@@ -429,10 +445,17 @@ public:
         report_.success.solver_time += solverTimer_->secsSinceStart();
 
         if (this->grid().comm().rank() == 0) {
-            // Grab the step convergence reports that are new since last we were here.
-            const auto& reps = solver_->model().stepReports();
-            this->writeConvergenceOutput(std::vector<StepReport>{reps.begin() + already_reported_steps_, reps.end()});
-            already_reported_steps_ = reps.size();
+            // Grab the step convergence reports that are new since last we
+            // were here.
+            const auto& reps = this->solver_->model().stepReports();
+
+            auto reports = std::vector<StepReport> {
+                reps.begin() + this->already_reported_steps_, reps.end()
+            };
+
+            this->writeConvergenceOutput(std::move(reports));
+
+            this->already_reported_steps_ = reps.size();
         }
 
         // Increment timer, remember well state.
@@ -457,7 +480,7 @@ public:
             Dune::Timer finalOutputTimer;
             finalOutputTimer.start();
 
-            ebosSimulator_.problem().finalizeOutput();
+            simulator_.problem().finalizeOutput();
             report_.success.output_write_time += finalOutputTimer.stop();
         }
 
@@ -470,12 +493,12 @@ public:
     }
 
     const Grid& grid() const
-    { return ebosSimulator_.vanguard().grid(); }
+    { return simulator_.vanguard().grid(); }
 
     template<class Serializer>
     void serializeOp(Serializer& serializer)
     {
-        serializer(ebosSimulator_);
+        serializer(simulator_);
         serializer(report_);
         serializer(adaptiveTimeStepping_);
     }
@@ -510,20 +533,20 @@ protected:
         return {"OPM Flow",
                 moduleVersion(),
                 compileTimestamp(),
-                ebosSimulator_.vanguard().caseName(),
+                simulator_.vanguard().caseName(),
                 str.str()};
     }
 
     //! \brief Returns local-to-global cell mapping.
     const std::vector<int>& getCellMapping() const override
     {
-        return ebosSimulator_.vanguard().globalCell();
+        return simulator_.vanguard().globalCell();
     }
 
 
     std::unique_ptr<Solver> createSolver(WellModel& wellModel)
     {
-        auto model = std::make_unique<Model>(ebosSimulator_,
+        auto model = std::make_unique<Model>(simulator_,
                                              modelParam_,
                                              wellModel,
                                              terminalOutput_);
@@ -550,11 +573,11 @@ protected:
     }
 
     const EclipseState& eclState() const
-    { return ebosSimulator_.vanguard().eclState(); }
+    { return simulator_.vanguard().eclState(); }
 
 
     const Schedule& schedule() const
-    { return ebosSimulator_.vanguard().schedule(); }
+    { return simulator_.vanguard().schedule(); }
 
     bool isRestart() const
     {
@@ -563,10 +586,10 @@ protected:
     }
 
     WellModel& wellModel_()
-    { return ebosSimulator_.problem().wellModel(); }
+    { return simulator_.problem().wellModel(); }
 
     const WellModel& wellModel_() const
-    { return ebosSimulator_.problem().wellModel(); }
+    { return simulator_.problem().wellModel(); }
 
     void startConvergenceOutputThread(std::string_view convOutputOptions,
                                       std::string_view optionName)
@@ -628,7 +651,7 @@ protected:
     }
 
     // Data.
-    Simulator& ebosSimulator_;
+    Simulator& simulator_;
 
     ModelParameters modelParam_;
     SolverParameters solverParam_;

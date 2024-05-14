@@ -28,6 +28,7 @@
 
 #include <opm/simulators/flow/SubDomain.hpp>
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 
@@ -62,6 +63,10 @@ struct ToleranceMb {
     using type = UndefinedProperty;
 };
 template<class TypeTag, class MyTypeTag>
+struct ToleranceMbRelaxed {
+    using type = UndefinedProperty;
+};
+template<class TypeTag, class MyTypeTag>
 struct ToleranceCnv {
     using type = UndefinedProperty;
 };
@@ -91,6 +96,10 @@ struct MaxSinglePrecisionDays {
 };
 template<class TypeTag, class MyTypeTag>
 struct MinStrictCnvIter {
+    using type = UndefinedProperty;
+};
+template<class TypeTag, class MyTypeTag>
+struct MinStrictMbIter {
     using type = UndefinedProperty;
 };
 template<class TypeTag, class MyTypeTag>
@@ -261,6 +270,11 @@ struct ToleranceMb<TypeTag, TTag::FlowModelParameters> {
     static constexpr type value = 1e-6;
 };
 template<class TypeTag>
+struct ToleranceMbRelaxed<TypeTag, TTag::FlowModelParameters> {
+    using type = GetPropType<TypeTag, Scalar>;
+    static constexpr type value = 1e-6;
+};
+template<class TypeTag>
 struct ToleranceCnv<TypeTag, TTag::FlowModelParameters> {
     using type = GetPropType<TypeTag, Scalar>;
     static constexpr type value = 1e-2;
@@ -296,6 +310,10 @@ struct MaxSinglePrecisionDays<TypeTag, TTag::FlowModelParameters> {
 template<class TypeTag>
 struct MinStrictCnvIter<TypeTag, TTag::FlowModelParameters> {
     static constexpr int value = 0;
+};
+template<class TypeTag>
+struct MinStrictMbIter<TypeTag, TTag::FlowModelParameters> {
+    static constexpr int value = -1;
 };
 template<class TypeTag>
 struct SolveWelleqInitially<TypeTag, TTag::FlowModelParameters> {
@@ -480,6 +498,8 @@ namespace Opm
         double relaxed_max_pv_fraction_;
         /// Relative mass balance tolerance (total mass balance error).
         double tolerance_mb_;
+        /// Relaxed mass balance tolerance (can be used when iter >= min_strict_mb_iter_).
+        double tolerance_mb_relaxed_;
         /// Local convergence tolerance (max of local saturation errors).
         double tolerance_cnv_;
         /// Relaxed local convergence tolerance (can be used when iter >= min_strict_cnv_iter_ && cnvViolatedPV < relaxed_max_pv_fraction_).
@@ -530,6 +550,9 @@ namespace Opm
 
         /// Minimum number of Newton iterations before we can use relaxed CNV convergence criterion
         int min_strict_cnv_iter_;
+
+        /// Minimum number of Newton iterations before we can use relaxed MB convergence criterion
+        int min_strict_mb_iter_;
 
         /// Solve well equation initially
         bool solve_welleq_initially_;
@@ -597,42 +620,44 @@ namespace Opm
         /// Construct from user parameters or defaults.
         BlackoilModelParameters()
         {
-            dbhp_max_rel_=  EWOMS_GET_PARAM(TypeTag, Scalar, DbhpMaxRel);
-            dwell_fraction_max_ = EWOMS_GET_PARAM(TypeTag, Scalar, DwellFractionMax);
-            max_residual_allowed_ = EWOMS_GET_PARAM(TypeTag, Scalar, MaxResidualAllowed);
-            relaxed_max_pv_fraction_ = EWOMS_GET_PARAM(TypeTag, Scalar, RelaxedMaxPvFraction);
-            tolerance_mb_ = EWOMS_GET_PARAM(TypeTag, Scalar, ToleranceMb);
-            tolerance_cnv_ = EWOMS_GET_PARAM(TypeTag, Scalar, ToleranceCnv);
-            tolerance_cnv_relaxed_ = EWOMS_GET_PARAM(TypeTag, Scalar, ToleranceCnvRelaxed);
-            tolerance_wells_ = EWOMS_GET_PARAM(TypeTag, Scalar, ToleranceWells);
-            tolerance_well_control_ = EWOMS_GET_PARAM(TypeTag, Scalar, ToleranceWellControl);
-            max_welleq_iter_ = EWOMS_GET_PARAM(TypeTag, int, MaxWelleqIter);
-            use_multisegment_well_ = EWOMS_GET_PARAM(TypeTag, bool, UseMultisegmentWell);
-            tolerance_pressure_ms_wells_ = EWOMS_GET_PARAM(TypeTag, Scalar, TolerancePressureMsWells);
-            relaxed_tolerance_flow_well_ = EWOMS_GET_PARAM(TypeTag, Scalar, RelaxedWellFlowTol);
-            relaxed_tolerance_pressure_ms_well_ = EWOMS_GET_PARAM(TypeTag, Scalar, RelaxedPressureTolMsw);
-            max_pressure_change_ms_wells_ = EWOMS_GET_PARAM(TypeTag, Scalar, MaxPressureChangeMsWells);
-            max_inner_iter_ms_wells_ = EWOMS_GET_PARAM(TypeTag, int, MaxInnerIterMsWells);
-            strict_inner_iter_wells_ = EWOMS_GET_PARAM(TypeTag, int, StrictInnerIterWells);
-            strict_outer_iter_wells_ = EWOMS_GET_PARAM(TypeTag, int, StrictOuterIterWells);
-            regularization_factor_wells_ = EWOMS_GET_PARAM(TypeTag, Scalar, RegularizationFactorWells);
-            max_niter_inner_well_iter_ = EWOMS_GET_PARAM(TypeTag, int, MaxNewtonIterationsWithInnerWellIterations);
-            shut_unsolvable_wells_ = EWOMS_GET_PARAM(TypeTag, bool, ShutUnsolvableWells);
-            max_inner_iter_wells_ = EWOMS_GET_PARAM(TypeTag, int, MaxInnerIterWells);
-            maxSinglePrecisionTimeStep_ = EWOMS_GET_PARAM(TypeTag, Scalar, MaxSinglePrecisionDays) *24*60*60;
-            min_strict_cnv_iter_ = EWOMS_GET_PARAM(TypeTag, int, MinStrictCnvIter);
-            solve_welleq_initially_ = EWOMS_GET_PARAM(TypeTag, bool, SolveWelleqInitially);
-            update_equations_scaling_ = EWOMS_GET_PARAM(TypeTag, bool, UpdateEquationsScaling);
-            use_update_stabilization_ = EWOMS_GET_PARAM(TypeTag, bool, UseUpdateStabilization);
-            matrix_add_well_contributions_ = EWOMS_GET_PARAM(TypeTag, bool, MatrixAddWellContributions);
-            check_well_operability_ = EWOMS_GET_PARAM(TypeTag, bool, EnableWellOperabilityCheck);
-            check_well_operability_iter_ = EWOMS_GET_PARAM(TypeTag, bool, EnableWellOperabilityCheckIter);
-            max_number_of_well_switches_ = EWOMS_GET_PARAM(TypeTag, int, MaximumNumberOfWellSwitches);
-            use_average_density_ms_wells_ = EWOMS_GET_PARAM(TypeTag, bool, UseAverageDensityMsWells);
-            local_well_solver_control_switching_ = EWOMS_GET_PARAM(TypeTag, bool, LocalWellSolveControlSwitching);
-            use_implicit_ipr_ = EWOMS_GET_PARAM(TypeTag, bool, UseImplicitIpr);
-            nonlinear_solver_ = EWOMS_GET_PARAM(TypeTag, std::string, NonlinearSolver);
-            const auto approach = EWOMS_GET_PARAM(TypeTag, std::string, LocalSolveApproach);
+            dbhp_max_rel_=  Parameters::get<TypeTag, Properties::DbhpMaxRel>();
+            dwell_fraction_max_ = Parameters::get<TypeTag, Properties::DwellFractionMax>();
+            max_residual_allowed_ = Parameters::get<TypeTag, Properties::MaxResidualAllowed>();
+            relaxed_max_pv_fraction_ = Parameters::get<TypeTag, Properties::RelaxedMaxPvFraction>();
+            tolerance_mb_ = Parameters::get<TypeTag, Properties::ToleranceMb>();
+            tolerance_mb_relaxed_ = std::max(tolerance_mb_, Parameters::get<TypeTag, Properties::ToleranceMbRelaxed>());
+            tolerance_cnv_ = Parameters::get<TypeTag, Properties::ToleranceCnv>();
+            tolerance_cnv_relaxed_ = std::max(tolerance_cnv_, Parameters::get<TypeTag, Properties::ToleranceCnvRelaxed>());
+            tolerance_wells_ = Parameters::get<TypeTag, Properties::ToleranceWells>();
+            tolerance_well_control_ = Parameters::get<TypeTag, Properties::ToleranceWellControl>();
+            max_welleq_iter_ = Parameters::get<TypeTag, Properties::MaxWelleqIter>();
+            use_multisegment_well_ = Parameters::get<TypeTag, Properties::UseMultisegmentWell>();
+            tolerance_pressure_ms_wells_ = Parameters::get<TypeTag, Properties::TolerancePressureMsWells>();
+            relaxed_tolerance_flow_well_ = Parameters::get<TypeTag, Properties::RelaxedWellFlowTol>();
+            relaxed_tolerance_pressure_ms_well_ = Parameters::get<TypeTag, Properties::RelaxedPressureTolMsw>();
+            max_pressure_change_ms_wells_ = Parameters::get<TypeTag, Properties::MaxPressureChangeMsWells>();
+            max_inner_iter_ms_wells_ = Parameters::get<TypeTag, Properties::MaxInnerIterMsWells>();
+            strict_inner_iter_wells_ = Parameters::get<TypeTag, Properties::StrictInnerIterWells>();
+            strict_outer_iter_wells_ = Parameters::get<TypeTag, Properties::StrictOuterIterWells>();
+            regularization_factor_wells_ = Parameters::get<TypeTag, Properties::RegularizationFactorWells>();
+            max_niter_inner_well_iter_ = Parameters::get<TypeTag, Properties::MaxNewtonIterationsWithInnerWellIterations>();
+            shut_unsolvable_wells_ = Parameters::get<TypeTag, Properties::ShutUnsolvableWells>();
+            max_inner_iter_wells_ = Parameters::get<TypeTag, Properties::MaxInnerIterWells>();
+            maxSinglePrecisionTimeStep_ = Parameters::get<TypeTag, Properties::MaxSinglePrecisionDays>() * 24 * 60 * 60;
+            min_strict_cnv_iter_ = Parameters::get<TypeTag, Properties::MinStrictCnvIter>();
+            min_strict_mb_iter_ = Parameters::get<TypeTag, Properties::MinStrictMbIter>();
+            solve_welleq_initially_ = Parameters::get<TypeTag, Properties::SolveWelleqInitially>();
+            update_equations_scaling_ = Parameters::get<TypeTag, Properties::UpdateEquationsScaling>();
+            use_update_stabilization_ = Parameters::get<TypeTag, Properties::UseUpdateStabilization>();
+            matrix_add_well_contributions_ = Parameters::get<TypeTag, Properties::MatrixAddWellContributions>();
+            check_well_operability_ = Parameters::get<TypeTag, Properties::EnableWellOperabilityCheck>();
+            check_well_operability_iter_ = Parameters::get<TypeTag, Properties::EnableWellOperabilityCheckIter>();
+            max_number_of_well_switches_ = Parameters::get<TypeTag, Properties::MaximumNumberOfWellSwitches>();
+            use_average_density_ms_wells_ = Parameters::get<TypeTag, Properties::UseAverageDensityMsWells>();
+            local_well_solver_control_switching_ = Parameters::get<TypeTag, Properties::LocalWellSolveControlSwitching>();
+            use_implicit_ipr_ = Parameters::get<TypeTag, Properties::UseImplicitIpr>();
+            nonlinear_solver_ = Parameters::get<TypeTag, Properties::NonlinearSolver>();
+            const auto approach = Parameters::get<TypeTag, Properties::LocalSolveApproach>();
             if (approach == "jacobi") {
                 local_solve_approach_ = DomainSolveApproach::Jacobi;
             } else if (approach == "gauss-seidel") {
@@ -641,76 +666,142 @@ namespace Opm
                 throw std::runtime_error("Invalid domain solver approach '" + approach + "' specified.");
             }
 
-            max_local_solve_iterations_ = EWOMS_GET_PARAM(TypeTag, int, MaxLocalSolveIterations);
-            local_tolerance_scaling_mb_ = EWOMS_GET_PARAM(TypeTag, double, LocalToleranceScalingMb);
-            local_tolerance_scaling_cnv_ = EWOMS_GET_PARAM(TypeTag, double, LocalToleranceScalingCnv);
-            nldd_num_initial_newton_iter_ = EWOMS_GET_PARAM(TypeTag, int, NlddNumInitialNewtonIter);
-            num_local_domains_ = EWOMS_GET_PARAM(TypeTag, int, NumLocalDomains);
-            local_domain_partition_imbalance_ = std::max(1.0, EWOMS_GET_PARAM(TypeTag, double, LocalDomainsPartitioningImbalance));
-            local_domain_partition_method_ = EWOMS_GET_PARAM(TypeTag, std::string, LocalDomainsPartitioningMethod);
-            deck_file_name_ = EWOMS_GET_PARAM(TypeTag, std::string, EclDeckFileName);
-            network_max_strict_iterations_ = EWOMS_GET_PARAM(TypeTag, int, NetworkMaxStrictIterations);
-            network_max_iterations_ = EWOMS_GET_PARAM(TypeTag, int, NetworkMaxIterations);
-            local_domain_ordering_ = domainOrderingMeasureFromString(EWOMS_GET_PARAM(TypeTag, std::string, LocalDomainsOrderingMeasure));
-            write_partitions_ = EWOMS_GET_PARAM(TypeTag, bool, DebugEmitCellPartition);
+            max_local_solve_iterations_ = Parameters::get<TypeTag, Properties::MaxLocalSolveIterations>();
+            local_tolerance_scaling_mb_ = Parameters::get<TypeTag, Properties::LocalToleranceScalingMb>();
+            local_tolerance_scaling_cnv_ = Parameters::get<TypeTag, Properties::LocalToleranceScalingCnv>();
+            nldd_num_initial_newton_iter_ = Parameters::get<TypeTag, Properties::NlddNumInitialNewtonIter>();
+            num_local_domains_ = Parameters::get<TypeTag, Properties::NumLocalDomains>();
+            local_domain_partition_imbalance_ = std::max(1.0, Parameters::get<TypeTag, Properties::LocalDomainsPartitioningImbalance>());
+            local_domain_partition_method_ = Parameters::get<TypeTag, Properties::LocalDomainsPartitioningMethod>();
+            deck_file_name_ = Parameters::get<TypeTag, Properties::EclDeckFileName>();
+            network_max_strict_iterations_ = Parameters::get<TypeTag, Properties::NetworkMaxStrictIterations>();
+            network_max_iterations_ = Parameters::get<TypeTag, Properties::NetworkMaxIterations>();
+            local_domain_ordering_ = domainOrderingMeasureFromString(Parameters::get<TypeTag, Properties::LocalDomainsOrderingMeasure>());
+            write_partitions_ = Parameters::get<TypeTag, Properties::DebugEmitCellPartition>();
         }
 
         static void registerParameters()
         {
-            EWOMS_REGISTER_PARAM(TypeTag, Scalar, DbhpMaxRel, "Maximum relative change of the bottom-hole pressure in a single iteration");
-            EWOMS_REGISTER_PARAM(TypeTag, Scalar, DwellFractionMax, "Maximum absolute change of a well's volume fraction in a single iteration");
-            EWOMS_REGISTER_PARAM(TypeTag, Scalar, MaxResidualAllowed, "Absolute maximum tolerated for residuals without cutting the time step size");
-            EWOMS_REGISTER_PARAM(TypeTag, Scalar, RelaxedMaxPvFraction, "The fraction of the pore volume of the reservoir "
-                                 "where the volumetric error (CNV) may be voilated during strict Newton iterations.");
-            EWOMS_REGISTER_PARAM(TypeTag, Scalar, ToleranceMb, "Tolerated mass balance error relative to total mass present");
-            EWOMS_REGISTER_PARAM(TypeTag, Scalar, ToleranceCnv, "Local convergence tolerance (Maximum of local saturation errors)");
-            EWOMS_REGISTER_PARAM(TypeTag, Scalar, ToleranceCnvRelaxed, "Relaxed local convergence tolerance that applies for iterations after the iterations with the strict tolerance");
-            EWOMS_REGISTER_PARAM(TypeTag, Scalar, ToleranceWells, "Well convergence tolerance");
-            EWOMS_REGISTER_PARAM(TypeTag, Scalar, ToleranceWellControl, "Tolerance for the well control equations");
-            EWOMS_REGISTER_PARAM(TypeTag, int, MaxWelleqIter, "Maximum number of iterations to determine solution the  well equations");
-            EWOMS_REGISTER_PARAM(TypeTag, bool, UseMultisegmentWell, "Use the well model for multi-segment wells instead of the one for single-segment wells");
-            EWOMS_REGISTER_PARAM(TypeTag, Scalar, TolerancePressureMsWells, "Tolerance for the pressure equations for multi-segment wells");
-            EWOMS_REGISTER_PARAM(TypeTag, Scalar, RelaxedWellFlowTol, "Relaxed tolerance for the well flow residual");
-            EWOMS_REGISTER_PARAM(TypeTag, Scalar, RelaxedPressureTolMsw, "Relaxed tolerance for the MSW pressure solution");
-            EWOMS_REGISTER_PARAM(TypeTag, Scalar, MaxPressureChangeMsWells, "Maximum relative pressure change for a single iteration of the multi-segment well model");
-            EWOMS_REGISTER_PARAM(TypeTag, int, MaxInnerIterMsWells, "Maximum number of inner iterations for multi-segment wells");
-            EWOMS_REGISTER_PARAM(TypeTag, int, StrictInnerIterWells, "Number of inner well iterations with strict tolerance");
-            EWOMS_REGISTER_PARAM(TypeTag, int, StrictOuterIterWells, "Number of newton iterations for which wells are checked with strict tolerance");
-            EWOMS_REGISTER_PARAM(TypeTag, int, MaxNewtonIterationsWithInnerWellIterations, "Maximum newton iterations with inner well iterations");
-            EWOMS_REGISTER_PARAM(TypeTag, bool, ShutUnsolvableWells, "Shut unsolvable wells");
-            EWOMS_REGISTER_PARAM(TypeTag, int, MaxInnerIterWells, "Maximum number of inner iterations for standard wells");
-            EWOMS_REGISTER_PARAM(TypeTag, bool, AlternativeWellRateInit, "Use alternative well rate initialization procedure");
-            EWOMS_REGISTER_PARAM(TypeTag, Scalar, RegularizationFactorWells, "Regularization factor for wells");
-            EWOMS_REGISTER_PARAM(TypeTag, Scalar, MaxSinglePrecisionDays, "Maximum time step size where single precision floating point arithmetic can be used solving for the linear systems of equations");
-            EWOMS_REGISTER_PARAM(TypeTag, int, MinStrictCnvIter, "Minimum number of Newton iterations before relaxed tolerances can be used for the CNV convergence criterion");
-            EWOMS_REGISTER_PARAM(TypeTag, bool, SolveWelleqInitially, "Fully solve the well equations before each iteration of the reservoir model");
-            EWOMS_REGISTER_PARAM(TypeTag, bool, UpdateEquationsScaling, "Update scaling factors for mass balance equations during the run");
-            EWOMS_REGISTER_PARAM(TypeTag, bool, UseUpdateStabilization, "Try to detect and correct oscillations or stagnation during the Newton method");
-            EWOMS_REGISTER_PARAM(TypeTag, bool, MatrixAddWellContributions, "Explicitly specify the influences of wells between cells in the Jacobian and preconditioner matrices");
-            EWOMS_REGISTER_PARAM(TypeTag, bool, EnableWellOperabilityCheck, "Enable the well operability checking");
-            EWOMS_REGISTER_PARAM(TypeTag, bool, EnableWellOperabilityCheckIter, "Enable the well operability checking during iterations");
-            EWOMS_REGISTER_PARAM(TypeTag, int, MaximumNumberOfWellSwitches, "Maximum number of times a well can switch to the same control");
-            EWOMS_REGISTER_PARAM(TypeTag, bool, UseAverageDensityMsWells, "Approximate segment densitities by averaging over segment and its outlet");
-            EWOMS_REGISTER_PARAM(TypeTag, bool, LocalWellSolveControlSwitching, "Allow control switching during local well solutions");
-            EWOMS_REGISTER_PARAM(TypeTag, bool, UseImplicitIpr, "Compute implict IPR for stability checks and stable solution search");            
-            EWOMS_REGISTER_PARAM(TypeTag, int, NetworkMaxStrictIterations, "Maximum iterations in network solver before relaxing tolerance");
-            EWOMS_REGISTER_PARAM(TypeTag, int, NetworkMaxIterations, "Maximum number of iterations in the network solver before giving up");
-            EWOMS_REGISTER_PARAM(TypeTag, std::string, NonlinearSolver, "Choose nonlinear solver. Valid choices are newton or nldd.");
-            EWOMS_REGISTER_PARAM(TypeTag, std::string, LocalSolveApproach, "Choose local solve approach. Valid choices are jacobi and gauss-seidel");
-            EWOMS_REGISTER_PARAM(TypeTag, int, MaxLocalSolveIterations, "Max iterations for local solves with NLDD nonlinear solver.");
-            EWOMS_REGISTER_PARAM(TypeTag, Scalar, LocalToleranceScalingMb, "Set lower than 1.0 to use stricter convergence tolerance for local solves.");
-            EWOMS_REGISTER_PARAM(TypeTag, Scalar, LocalToleranceScalingCnv, "Set lower than 1.0 to use stricter convergence tolerance for local solves.");
-            EWOMS_REGISTER_PARAM(TypeTag, int, NlddNumInitialNewtonIter, "Number of initial global Newton iterations when running the NLDD nonlinear solver.");
-            EWOMS_REGISTER_PARAM(TypeTag, int, NumLocalDomains, "Number of local domains for NLDD nonlinear solver.");
-            EWOMS_REGISTER_PARAM(TypeTag, Scalar, LocalDomainsPartitioningImbalance, "Subdomain partitioning imbalance tolerance. 1.03 is 3 percent imbalance.");
-            EWOMS_REGISTER_PARAM(TypeTag, std::string, LocalDomainsPartitioningMethod, "Subdomain partitioning method. "
-                                 "Allowed values are 'zoltan', 'simple', and the name of a partition file ending with '.partition'.");
-            EWOMS_REGISTER_PARAM(TypeTag, std::string, LocalDomainsOrderingMeasure, "Subdomain ordering measure. "
-                                 "Allowed values are 'maxpressure', 'averagepressure' and  'residual'.");
+            Parameters::registerParam<TypeTag, Properties::DbhpMaxRel>
+                ("Maximum relative change of the bottom-hole pressure in a single iteration");
+            Parameters::registerParam<TypeTag, Properties::DwellFractionMax>
+                ("Maximum absolute change of a well's volume fraction in a single iteration");
+            Parameters::registerParam<TypeTag, Properties::MaxResidualAllowed>
+                ("Absolute maximum tolerated for residuals without cutting the time step size");
+            Parameters::registerParam<TypeTag, Properties::RelaxedMaxPvFraction>
+                ("The fraction of the pore volume of the reservoir "
+                 "where the volumetric error (CNV) may be voilated "
+                 "during strict Newton iterations.");
+            Parameters::registerParam<TypeTag, Properties::ToleranceMb>
+                ("Tolerated mass balance error relative to total mass present");
+            Parameters::registerParam<TypeTag, Properties::ToleranceMbRelaxed>
+                ("Relaxed tolerated mass balance error that applies for iterations "
+                 "after the iterations with the strict tolerance");
+            Parameters::registerParam<TypeTag, Properties::ToleranceCnv>
+                ("Local convergence tolerance (Maximum of local saturation errors)");
+            Parameters::registerParam<TypeTag, Properties::ToleranceCnvRelaxed>
+                ("Relaxed local convergence tolerance that applies for iterations "
+                 "after the iterations with the strict tolerance");
+            Parameters::registerParam<TypeTag, Properties::ToleranceWells>
+                ("Well convergence tolerance");
+            Parameters::registerParam<TypeTag, Properties::ToleranceWellControl>
+                ("Tolerance for the well control equations");
+            Parameters::registerParam<TypeTag, Properties::MaxWelleqIter>
+                ("Maximum number of iterations to determine solution the well equations");
+            Parameters::registerParam<TypeTag, Properties::UseMultisegmentWell>
+                ("Use the well model for multi-segment wells instead of the "
+                 "one for single-segment wells");
+            Parameters::registerParam<TypeTag, Properties::TolerancePressureMsWells>
+                ("Tolerance for the pressure equations for multi-segment wells");
+            Parameters::registerParam<TypeTag, Properties::RelaxedWellFlowTol>
+                ("Relaxed tolerance for the well flow residual");
+            Parameters::registerParam<TypeTag, Properties::RelaxedPressureTolMsw>
+                ("Relaxed tolerance for the MSW pressure solution");
+            Parameters::registerParam<TypeTag, Properties::MaxPressureChangeMsWells>
+                ("Maximum relative pressure change for a single iteration "
+                 "of the multi-segment well model");
+            Parameters::registerParam<TypeTag, Properties::MaxInnerIterMsWells>
+                ("Maximum number of inner iterations for multi-segment wells");
+            Parameters::registerParam<TypeTag, Properties::StrictInnerIterWells>
+                ("Number of inner well iterations with strict tolerance");
+            Parameters::registerParam<TypeTag, Properties::StrictOuterIterWells>
+                ("Number of newton iterations for which wells are checked with strict tolerance");
+            Parameters::registerParam<TypeTag, Properties::MaxNewtonIterationsWithInnerWellIterations>
+                ("Maximum newton iterations with inner well iterations");
+            Parameters::registerParam<TypeTag, Properties::ShutUnsolvableWells>
+                ("Shut unsolvable wells");
+            Parameters::registerParam<TypeTag, Properties::MaxInnerIterWells>
+                ("Maximum number of inner iterations for standard wells");
+            Parameters::registerParam<TypeTag, Properties::AlternativeWellRateInit>
+                ("Use alternative well rate initialization procedure");
+            Parameters::registerParam<TypeTag, Properties::RegularizationFactorWells>
+                ("Regularization factor for wells");
+            Parameters::registerParam<TypeTag, Properties::MaxSinglePrecisionDays>
+                ("Maximum time step size where single precision floating point "
+                 "arithmetic can be used solving for the linear systems of equations");
+            Parameters::registerParam<TypeTag, Properties::MinStrictCnvIter>
+                ("Minimum number of Newton iterations before relaxed tolerances "
+                 "can be used for the CNV convergence criterion");
+            Parameters::registerParam<TypeTag, Properties::MinStrictMbIter>
+                ("Minimum number of Newton iterations before relaxed tolerances "
+                 "can be used for the MB convergence criterion. "
+                 "Default -1 means that the relaxed tolerance is used when maximum "
+                 "number of Newton iterations are reached.");
+            Parameters::registerParam<TypeTag, Properties::SolveWelleqInitially>
+                ("Fully solve the well equations before each iteration of the reservoir model");
+            Parameters::registerParam<TypeTag, Properties::UpdateEquationsScaling>
+                ("Update scaling factors for mass balance equations during the run");
+            Parameters::registerParam<TypeTag, Properties::UseUpdateStabilization>
+                ("Try to detect and correct oscillations or stagnation during the Newton method");
+            Parameters::registerParam<TypeTag, Properties::MatrixAddWellContributions>
+                ("Explicitly specify the influences of wells between cells in "
+                 "the Jacobian and preconditioner matrices");
+            Parameters::registerParam<TypeTag, Properties::EnableWellOperabilityCheck>
+                ("Enable the well operability checking");
+            Parameters::registerParam<TypeTag, Properties::EnableWellOperabilityCheckIter>
+                ("Enable the well operability checking during iterations");
+            Parameters::registerParam<TypeTag, Properties::MaximumNumberOfWellSwitches>
+                ("Maximum number of times a well can switch to the same control");
+            Parameters::registerParam<TypeTag, Properties::UseAverageDensityMsWells>
+                ("Approximate segment densitities by averaging over segment and its outlet");
+            Parameters::registerParam<TypeTag, Properties::LocalWellSolveControlSwitching>
+                ("Allow control switching during local well solutions");
+            Parameters::registerParam<TypeTag, Properties::UseImplicitIpr>
+                ("Compute implict IPR for stability checks and stable solution search");
+            Parameters::registerParam<TypeTag, Properties::NetworkMaxStrictIterations>
+                ("Maximum iterations in network solver before relaxing tolerance");
+            Parameters::registerParam<TypeTag, Properties::NetworkMaxIterations>
+                ("Maximum number of iterations in the network solver before giving up");
+            Parameters::registerParam<TypeTag, Properties::NonlinearSolver>
+                ("Choose nonlinear solver. Valid choices are newton or nldd.");
+            Parameters::registerParam<TypeTag, Properties::LocalSolveApproach>
+                ("Choose local solve approach. Valid choices are jacobi and gauss-seidel");
+            Parameters::registerParam<TypeTag, Properties::MaxLocalSolveIterations>
+                ("Max iterations for local solves with NLDD nonlinear solver.");
+            Parameters::registerParam<TypeTag, Properties::LocalToleranceScalingMb>
+                ("Set lower than 1.0 to use stricter convergence tolerance for local solves.");
+            Parameters::registerParam<TypeTag, Properties::LocalToleranceScalingCnv>
+                ("Set lower than 1.0 to use stricter convergence tolerance for local solves.");
+            Parameters::registerParam<TypeTag, Properties::NlddNumInitialNewtonIter>
+                ("Number of initial global Newton iterations when running the NLDD nonlinear solver.");
+            Parameters::registerParam<TypeTag, Properties::NumLocalDomains>
+                ("Number of local domains for NLDD nonlinear solver.");
+            Parameters::registerParam<TypeTag, Properties::LocalDomainsPartitioningImbalance>
+                ("Subdomain partitioning imbalance tolerance. 1.03 is 3 percent imbalance.");
+            Parameters::registerParam<TypeTag, Properties::LocalDomainsPartitioningMethod>
+                ("Subdomain partitioning method. Allowed values are "
+                 "'zoltan', "
+                 "'simple', "
+                 "and the name of a partition file ending with '.partition'.");
+            Parameters::registerParam<TypeTag, Properties::LocalDomainsOrderingMeasure>
+                ("Subdomain ordering measure. Allowed values are "
+                 "'maxpressure', "
+                 "'averagepressure' "
+                 "and  'residual'.");
+            Parameters::registerParam<TypeTag, Properties::DebugEmitCellPartition>
+                ("Whether or not to emit cell partitions as a debugging aid.");
 
-            EWOMS_REGISTER_PARAM(TypeTag, bool, DebugEmitCellPartition, "Whether or not to emit cell partitions as a debugging aid.");
-
-            EWOMS_HIDE_PARAM(TypeTag, DebugEmitCellPartition);
+            Parameters::hideParam<TypeTag, Properties::DebugEmitCellPartition>();
         }
     };
 } // namespace Opm

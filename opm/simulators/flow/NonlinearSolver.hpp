@@ -80,8 +80,6 @@ struct NewtonRelaxationType<TypeTag, TTag::FlowNonLinearSolver> {
 
 namespace Opm {
 
-class WellState;
-
 // Available relaxation scheme types.
 enum class NonlinearRelaxType {
     Dampen,
@@ -127,11 +125,11 @@ void stabilizeNonlinearUpdate(BVector& dx, BVector& dxOld,
                 reset();
 
                 // overload with given parameters
-                relaxMax_ = EWOMS_GET_PARAM(TypeTag, Scalar, NewtonMaxRelax);
-                maxIter_ = EWOMS_GET_PARAM(TypeTag, int, NewtonMaxIterations);
-                minIter_ = EWOMS_GET_PARAM(TypeTag, int, NewtonMinIterations);
+                relaxMax_ = Parameters::get<TypeTag, Properties::NewtonMaxRelax>();
+                maxIter_ = Parameters::get<TypeTag, Properties::NewtonMaxIterations>();
+                minIter_ = Parameters::get<TypeTag, Properties::NewtonMinIterations>();
 
-                const auto& relaxationTypeString = EWOMS_GET_PARAM(TypeTag, std::string, NewtonRelaxationType);
+                const auto& relaxationTypeString = Parameters::get<TypeTag, Properties::NewtonRelaxationType>();
                 if (relaxationTypeString == "dampen") {
                     relaxType_ = NonlinearRelaxType::Dampen;
                 } else if (relaxationTypeString == "sor") {
@@ -144,10 +142,14 @@ void stabilizeNonlinearUpdate(BVector& dx, BVector& dxOld,
 
             static void registerParameters()
             {
-                EWOMS_REGISTER_PARAM(TypeTag, Scalar, NewtonMaxRelax, "The maximum relaxation factor of a Newton iteration");
-                EWOMS_REGISTER_PARAM(TypeTag, int, NewtonMaxIterations, "The maximum number of Newton iterations per time step");
-                EWOMS_REGISTER_PARAM(TypeTag, int, NewtonMinIterations, "The minimum number of Newton iterations per time step");
-                EWOMS_REGISTER_PARAM(TypeTag, std::string, NewtonRelaxationType, "The type of relaxation used by Newton method");
+                Parameters::registerParam<TypeTag, Properties::NewtonMaxRelax>
+                    ("The maximum relaxation factor of a Newton iteration");
+                Parameters::registerParam<TypeTag, Properties::NewtonMaxIterations>
+                    ("The maximum number of Newton iterations per time step");
+                Parameters::registerParam<TypeTag, Properties::NewtonMinIterations>
+                    ("The minimum number of Newton iterations per time step");
+                Parameters::registerParam<TypeTag, Properties::NewtonRelaxationType>
+                    ("The type of relaxation used by Newton method");
             }
 
             void reset()
@@ -163,9 +165,6 @@ void stabilizeNonlinearUpdate(BVector& dx, BVector& dxOld,
 
         };
 
-        // Forwarding types from PhysicalModel.
-        //typedef typename PhysicalModel::WellState WellState;
-
         // ---------  Public methods  ---------
 
         /// Construct solver for a given model.
@@ -176,7 +175,7 @@ void stabilizeNonlinearUpdate(BVector& dx, BVector& dxOld,
         /// \param[in]      param   parameters controlling nonlinear process
         /// \param[in, out] model   physical simulation model.
         NonlinearSolver(const SolverParameters& param,
-                            std::unique_ptr<PhysicalModel> model)
+                        std::unique_ptr<PhysicalModel> model)
             : param_(param)
             , model_(std::move(model))
             , linearizations_(0)

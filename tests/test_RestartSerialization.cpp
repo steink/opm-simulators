@@ -19,9 +19,7 @@
 
 #include <config.h>
 
-#include <ebos/ebos.hh>
-#include <ebos/eclgenericvanguard.hh>
-#include <ebos/femcpgridcompat.hh>
+#include "TestTypeTag.hpp"
 
 #include <opm/common/utility/Serializer.hpp>
 
@@ -33,10 +31,14 @@
 #include <opm/output/eclipse/Inplace.hpp>
 
 #include <opm/input/eclipse/EclipseState/WagHysteresisConfig.hpp>
+
 #include <opm/material/fluidmatrixinteractions/EclHysteresisTwoPhaseLawParams.hpp>
 
 #include <opm/models/blackoil/blackoilprimaryvariables.hh>
 
+#include <opm/simulators/flow/FemCpGridCompat.hpp>
+#include <opm/simulators/flow/FlowGenericVanguard.hpp>
+#include <opm/simulators/flow/FlowProblem.hpp>
 #include <opm/simulators/timestepping/AdaptiveTimeStepping.hpp>
 #include <opm/simulators/timestepping/SimulatorReport.hpp>
 #include <opm/simulators/timestepping/SimulatorTimer.hpp>
@@ -60,7 +62,7 @@
 namespace Opm::Properties {
     namespace TTag {
     struct TestRestartTypeTag {
-            using InheritsFrom = std::tuple<EbosTypeTag, FlowTimeSteppingParameters>;
+            using InheritsFrom = std::tuple<TestTypeTag, FlowTimeSteppingParameters>;
         };
     }
 
@@ -99,26 +101,30 @@ BOOST_AUTO_TEST_CASE(NAME) \
 #define TEST_FOR_TYPE(TYPE) \
     TEST_FOR_TYPE_NAMED(TYPE, TYPE)
 
-TEST_FOR_TYPE(ALQState)
-TEST_FOR_TYPE(GroupState)
+namespace Opm { using ALQS = ALQState<double>; }
+TEST_FOR_TYPE_NAMED(ALQS, ALQState)
+namespace Opm { using GroupS = GroupState<double>; }
+TEST_FOR_TYPE_NAMED(GroupS, GroupState)
 TEST_FOR_TYPE(HardcodedTimeStepControl)
 TEST_FOR_TYPE(Inplace)
-TEST_FOR_TYPE(PerfData)
+namespace Opm { using PerfD = PerfData<double>; }
+TEST_FOR_TYPE_NAMED(PerfD, PerfData)
 TEST_FOR_TYPE(PIDAndIterationCountTimeStepControl)
 TEST_FOR_TYPE(PIDTimeStepControl)
-TEST_FOR_TYPE(SegmentState)
+namespace Opm { using SegmState = SegmentState<double>; }
+TEST_FOR_TYPE_NAMED(SegmState, SegmentState)
 TEST_FOR_TYPE(SimpleIterationCountTimeStepControl)
 TEST_FOR_TYPE(SimulatorReport)
 TEST_FOR_TYPE(SimulatorReportSingle)
 TEST_FOR_TYPE(SimulatorTimer)
 
-namespace Opm { using ATS = AdaptiveTimeStepping<Properties::TTag::EbosTypeTag>; }
+namespace Opm { using ATS = AdaptiveTimeStepping<Properties::TTag::TestTypeTag>; }
 TEST_FOR_TYPE_NAMED_OBJ(ATS, AdaptiveTimeSteppingHardcoded, serializationTestObjectHardcoded)
 TEST_FOR_TYPE_NAMED_OBJ(ATS, AdaptiveTimeSteppingPID, serializationTestObjectPID)
 TEST_FOR_TYPE_NAMED_OBJ(ATS, AdaptiveTimeSteppingPIDIt, serializationTestObjectPIDIt)
 TEST_FOR_TYPE_NAMED_OBJ(ATS, AdaptiveTimeSteppingSimple, serializationTestObjectSimple)
 
-namespace Opm { using BPV = BlackOilPrimaryVariables<Properties::TTag::EbosTypeTag>; }
+namespace Opm { using BPV = BlackOilPrimaryVariables<Properties::TTag::TestTypeTag>; }
 TEST_FOR_TYPE_NAMED(BPV, BlackoilPrimaryVariables)
 
 namespace Opm {
@@ -136,7 +142,7 @@ namespace Opm {
 TEST_FOR_TYPE_NAMED(HystParam, EclHysteresisTwoPhaseLawParams)
 
 namespace Opm {
-    using Disc = Opm::FvBaseDiscretization<Opm::Properties::TTag::EbosTypeTag>;
+    using Disc = Opm::FvBaseDiscretization<Opm::Properties::TTag::TestTypeTag>;
     using BVec = typename Disc::BlockVectorWrapper;
 }
 TEST_FOR_TYPE_NAMED(BVec, BlockVectorWrapper)
@@ -144,7 +150,7 @@ TEST_FOR_TYPE_NAMED(BVec, BlockVectorWrapper)
 BOOST_AUTO_TEST_CASE(SingleWellState)
 {
     Opm::ParallelWellInfo dummy;
-    auto data_out = Opm::SingleWellState::serializationTestObject(dummy);
+    auto data_out = Opm::SingleWellState<double>::serializationTestObject(dummy);
     Opm::Serialization::MemPacker packer;
     Opm::Serializer ser(packer);
     ser.pack(data_out);
@@ -173,7 +179,7 @@ BOOST_AUTO_TEST_CASE(WellContainer)
 BOOST_AUTO_TEST_CASE(WellState)
 {
     Opm::ParallelWellInfo dummy;
-    auto data_out = Opm::WellState::serializationTestObject(dummy);
+    auto data_out = Opm::WellState<double>::serializationTestObject(dummy);
     Opm::Serialization::MemPacker packer;
     Opm::Serializer ser(packer);
     ser.pack(data_out);
@@ -188,13 +194,13 @@ BOOST_AUTO_TEST_CASE(WellState)
 BOOST_AUTO_TEST_CASE(WGState)
 {
     Opm::ParallelWellInfo dummy;
-    auto data_out = Opm::WGState::serializationTestObject(dummy);
+    auto data_out = Opm::WGState<double>::serializationTestObject(dummy);
     Opm::Serialization::MemPacker packer;
     Opm::Serializer ser(packer);
     ser.pack(data_out);
     const size_t pos1 = ser.position();
     decltype(data_out) data_in(Opm::PhaseUsage{});
-    data_in.well_state = Opm::WellState(dummy);
+    data_in.well_state = Opm::WellState<double>(dummy);
     ser.unpack(data_in);
     const size_t pos2 = ser.position();
     BOOST_CHECK_MESSAGE(pos1 == pos2, "Packed size differ from unpack size for WGState");
@@ -203,24 +209,24 @@ BOOST_AUTO_TEST_CASE(WGState)
 
 BOOST_AUTO_TEST_CASE(EclGenericVanguard)
 {
-    auto in_params = Opm::EclGenericVanguard::serializationTestParams();
-    Opm::EclGenericVanguard val1(std::move(in_params));
+    auto in_params = Opm::FlowGenericVanguard::serializationTestParams();
+    Opm::FlowGenericVanguard val1(std::move(in_params));
     Opm::Serialization::MemPacker packer;
     Opm::Serializer ser(packer);
     ser.pack(val1);
     const size_t pos1 = ser.position();
-    Opm::EclGenericVanguard::SimulationModelParams out_params;
+    Opm::FlowGenericVanguard::SimulationModelParams out_params;
     out_params.setupTime_ = 0.0;
     out_params.actionState_ = std::make_unique<Opm::Action::State>();
     out_params.udqState_ = std::make_unique<Opm::UDQState>();
     out_params.eclSchedule_ = std::make_shared<Opm::Schedule>();
     out_params.summaryState_ = std::make_unique<Opm::SummaryState>();
-    Opm::EclGenericVanguard val2(std::move(out_params));
+    Opm::FlowGenericVanguard val2(std::move(out_params));
     ser.unpack(val2);
     const size_t pos2 = ser.position();
 
-    BOOST_CHECK_MESSAGE(pos1 == pos2, "Packed size differ from unpack size for EclGenericVanguard");
-    BOOST_CHECK_MESSAGE(val1 == val2, "Deserialized EclGenericVanguard differ");
+    BOOST_CHECK_MESSAGE(pos1 == pos2, "Packed size differ from unpack size for FlowGenericVanguard");
+    BOOST_CHECK_MESSAGE(val1 == val2, "Deserialized FlowGenericVanguard differ");
 }
 
 BOOST_AUTO_TEST_CASE(EclGenericProblem)
@@ -238,7 +244,7 @@ BOOST_AUTO_TEST_CASE(EclGenericProblem)
     auto gridView = grid.leafGridView();
 #endif // HAVE_DUNE_FEM
     auto data_out
-        = Opm::EclGenericProblem<GridView, Opm::BlackOilFluidSystem<double, Opm::BlackOilDefaultIndexTraits>, double>::
+        = Opm::FlowGenericProblem<GridView, Opm::BlackOilFluidSystem<double, Opm::BlackOilDefaultIndexTraits>>::
             serializationTestObject(eclState, schedule, gridView);
     Opm::Serialization::MemPacker packer;
     Opm::Serializer ser(packer);
@@ -253,7 +259,7 @@ BOOST_AUTO_TEST_CASE(EclGenericProblem)
 
 namespace Opm {
 
-class BlackoilWellModelGenericTest : public BlackoilWellModelGeneric
+class BlackoilWellModelGenericTest : public BlackoilWellModelGeneric<double>
 {
 public:
     BlackoilWellModelGenericTest(Schedule& schedule,
@@ -262,13 +268,13 @@ public:
                                  const PhaseUsage& phase_usage,
                                  const Parallel::Communication& comm,
                                  bool deserialize)
-        : BlackoilWellModelGeneric(schedule, summaryState,
-                                   eclState, phase_usage, comm)
+        : BlackoilWellModelGeneric<double>(schedule, summaryState,
+                                           eclState, phase_usage, comm)
     {
         if (deserialize) {
-            active_wgstate_.well_state = WellState(dummy);
-            last_valid_wgstate_.well_state = WellState(dummy);
-            nupcol_wgstate_.well_state = WellState(dummy);
+            active_wgstate_.well_state = WellState<double>(dummy);
+            last_valid_wgstate_.well_state = WellState<double>(dummy);
+            nupcol_wgstate_.well_state = WellState<double>(dummy);
         }
     }
 
@@ -281,12 +287,13 @@ public:
         closed_this_step_ = {"test1", "test2"};
         guideRate_.setSerializationTestData();
         node_pressures_ = {{"test3", 4.0}};
-        active_wgstate_ = WGState::serializationTestObject(dummy);
-        last_valid_wgstate_ = WGState::serializationTestObject(dummy);
-        nupcol_wgstate_ = WGState::serializationTestObject(dummy);
+        active_wgstate_ = WGState<double>::serializationTestObject(dummy);
+        last_valid_wgstate_ = WGState<double>::serializationTestObject(dummy);
+        nupcol_wgstate_ = WGState<double>::serializationTestObject(dummy);
         last_glift_opt_time_ = 5.0;
         switched_prod_groups_ = {{"test4", "test5"}};
         switched_inj_groups_ = {{{"test4", Phase::SOLVENT}, "test5"}};
+        closed_offending_wells_ = {{"test4", {"test5", "test6"}}};
     }
 
     void calcRates(const int, const int, const std::vector<double>&, std::vector<double>&) override
@@ -296,7 +303,7 @@ public:
     {}
 
     void computePotentials(const std::size_t,
-                           const WellState&,
+                           const WellState<double>&,
                            std::string&,
                            ExceptionType::ExcEnum&,
                            DeferredLogger&) override
@@ -350,10 +357,11 @@ BOOST_AUTO_TEST_CASE(BlackoilWellModelGeneric)
 }
 
 template<class Grid, class GridView, class DofMapper, class Stencil, class Scalar>
-class EclGenericTracerModelTest : public Opm::EclGenericTracerModel<Grid,GridView,DofMapper,Stencil,Scalar> {
-    using Base = Opm::EclGenericTracerModel<Grid,GridView,DofMapper,Stencil,Scalar>;
+class GenericTracerModelTest : public Opm::GenericTracerModel<Grid,GridView,DofMapper,Stencil,Scalar>
+{
+    using Base = Opm::GenericTracerModel<Grid,GridView,DofMapper,Stencil,Scalar>;
 public:
-    EclGenericTracerModelTest(const GridView& gridView,
+    GenericTracerModelTest(const GridView& gridView,
                               const Opm::EclipseState& eclState,
                               const Dune::CartesianIndexMapper<Grid>& cartMapper,
                               const DofMapper& dofMapper,
@@ -361,21 +369,21 @@ public:
         Base(gridView, eclState, cartMapper, dofMapper, centroids)
     {}
 
-    static EclGenericTracerModelTest
+    static GenericTracerModelTest
     serializationTestObject(const GridView& gridView,
                             const Opm::EclipseState& eclState,
                             const Dune::CartesianIndexMapper<Grid>& cartMapper,
                             const DofMapper& dofMapper,
                             const std::function<std::array<double,Grid::dimensionworld>(int)> centroids)
     {
-        EclGenericTracerModelTest result(gridView, eclState, cartMapper, dofMapper, centroids);
+        GenericTracerModelTest result(gridView, eclState, cartMapper, dofMapper, centroids);
         result.tracerConcentration_ = {{1.0}, {2.0}, {3.0}};
         result.wellTracerRate_.insert({{"foo", "bar"}, 4.0});
 
         return result;
     }
 
-    bool operator==(const EclGenericTracerModelTest& rhs) const
+    bool operator==(const GenericTracerModelTest& rhs) const
     {
         if (this->tracerConcentration_.size() != rhs.tracerConcentration_.size()) {
             return false;
@@ -408,11 +416,11 @@ BOOST_AUTO_TEST_CASE(EclGenericTracerModel)
     auto gridView = grid.leafGridView();
 #endif // HAVE_DUNE_FEM
     Dune::MultipleCodimMultipleGeomTypeMapper<GridView> dofMapper(gridView, Dune::mcmgElementLayout());
-    auto data_out = EclGenericTracerModelTest<Dune::CpGrid,
-                                              GridView,
-                                              Dune::MultipleCodimMultipleGeomTypeMapper<GridView>,
-                                              Opm::EcfvStencil<double, GridView, false, false>,
-                                              double>
+    auto data_out = GenericTracerModelTest<Dune::CpGrid,
+                                           GridView,
+                                           Dune::MultipleCodimMultipleGeomTypeMapper<GridView>,
+                                           Opm::EcfvStencil<double, GridView, false, false>,
+                                           double>
         ::serializationTestObject(gridView, eclState, mapper, dofMapper, centroids);
     Opm::Serialization::MemPacker packer;
     Opm::Serializer ser(packer);
@@ -427,7 +435,7 @@ BOOST_AUTO_TEST_CASE(EclGenericTracerModel)
 
 namespace Opm {
 
-class TBatchExport : public EclTracerModel<Properties::TTag::EbosTypeTag> {
+class TBatchExport : public TracerModel<Properties::TTag::TestTypeTag> {
 public:
     using TBatch = TracerBatch<double>;
 };
@@ -440,14 +448,17 @@ namespace {
 
 struct AquiferFixture {
     AquiferFixture() {
-        using TT = Opm::Properties::TTag::TestRestartTypeTag;
+        using namespace Opm;
+        using TT = Properties::TTag::TestRestartTypeTag;
         const char* argv[] = {
             "test_RestartSerialization",
             "--ecl-deck-file-name=GLIFT1.DATA"
         };
-        Opm::AdaptiveTimeStepping<TT>::registerParameters();
-        Opm::setupParameters_<TT>(2, argv, /*registerParams=*/true);
-        Opm::EclGenericVanguard::setCommunication(std::make_unique<Opm::Parallel::Communication>());
+        AdaptiveTimeStepping<TT>::registerParameters();
+        BlackoilModelParameters<TT>::registerParameters();
+        Parameters::registerParam<TT, Properties::EnableTerminalOutput>("Do *NOT* use!");
+        setupParameters_<TT>(2, argv, /*registerParams=*/true);
+        FlowGenericVanguard::setCommunication(std::make_unique<Opm::Parallel::Communication>());
     }
 };
 
@@ -459,7 +470,7 @@ BOOST_GLOBAL_FIXTURE(AquiferFixture);
 BOOST_AUTO_TEST_CASE(TYPE) \
 { \
     using TT = Opm::Properties::TTag::TestRestartTypeTag; \
-    Opm::EclGenericVanguard::readDeck("GLIFT1.DATA"); \
+    Opm::FlowGenericVanguard::readDeck("GLIFT1.DATA"); \
     using Simulator = Opm::GetPropType<TT, Opm::Properties::Simulator>; \
     Simulator sim; \
     auto data_out = Opm::TYPE<TT>::serializationTestObject(sim); \
@@ -480,7 +491,7 @@ TEST_FOR_AQUIFER(AquiferFetkovich)
 BOOST_AUTO_TEST_CASE(AquiferNumerical)
 {
     using TT = Opm::Properties::TTag::TestRestartTypeTag;
-    Opm::EclGenericVanguard::readDeck("GLIFT1.DATA");
+    Opm::FlowGenericVanguard::readDeck("GLIFT1.DATA");
     using Simulator = Opm::GetPropType<TT, Opm::Properties::Simulator>;
     Simulator sim;
     auto data_out = Opm::AquiferNumerical<TT>::serializationTestObject(sim);
@@ -498,7 +509,7 @@ BOOST_AUTO_TEST_CASE(AquiferNumerical)
 BOOST_AUTO_TEST_CASE(AquiferConstantFlux)
 {
     using TT = Opm::Properties::TTag::TestRestartTypeTag;
-    Opm::EclGenericVanguard::readDeck("GLIFT1.DATA");
+    Opm::FlowGenericVanguard::readDeck("GLIFT1.DATA");
     using Simulator = Opm::GetPropType<TT, Opm::Properties::Simulator>;
     Simulator sim;
     auto data_out = Opm::AquiferConstantFlux<TT>::serializationTestObject(sim);

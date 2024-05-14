@@ -20,41 +20,75 @@
 #                       you should only add to this list if the *user* of
 #                       the library needs it.
 
+# This macro adds a cuda/hip source file to the correct source file list
+# it takes in the list to add it to, the path to the cuistl directory, and then
+# the rest of the file path after cuistl. The reason for splitting this into to
+# paths is to simplify replacing the cuistl part with hipistl.
+# Cuda files are added as they are, whereas hip files should be added after
+# hipification, we a dependency that will trigger when the cuda source code is
+# changed.
+macro (ADD_CUDA_OR_HIP_FILE LIST DIR FILE)
+  set (cuda_file_path "${PROJECT_SOURCE_DIR}/${DIR}/cuistl/${FILE}")
+
+  if(CUDA_FOUND AND NOT CONVERT_CUDA_TO_HIP)
+    list (APPEND ${LIST} "${DIR}/cuistl/${FILE}")
+  else()
+    # we must hipify the code
+    # and include the correct path which is in the build/binary dir
+    string(REPLACE ".cu" ".hip" HIP_SOURCE_FILE ${FILE})
+    set (hip_file_path "${PROJECT_BINARY_DIR}/${DIR}/hipistl/${HIP_SOURCE_FILE}")
+    file(RELATIVE_PATH relpath ${PROJECT_SOURCE_DIR} ${hip_file_path})
+    execute_process(COMMAND bash "${PROJECT_SOURCE_DIR}/bin/hipify_file.sh" ${cuda_file_path} ${hip_file_path})
+
+    # add a custom command that will hipify again if the cuda code it depends on changes
+    add_custom_command(
+        OUTPUT ${hip_file_path}
+        COMMAND bash "${PROJECT_SOURCE_DIR}/bin/hipify_file.sh" ${cuda_file_path} ${hip_file_path}
+        DEPENDS ${cuda_file_path}
+        COMMENT "Rehipifying because of change in ${cuda_file_path}"
+    )
+
+    # set_source_files_properties(${relpath} PROPERTIES LANGUAGE HIP)
+    list(APPEND ${LIST} ${relpath})
+  endif()
+endmacro()
+
 # originally generated with the command:
 # find opm -name '*.c*' -printf '\t%p\n' | sort
 list (APPEND MAIN_SOURCE_FILES
-  ebos/collecttoiorank.cc
-  ebos/eclgenericcpgridvanguard.cc
-  ebos/eclgenericoutputblackoilmodule.cc
-  ebos/eclgenericproblem.cc
-  ebos/eclgenericthresholdpressure.cc
-  ebos/eclgenerictracermodel.cc
-  ebos/eclgenericvanguard.cc
-  ebos/eclgenericwriter.cc
-  ebos/eclmixingratecontrols.cc
-  ebos/eclsolutioncontainers.cc
-  ebos/ecltransmissibility.cc
-  ebos/equil/equilibrationhelpers.cc
-  ebos/equil/initstateequil.cc
   opm/core/props/BlackoilPhases.cpp
   opm/core/props/phaseUsageFromDeck.cpp
   opm/core/props/satfunc/RelpermDiagnostics.cpp
   opm/simulators/timestepping/SimulatorReport.cpp
   opm/simulators/flow/ActionHandler.cpp
   opm/simulators/flow/Banners.cpp
+  opm/simulators/flow/CollectDataOnIORank.cpp
   opm/simulators/flow/ConvergenceOutputConfiguration.cpp
+  opm/simulators/flow/EclGenericWriter.cpp
   opm/simulators/flow/ExtraConvergenceOutputThread.cpp
-  opm/simulators/flow/FlowMain.cpp
+  opm/simulators/flow/FlowGenericProblem.cpp
+  opm/simulators/flow/FlowGenericVanguard.cpp
+  opm/simulators/flow/FlowUtils.cpp
+  opm/simulators/flow/GenericCpGridVanguard.cpp
+  opm/simulators/flow/GenericOutputBlackoilModule.cpp
+  opm/simulators/flow/GenericThresholdPressure.cpp
+  opm/simulators/flow/GenericTracerModel.cpp
   opm/simulators/flow/InterRegFlows.cpp
   opm/simulators/flow/KeywordValidation.cpp
   opm/simulators/flow/LogOutputHelper.cpp
   opm/simulators/flow/Main.cpp
+  opm/simulators/flow/MixingRateControls.cpp
   opm/simulators/flow/NonlinearSolver.cpp
+  opm/simulators/flow/partitionCells.cpp
   opm/simulators/flow/RSTConv.cpp
+  opm/simulators/flow/RegionPhasePVAverage.cpp
   opm/simulators/flow/SimulatorReportBanners.cpp
   opm/simulators/flow/SimulatorSerializer.cpp
+  opm/simulators/flow/SolutionContainers.cpp
+  opm/simulators/flow/Transmissibility.cpp
   opm/simulators/flow/ValidationFunctions.cpp
-  opm/simulators/flow/partitionCells.cpp
+  opm/simulators/flow/equil/EquilibrationHelpers.cpp
+  opm/simulators/flow/equil/InitStateEquil.cpp
   opm/simulators/linalg/ExtractParallelGridInformationToISTL.cpp
   opm/simulators/linalg/FlexibleSolver1.cpp
   opm/simulators/linalg/FlexibleSolver2.cpp
@@ -98,6 +132,7 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/wells/BlackoilWellModelGuideRates.cpp
   opm/simulators/wells/BlackoilWellModelRestart.cpp
   opm/simulators/wells/ConnFiltrateData.cpp
+  opm/simulators/wells/FractionCalculator.cpp
   opm/simulators/wells/GasLiftCommon.cpp
   opm/simulators/wells/GasLiftGroupInfo.cpp
   opm/simulators/wells/GasLiftSingleWellGeneric.cpp
@@ -150,59 +185,60 @@ list (APPEND MAIN_SOURCE_FILES
 
 
 if (Damaris_FOUND AND MPI_FOUND AND USE_DAMARIS_LIB)
-  list (APPEND MAIN_SOURCE_FILES opm/simulators/utils/DamarisOutputModule.cpp
-                                 opm/simulators/utils/DamarisKeywords.cpp
-                                 opm/simulators/utils/initDamarisXmlFile.cpp
-                                 ebos/damariswriter.cc
-                                 opm/simulators/utils/DamarisVar.cpp
-                                 opm/simulators/utils/GridDataOutput.cpp
+  list (APPEND MAIN_SOURCE_FILES
+    opm/simulators/flow/DamarisWriter.cpp
+    opm/simulators/utils/DamarisKeywords.cpp
+    opm/simulators/utils/DamarisOutputModule.cpp
+    opm/simulators/utils/DamarisVar.cpp
+    opm/simulators/utils/GridDataOutput.cpp
+    opm/simulators/utils/initDamarisXmlFile.cpp
   )
 endif()
-if(CUDA_FOUND)
-  # CUISTL SOURCE
-  list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/detail/CuBlasHandle.cpp)
-  list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/detail/cusparse_matrix_operations.cu)
-  list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/detail/CuSparseHandle.cpp)
-  list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/CuVector.cpp)
-  list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/detail/vector_operations.cu)
-  list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/CuSparseMatrix.cpp)
-  list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/CuDILU.cpp)
-  list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/CuJac.cpp)
-  list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/CuSeqILU0.cpp)
-  list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/cuistl/set_device.cpp)
 
-  # CUISTL HEADERS
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/cuda_safe_call.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/cusparse_matrix_operations.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/cusparse_safe_call.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/cublas_safe_call.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/cuda_check_last_error.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/CuBlasHandle.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/CuSparseHandle.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/CuDILU.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/CuJac.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/CuVector.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/CuSparseMatrix.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/CuMatrixDescription.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/CuSparseResource.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/CuSparseResource_impl.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/safe_conversion.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/cublas_wrapper.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/cusparse_wrapper.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/cusparse_constants.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/vector_operations.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/has_function.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/preconditioner_should_call_post_pre.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/PreconditionerAdapter.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/CuSeqILU0.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/detail/fix_zero_diagonal.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/PreconditionerConvertFieldTypeAdapter.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/CuOwnerOverlapCopy.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/SolverAdapter.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/CuBlockPreconditioner.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/PreconditionerHolder.hpp)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/cuistl/set_device.hpp)
+# add these files if we should compile the hip code
+if (HAVE_CUDA)
+  ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/CuBlasHandle.cpp)
+  ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/cusparse_matrix_operations.cu)
+  ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/CuSparseHandle.cpp)
+  ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg CuVector.cpp)
+  ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/vector_operations.cu)
+  ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg CuSparseMatrix.cpp)
+  ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg CuDILU.cpp)
+  ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg CuJac.cpp)
+  ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg CuSeqILU0.cpp)
+  ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg set_device.cpp)
 
+  # HEADERS
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/cuda_safe_call.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/cusparse_matrix_operations.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/cusparse_safe_call.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/cublas_safe_call.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/cuda_check_last_error.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/CuBlasHandle.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/CuSparseHandle.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg CuDILU.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg CuJac.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg CuVector.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg CuSparseMatrix.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/CuMatrixDescription.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/CuSparseResource.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/CuSparseResource_impl.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/safe_conversion.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/cublas_wrapper.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/cusparse_wrapper.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/cusparse_constants.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/vector_operations.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/has_function.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/preconditioner_should_call_post_pre.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg PreconditionerAdapter.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg CuSeqILU0.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/fix_zero_diagonal.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg PreconditionerConvertFieldTypeAdapter.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg CuOwnerOverlapCopy.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg SolverAdapter.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg CuBlockPreconditioner.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg PreconditionerHolder.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg set_device.hpp)
 endif()
 
 if(USE_BDA_BRIDGE)
@@ -265,7 +301,7 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_convergencereport.cpp
   tests/test_deferredlogger.cpp
   tests/test_dilu.cpp
-  tests/test_equil.cc
+  tests/test_equil.cpp
   tests/test_extractMatrix.cpp
   tests/test_flexiblesolver.cpp
   tests/test_glift1.cpp
@@ -284,6 +320,7 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_partitionCells.cpp
   tests/test_preconditionerfactory.cpp
   tests/test_privarspacking.cpp
+  tests/test_region_phase_pvaverage.cpp
   tests/test_relpermdiagnostics.cpp
   tests/test_RestartSerialization.cpp
   tests/test_rstconv.cpp
@@ -308,24 +345,25 @@ if(CUDA_FOUND)
   if(USE_BDA_BRIDGE)
     list(APPEND TEST_SOURCE_FILES tests/test_cusparseSolver.cpp)
   endif()
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_converttofloatadapter.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cublas_handle.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cublas_safe_call.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cusparse_safe_call.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cuda_safe_call.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cuda_check_last_error.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cujac.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cuowneroverlapcopy.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cuseqilu0.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cusparse_handle.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cuSparse_matrix_operations.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cusparsematrix.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cuvector.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_cuVector_operations.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_safe_conversion.cpp)
-  list(APPEND TEST_SOURCE_FILES tests/cuistl/test_solver_adapter.cpp)
+endif()
 
-
+if (HAVE_CUDA)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_converttofloatadapter.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cublas_handle.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cublas_safe_call.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cusparse_safe_call.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cuda_safe_call.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cuda_check_last_error.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cujac.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cuowneroverlapcopy.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cuseqilu0.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cusparse_handle.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cuSparse_matrix_operations.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cusparsematrix.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cuvector.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cuVector_operations.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_safe_conversion.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_solver_adapter.cpp)
 endif()
 
 if(USE_BDA_BRIDGE)
@@ -406,65 +444,70 @@ list (APPEND TEST_DATA_FILES
 # originally generated with the command:
 # find opm -name '*.h*' -a ! -name '*-pch.hpp' -printf '\t%p\n' | sort
 list (APPEND PUBLIC_HEADER_FILES
-  ebos/alucartesianindexmapper.hh
-  ebos/collecttoiorank.hh
-  ebos/collecttoiorank_impl.hh
-  ebos/ebos.hh
-  ebos/eclalugridvanguard.hh
-  ebos/eclbaseaquifermodel.hh
-  ebos/eclbasevanguard.hh
-  ebos/eclcpgridvanguard.hh
-  ebos/ecldummygradientcalculator.hh
-  ebos/eclequilinitializer.hh
-  ebos/eclfluxmodule.hh
-  ebos/eclgenericcpgridvanguard.hh
-  ebos/eclgenericoutputblackoilmodule.hh
-  ebos/eclgenericproblem.hh
-  ebos/eclgenericproblem_impl.hh
-  ebos/eclgenericthresholdpressure.hh
-  ebos/eclgenericthresholdpressure_impl.hh
-  ebos/eclgenerictracermodel.hh
-  ebos/eclgenerictracermodel_impl.hh
-  ebos/eclgenericvanguard.hh
-  ebos/eclgenericwriter.hh
-  ebos/eclgenericwriter_impl.hh
-  ebos/eclmixingratecontrols.hh
-  ebos/eclnewtonmethod.hh
-  ebos/ecloutputblackoilmodule.hh
-  ebos/eclpolyhedralgridvanguard.hh
-  ebos/eclproblem.hh
-  ebos/eclproblem_properties.hh
-  ebos/eclsolutioncontainers.hh
-  ebos/ecltimesteppingparams.hh
-  ebos/eclthresholdpressure.hh
-  ebos/ecltracermodel.hh
-  ebos/ecltransmissibility.hh
-  ebos/ecltransmissibility_impl.hh
-  ebos/eclwriter.hh
-  ebos/femcpgridcompat.hh
-  ebos/vtkecltracermodule.hh
   opm/simulators/flow/ActionHandler.hpp
-  opm/simulators/flow/countGlobalCells.hpp
-  opm/simulators/flow/priVarsPacking.hpp
+  opm/simulators/flow/AluGridCartesianIndexMapper.hpp
+  opm/simulators/flow/AluGridVanguard.hpp
+  opm/simulators/flow/Banners.hpp
+  opm/simulators/flow/BaseAquiferModel.hpp
   opm/simulators/flow/BlackoilModel.hpp
   opm/simulators/flow/BlackoilModelNldd.hpp
   opm/simulators/flow/BlackoilModelParameters.hpp
-  opm/simulators/flow/Banners.hpp
+  opm/simulators/flow/CollectDataOnIORank.hpp
+  opm/simulators/flow/CollectDataOnIORank_impl.hpp
   opm/simulators/flow/ConvergenceOutputConfiguration.hpp
+  opm/simulators/flow/countGlobalCells.hpp
+  opm/simulators/flow/CpGridVanguard.hpp
+  opm/simulators/flow/DummyGradientCalculator.hpp
+  opm/simulators/flow/EclGenericWriter.hpp
+  opm/simulators/flow/EclGenericWriter_impl.hpp
+  opm/simulators/flow/EclWriter.hpp
+  opm/simulators/flow/EquilInitializer.hpp
   opm/simulators/flow/ExtraConvergenceOutputThread.hpp
+  opm/simulators/flow/FemCpGridCompat.hpp
+  opm/simulators/flow/FIBlackoilModel.hpp
+  opm/simulators/flow/FlowBaseVanguard.hpp
+  opm/simulators/flow/FlowGenericProblem.hpp
+  opm/simulators/flow/FlowGenericProblem_impl.hpp
+  opm/simulators/flow/FlowGenericVanguard.hpp
   opm/simulators/flow/FlowMain.hpp
+  opm/simulators/flow/FlowProblem.hpp
+  opm/simulators/flow/FlowProblemProperties.hpp
+  opm/simulators/flow/FlowUtils.hpp
+  opm/simulators/flow/FlowsData.hpp
+  opm/simulators/flow/FlowThresholdPressure.hpp
+  opm/simulators/flow/GenericCpGridVanguard.hpp
+  opm/simulators/flow/GenericOutputBlackoilModule.hpp
+  opm/simulators/flow/GenericThresholdPressure.hpp
+  opm/simulators/flow/GenericThresholdPressure_impl.hpp
+  opm/simulators/flow/GenericTracerModel.hpp
+  opm/simulators/flow/GenericTracerModel_impl.hpp
   opm/simulators/flow/InterRegFlows.hpp
+  opm/simulators/flow/KeywordValidation.hpp
+  opm/simulators/flow/LogOutputHelper.hpp
   opm/simulators/flow/Main.hpp
+  opm/simulators/flow/MixingRateControls.hpp
+  opm/simulators/flow/NewTranFluxModule.hpp
   opm/simulators/flow/NonlinearSolver.hpp
+  opm/simulators/flow/OutputBlackoilModule.hpp
+  opm/simulators/flow/partitionCells.hpp
+  opm/simulators/flow/PolyhedralGridVanguard.hpp
+  opm/simulators/flow/priVarsPacking.hpp
   opm/simulators/flow/RSTConv.hpp
+  opm/simulators/flow/RegionPhasePVAverage.hpp
   opm/simulators/flow/SimulatorFullyImplicitBlackoil.hpp
   opm/simulators/flow/SimulatorReportBanners.hpp
   opm/simulators/flow/SimulatorSerializer.hpp
-  opm/simulators/flow/KeywordValidation.hpp
-  opm/simulators/flow/LogOutputHelper.hpp
-  opm/simulators/flow/ValidationFunctions.hpp
-  opm/simulators/flow/partitionCells.hpp
+  opm/simulators/flow/SolutionContainers.hpp
   opm/simulators/flow/SubDomain.hpp
+  opm/simulators/flow/TracerModel.hpp
+  opm/simulators/flow/Transmissibility.hpp
+  opm/simulators/flow/Transmissibility_impl.hpp
+  opm/simulators/flow/ValidationFunctions.hpp
+  opm/simulators/flow/VtkTracerModule.hpp
+  opm/simulators/flow/equil/EquilibrationHelpers.hpp
+  opm/simulators/flow/equil/EquilibrationHelpers_impl.hpp
+  opm/simulators/flow/equil/InitStateEquil.hpp
+  opm/simulators/flow/equil/InitStateEquil_impl.hpp
   opm/core/props/BlackoilPhases.hpp
   opm/core/props/phaseUsageFromDeck.hpp
   opm/core/props/satfunc/RelpermDiagnostics.hpp
@@ -480,30 +523,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/aquifers/AquiferNumerical.hpp
   opm/simulators/aquifers/BlackoilAquiferModel.hpp
   opm/simulators/aquifers/BlackoilAquiferModel_impl.hpp
-  opm/simulators/linalg/bda/amgclSolverBackend.hpp
-  opm/simulators/linalg/bda/BdaBridge.hpp
-  opm/simulators/linalg/bda/BdaResult.hpp
-  opm/simulators/linalg/bda/BdaSolver.hpp
-  opm/simulators/linalg/bda/opencl/BILU0.hpp
-  opm/simulators/linalg/bda/BlockedMatrix.hpp
-  opm/simulators/linalg/bda/opencl/CPR.hpp
-  opm/simulators/linalg/bda/cuda/cuda_header.hpp
-  opm/simulators/linalg/bda/cuda/cusparseSolverBackend.hpp
-  opm/simulators/linalg/bda/opencl/ChowPatelIlu.hpp
-  opm/simulators/linalg/bda/opencl/BISAI.hpp
-  opm/simulators/linalg/bda/Reorder.hpp
-  opm/simulators/linalg/bda/opencl/opencl.hpp
-  opm/simulators/linalg/bda/opencl/openclKernels.hpp
-  opm/simulators/linalg/bda/opencl/OpenclMatrix.hpp
-  opm/simulators/linalg/bda/opencl/Preconditioner.hpp
-  opm/simulators/linalg/bda/opencl/openclSolverBackend.hpp
-  opm/simulators/linalg/bda/opencl/openclWellContributions.hpp
-  opm/simulators/linalg/bda/Matrix.hpp
-  opm/simulators/linalg/bda/MultisegmentWellContribution.hpp
-  opm/simulators/linalg/bda/rocalutionSolverBackend.hpp
-  opm/simulators/linalg/bda/rocsparseSolverBackend.hpp
-  opm/simulators/linalg/bda/rocsparseWellContributions.hpp
-  opm/simulators/linalg/bda/WellContributions.hpp
+  opm/simulators/aquifers/SupportsFaceTag.hpp
   opm/simulators/linalg/amgcpr.hh
   opm/simulators/linalg/DILU.hpp
   opm/simulators/linalg/twolevelmethodcpr.hh
@@ -514,7 +534,6 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/linalg/FlowLinearSolverParameters.hpp
   opm/simulators/linalg/GraphColoring.hpp
   opm/simulators/linalg/ISTLSolver.hpp
-  opm/simulators/linalg/ISTLSolverBda.hpp
   opm/simulators/linalg/MatrixMarketSpecializations.hpp
   opm/simulators/linalg/OwningBlockPreconditioner.hpp
   opm/simulators/linalg/OwningTwoLevelPreconditioner.hpp
@@ -536,6 +555,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/timestepping/AdaptiveSimulatorTimer.hpp
   opm/simulators/timestepping/AdaptiveTimeStepping.hpp
   opm/simulators/timestepping/ConvergenceReport.hpp
+  opm/simulators/timestepping/EclTimeSteppingParams.hpp
   opm/simulators/timestepping/TimeStepControl.hpp
   opm/simulators/timestepping/TimeStepControlInterface.hpp
   opm/simulators/timestepping/SimulatorTimer.hpp
@@ -564,6 +584,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/BlackoilWellModelGuideRates.hpp
   opm/simulators/wells/BlackoilWellModelRestart.hpp
   opm/simulators/wells/ConnFiltrateData.hpp
+  opm/simulators/wells/FractionCalculator.hpp
   opm/simulators/wells/GasLiftCommon.hpp
   opm/simulators/wells/GasLiftGroupInfo.hpp
   opm/simulators/wells/GasLiftSingleWellGeneric.hpp
@@ -623,15 +644,45 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/WellTest.hpp
   opm/simulators/wells/WGState.hpp
   )
+if (USE_BDA_BRIDGE)
+  list (APPEND PUBLIC_HEADER_FILES
+    opm/simulators/linalg/bda/amgclSolverBackend.hpp
+    opm/simulators/linalg/bda/BdaBridge.hpp
+    opm/simulators/linalg/bda/BdaResult.hpp
+    opm/simulators/linalg/bda/BdaSolver.hpp
+    opm/simulators/linalg/bda/opencl/BILU0.hpp
+    opm/simulators/linalg/bda/BlockedMatrix.hpp
+    opm/simulators/linalg/bda/opencl/CPR.hpp
+    opm/simulators/linalg/bda/cuda/cuda_header.hpp
+    opm/simulators/linalg/bda/cuda/cusparseSolverBackend.hpp
+    opm/simulators/linalg/bda/opencl/ChowPatelIlu.hpp
+    opm/simulators/linalg/bda/opencl/BISAI.hpp
+    opm/simulators/linalg/bda/Reorder.hpp
+    opm/simulators/linalg/bda/opencl/opencl.hpp
+    opm/simulators/linalg/bda/opencl/openclKernels.hpp
+    opm/simulators/linalg/bda/opencl/OpenclMatrix.hpp
+    opm/simulators/linalg/bda/opencl/Preconditioner.hpp
+    opm/simulators/linalg/bda/opencl/openclSolverBackend.hpp
+    opm/simulators/linalg/bda/opencl/openclWellContributions.hpp
+    opm/simulators/linalg/bda/Matrix.hpp
+    opm/simulators/linalg/bda/MultisegmentWellContribution.hpp
+    opm/simulators/linalg/bda/rocalutionSolverBackend.hpp
+    opm/simulators/linalg/bda/rocsparseSolverBackend.hpp
+    opm/simulators/linalg/bda/rocsparseWellContributions.hpp
+    opm/simulators/linalg/bda/WellContributions.hpp
+    opm/simulators/linalg/ISTLSolverBda.hpp
+  )
+endif()
 
 if (Damaris_FOUND AND MPI_FOUND AND USE_DAMARIS_LIB)
-  list (APPEND PUBLIC_HEADER_FILES opm/simulators/utils/DamarisOutputModule.hpp
-                                   opm/simulators/utils/DamarisKeywords.hpp
-                                   ebos/damaris_properties.hh
-                                   ebos/damariswriter.hh
-                                   opm/simulators/utils/DamarisVar.hpp
-                                   opm/simulators/utils/GridDataOutput.hpp
-                                   opm/simulators/utils/GridDataOutput_impl.hpp
+  list (APPEND PUBLIC_HEADER_FILES
+    opm/simulators/utils/DamarisKeywords.hpp
+    opm/simulators/utils/DamarisOutputModule.hpp
+    opm/simulators/flow/DamarisProperties.hpp
+    opm/simulators/flow/DamarisWriter.hpp
+    opm/simulators/utils/DamarisVar.hpp
+    opm/simulators/utils/GridDataOutput.hpp
+    opm/simulators/utils/GridDataOutput_impl.hpp
   )
 endif()
 

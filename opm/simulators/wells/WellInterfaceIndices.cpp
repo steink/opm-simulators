@@ -33,8 +33,8 @@
 namespace Opm
 {
 
-template<class FluidSystem, class Indices, class Scalar>
-WellInterfaceIndices<FluidSystem,Indices,Scalar>::
+template<class FluidSystem, class Indices>
+WellInterfaceIndices<FluidSystem,Indices>::
 WellInterfaceIndices(const Well& well,
                      const ParallelWellInfo& parallel_well_info,
                      const int time_step,
@@ -56,10 +56,10 @@ WellInterfaceIndices(const Well& well,
 {
 }
 
-template<class FluidSystem, class Indices, class Scalar>
+template<class FluidSystem, class Indices>
 int
-WellInterfaceIndices<FluidSystem,Indices,Scalar>::
-flowPhaseToEbosCompIdx(const int phaseIdx) const
+WellInterfaceIndices<FluidSystem,Indices>::
+flowPhaseToModelCompIdx(const int phaseIdx) const
 {
     const auto& pu = this->phaseUsage();
     if (FluidSystem::phaseIsActive(FluidSystem::waterPhaseIdx) && pu.phase_pos[Water] == phaseIdx)
@@ -73,10 +73,10 @@ flowPhaseToEbosCompIdx(const int phaseIdx) const
     return phaseIdx;
 }
 
-template<class FluidSystem, class Indices, class Scalar>
+template<class FluidSystem, class Indices>
 int
-WellInterfaceIndices<FluidSystem,Indices,Scalar>::
-ebosCompIdxToFlowCompIdx(const unsigned compIdx) const
+WellInterfaceIndices<FluidSystem,Indices>::
+modelCompIdxToFlowCompIdx(const unsigned compIdx) const
 {
     const auto& pu = this->phaseUsage();
     if (FluidSystem::phaseIsActive(FluidSystem::waterPhaseIdx) && Indices::canonicalToActiveComponentIndex(FluidSystem::waterCompIdx) == compIdx)
@@ -90,9 +90,9 @@ ebosCompIdxToFlowCompIdx(const unsigned compIdx) const
     return compIdx;
 }
 
-template<class FluidSystem, class Indices, class Scalar>
+template<class FluidSystem, class Indices>
 double
-WellInterfaceIndices<FluidSystem,Indices,Scalar>::
+WellInterfaceIndices<FluidSystem,Indices>::
 scalingFactor(const int phaseIdx) const
 {
     const auto& pu = this->phaseUsage();
@@ -112,8 +112,7 @@ scalingFactor(const int phaseIdx) const
 
 #define INSTANCE( ...) \
 template class WellInterfaceIndices<BlackOilFluidSystem<double,BlackOilDefaultIndexTraits>, \
-                                    __VA_ARGS__, \
-                                    double>;
+                                    __VA_ARGS__>;
 
 // One phase
 INSTANCE(BlackOilOnePhaseIndices<0u,0u,0u,0u,false,false,0u,1u,0u>)

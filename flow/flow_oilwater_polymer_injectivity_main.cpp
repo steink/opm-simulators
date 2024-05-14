@@ -15,10 +15,10 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "config.h"
-#include <flow/flow_ebos_oilwater_polymer_injectivity.hpp>
+#include <flow/flow_oilwater_polymer_injectivity.hpp>
 
 
 int main(int argc, char** argv)
 {
-    return Opm::flowEbosOilWaterPolymerInjectivityMainStandalone(argc, argv);
+    return Opm::flowOilWaterPolymerInjectivityMainStandalone(argc, argv);
 }

@@ -19,9 +19,9 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "config.h"
-#include <flow/flow_ebos_onephase_energy.hpp>
+#include <flow/flow_onephase_energy.hpp>
 
 int main(int argc, char** argv)
 {
-    return Opm::flowEbosWaterOnlyEnergyMainStandalone(argc,argv);
+    return Opm::flowWaterOnlyEnergyMainStandalone(argc,argv);
 }

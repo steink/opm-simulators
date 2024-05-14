@@ -19,7 +19,6 @@
 #include <config.h>
 
 #include <dune/alugrid/grid.hh>
-#include <ebos/eclalugridvanguard.hh>
 #include <opm/simulators/flow/Main.hpp>
 
 // for equilgrid in writer
@@ -28,25 +27,26 @@
 #include <opm/grid/cpgrid/GridHelpers.hpp>
 
 // these are not explicitly instanced in library
-#include <ebos/collecttoiorank_impl.hh>
-#include <ebos/eclgenericproblem_impl.hh>
-#include <ebos/eclgenericthresholdpressure_impl.hh>
-#include <ebos/eclgenerictracermodel_impl.hh>
-#include <ebos/eclgenericwriter_impl.hh>
-#include <ebos/ecltransmissibility_impl.hh>
-#include <ebos/equil/initstateequil_impl.hh>
+#include <opm/simulators/flow/AluGridVanguard.hpp>
+#include <opm/simulators/flow/CollectDataOnIORank_impl.hpp>
+#include <opm/simulators/flow/EclGenericWriter_impl.hpp>
+#include <opm/simulators/flow/FlowGenericProblem_impl.hpp>
+#include <opm/simulators/flow/GenericThresholdPressure_impl.hpp>
+#include <opm/simulators/flow/GenericTracerModel_impl.hpp>
+#include <opm/simulators/flow/Transmissibility_impl.hpp>
+#include <opm/simulators/flow/equil/InitStateEquil_impl.hpp>
 #include <opm/simulators/utils/GridDataOutput_impl.hpp>
 
 namespace Opm {
 namespace Properties {
 namespace TTag {
-struct EclFlowProblemAlugrid {
-    using InheritsFrom = std::tuple<EclFlowProblem>;
+struct FlowProblemAlugrid {
+    using InheritsFrom = std::tuple<FlowProblem>;
 };
 }
 
 template<class TypeTag>
-struct Grid<TypeTag, TTag::EclFlowProblemAlugrid> {
+struct Grid<TypeTag, TTag::FlowProblemAlugrid> {
     static const int dim = 3;
 #if HAVE_MPI
      using type = Dune::ALUGrid<dim, dim, Dune::cube, Dune::nonconforming,Dune::ALUGridMPIComm>;
@@ -54,24 +54,28 @@ struct Grid<TypeTag, TTag::EclFlowProblemAlugrid> {
      using type = Dune::ALUGrid<dim, dim, Dune::cube, Dune::nonconforming, Dune::ALUGridNoComm>;
 #endif
 };
+
 // alugrid need cp grid as equilgrid
 template<class TypeTag>
-struct EquilGrid<TypeTag, TTag::EclFlowProblemAlugrid> {
+struct EquilGrid<TypeTag, TTag::FlowProblemAlugrid> {
     using type = Dune::CpGrid;
 };
 template<class TypeTag>
-struct Vanguard<TypeTag, TTag::EclFlowProblemAlugrid> {
-    using type = Opm::EclAluGridVanguard<TypeTag>;
-};
-template<class TypeTag>
-struct EclEnableAquifers<TypeTag, TTag::EclFlowProblemAlugrid> {
-    static constexpr bool value = false;
+struct Vanguard<TypeTag, TTag::FlowProblemAlugrid> {
+    using type = Opm::AluGridVanguard<TypeTag>;
 };
 }
+
+template<>
+class SupportsFaceTag<Dune::ALUGrid<3, 3, Dune::cube, Dune::nonconforming>>
+    : public std::bool_constant<true>
+{};
+
 }
+
 int main(int argc, char** argv)
 {
-    using TypeTag = Opm::Properties::TTag::EclFlowProblemAlugrid;
+    using TypeTag = Opm::Properties::TTag::FlowProblemAlugrid;
     auto mainObject = std::make_unique<Opm::Main>(argc, argv);
     auto ret = mainObject->runStatic<TypeTag>();
     // Destruct mainObject as the destructor calls MPI_Finalize!

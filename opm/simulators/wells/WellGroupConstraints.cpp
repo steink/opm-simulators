@@ -36,8 +36,8 @@ namespace Opm
 std::pair<bool, double>
 WellGroupConstraints::
 checkGroupConstraintsInj(const Group& group,
-                         const WellState& well_state,
-                         const GroupState& group_state,
+                         const WellState<double>& well_state,
+                         const GroupState<double>& group_state,
                          const double efficiencyFactor,
                          const Schedule& schedule,
                          const SummaryState& summaryState,
@@ -74,28 +74,28 @@ checkGroupConstraintsInj(const Group& group,
 
     const auto& ws = well_state.well(well_.indexOfWell());
     // Call check for the well's injection phase.
-    return WellGroupHelpers::checkGroupConstraintsInj(well_.name(),
-                                                      well_.wellEcl().groupName(),
-                                                      group,
-                                                      well_state,
-                                                      group_state,
-                                                      well_.currentStep(),
-                                                      well_.guideRate(),
-                                                      ws.surface_rates.data(),
-                                                      injectionPhase,
-                                                      well_.phaseUsage(),
-                                                      efficiencyFactor,
-                                                      schedule,
-                                                      summaryState,
-                                                      resv_coeff,
-                                                      deferred_logger);
+    return WellGroupHelpers<double>::checkGroupConstraintsInj(well_.name(),
+                                                              well_.wellEcl().groupName(),
+                                                              group,
+                                                              well_state,
+                                                              group_state,
+                                                              well_.currentStep(),
+                                                              well_.guideRate(),
+                                                              ws.surface_rates.data(),
+                                                              injectionPhase,
+                                                              well_.phaseUsage(),
+                                                              efficiencyFactor,
+                                                              schedule,
+                                                              summaryState,
+                                                              resv_coeff,
+                                                              deferred_logger);
 }
 
 std::pair<bool, double>
 WellGroupConstraints::
 checkGroupConstraintsProd(const Group& group,
-                          const WellState& well_state,
-                          const GroupState& group_state,
+                          const WellState<double>& well_state,
+                          const GroupState<double>& group_state,
                           const double efficiencyFactor,
                           const Schedule& schedule,
                           const SummaryState& summaryState,
@@ -107,25 +107,25 @@ checkGroupConstraintsProd(const Group& group,
     rateConverter(0, well_.pvtRegionIdx(), group.name(), resv_coeff); // FIPNUM region 0 here, should use FIPNUM from WELSPECS.
 
     const auto& ws = well_state.well(well_.indexOfWell());
-    return WellGroupHelpers::checkGroupConstraintsProd(well_.name(),
-                                                       well_.wellEcl().groupName(),
-                                                       group,
-                                                       well_state,
-                                                       group_state,
-                                                       well_.currentStep(),
-                                                       well_.guideRate(),
-                                                       ws.surface_rates.data(),
-                                                       well_.phaseUsage(),
-                                                       efficiencyFactor,
-                                                       schedule,
-                                                       summaryState,
-                                                       resv_coeff,
-                                                       deferred_logger);
+    return WellGroupHelpers<double>::checkGroupConstraintsProd(well_.name(),
+                                                               well_.wellEcl().groupName(),
+                                                               group,
+                                                               well_state,
+                                                               group_state,
+                                                               well_.currentStep(),
+                                                               well_.guideRate(),
+                                                               ws.surface_rates.data(),
+                                                               well_.phaseUsage(),
+                                                               efficiencyFactor,
+                                                               schedule,
+                                                               summaryState,
+                                                               resv_coeff,
+                                                               deferred_logger);
 }
 
 bool WellGroupConstraints::
-checkGroupConstraints(WellState& well_state,
-                      const GroupState& group_state,
+checkGroupConstraints(WellState<double>& well_state,
+                      const GroupState<double>& group_state,
                       const Schedule& schedule,
                       const SummaryState& summaryState,
                       const RateConvFunc& rateConverter,

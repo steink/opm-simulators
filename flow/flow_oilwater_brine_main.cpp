@@ -15,10 +15,10 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "config.h"
-#include <flow/flow_ebos_oilwater_brine.hpp>
+#include <flow/flow_oilwater_brine.hpp>
 
 
 int main(int argc, char** argv)
 {
-    return Opm::flowEbosOilWaterBrineMainStandalone(argc, argv);
+    return Opm::flowOilWaterBrineMainStandalone(argc, argv);
 }

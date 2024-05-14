@@ -15,10 +15,10 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "config.h"
-#include <flow/flow_ebos_polymer.hpp>
+#include <flow/flow_polymer.hpp>
 
 
 int main(int argc, char** argv)
 {
-    return Opm::flowEbosPolymerMainStandalone(argc, argv);
+    return Opm::flowPolymerMainStandalone(argc, argv);
 }

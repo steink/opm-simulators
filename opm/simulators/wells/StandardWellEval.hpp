@@ -29,7 +29,6 @@
 
 #include <opm/material/densead/Evaluation.hpp>
 
-#include <optional>
 #include <vector>
 
 namespace Opm
@@ -37,19 +36,19 @@ namespace Opm
 
 class ConvergenceReport;
 class DeferredLogger;
-class GroupState;
 class Schedule;
 class SummaryState;
 class WellContributions;
-template<class FluidSystem, class Indices, class Scalar> class WellInterfaceIndices;
-class WellState;
+template<class FluidSystem, class Indices> class WellInterfaceIndices;
+template<class Scalar> class WellState;
 
-template<class FluidSystem, class Indices, class Scalar>
+template<class FluidSystem, class Indices>
 class StandardWellEval
 {
 protected:
-    using PrimaryVariables = StandardWellPrimaryVariables<FluidSystem,Indices,Scalar>;
-    using StdWellConnections = StandardWellConnections<FluidSystem,Indices,Scalar>;
+    using Scalar = typename FluidSystem::Scalar;
+    using PrimaryVariables = StandardWellPrimaryVariables<FluidSystem,Indices>;
+    using StdWellConnections = StandardWellConnections<FluidSystem,Indices>;
     static constexpr int Bhp = PrimaryVariables::Bhp;
     static constexpr int WQTotal= PrimaryVariables::WQTotal;
     static constexpr int numWellConservationEq = PrimaryVariables::numWellConservationEq;
@@ -70,16 +69,16 @@ public:
     { return linSys_; }
 
 protected:
-    StandardWellEval(const WellInterfaceIndices<FluidSystem,Indices,Scalar>& baseif);
+    StandardWellEval(const WellInterfaceIndices<FluidSystem,Indices>& baseif);
 
-    const WellInterfaceIndices<FluidSystem,Indices,Scalar>& baseif_;
+    const WellInterfaceIndices<FluidSystem,Indices>& baseif_;
 
     EvalWell extendEval(const Eval& in) const;
 
     // computing the accumulation term for later use in well mass equations
     void computeAccumWell();
 
-    ConvergenceReport getWellConvergence(const WellState& well_state,
+    ConvergenceReport getWellConvergence(const WellState<Scalar>& well_state,
                                          const std::vector<double>& B_avg,
                                          const double maxResidualAllowed,
                                          const double tol_wells,
@@ -95,7 +94,7 @@ protected:
               const bool has_polymermw);
 
     void updateWellStateFromPrimaryVariables(const bool stop_or_zero_rate_target,
-                                             WellState& well_state,
+                                             WellState<Scalar>& well_state,
                                              const SummaryState& summary_state,
                                              DeferredLogger& deferred_logger) const;
 

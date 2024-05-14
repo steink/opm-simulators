@@ -22,29 +22,29 @@
 namespace Opm::Pybind {
 
 template <class TypeTag>
-std::unique_ptr<double []>
+std::vector<double>
 PyMaterialState<TypeTag>::
-getCellVolumes( std::size_t *size)
+getCellVolumes()
 {
-    Model &model = this->ebos_simulator_->model();
-    *size = model.numGridDof();
-    auto array = std::make_unique<double []>(*size);
-    for (unsigned dof_idx = 0; dof_idx < *size; ++dof_idx) {
+    Model &model = this->simulator_->model();
+    auto size = model.numGridDof();
+    std::vector<double> array(size);
+    for (unsigned dof_idx = 0; dof_idx < size; ++dof_idx) {
         array[dof_idx] = model.dofTotalVolume(dof_idx);
     }
     return array;
 }
 
 template <class TypeTag>
-std::unique_ptr<double []>
+std::vector<double>
 PyMaterialState<TypeTag>::
-getPorosity( std::size_t *size)
+getPorosity()
 {
-    Problem &problem = this->ebos_simulator_->problem();
-    Model &model = this->ebos_simulator_->model();
-    *size = model.numGridDof();
-    auto array = std::make_unique<double []>(*size);
-    for (unsigned dof_idx = 0; dof_idx < *size; ++dof_idx) {
+    Problem &problem = this->simulator_->problem();
+    Model &model = this->simulator_->model();
+    auto size = model.numGridDof();
+    std::vector<double> array(size);
+    for (unsigned dof_idx = 0; dof_idx < size; ++dof_idx) {
         array[dof_idx] = problem.referencePorosity(dof_idx, /*timeIdx*/0);
     }
     return array;
@@ -53,10 +53,10 @@ getPorosity( std::size_t *size)
 template <class TypeTag>
 void
 PyMaterialState<TypeTag>::
-setPorosity(const double *poro, std::size_t size)
+setPorosity(const double* poro, std::size_t size)
 {
-    Problem &problem = this->ebos_simulator_->problem();
-    Model &model = this->ebos_simulator_->model();
+    Problem& problem = this->simulator_->problem();
+    Model& model = this->simulator_->model();
     auto model_size = model.numGridDof();
     if (model_size != size) {
         const std::string msg = fmt::format(

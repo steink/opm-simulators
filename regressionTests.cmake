@@ -6,6 +6,13 @@ set(abs_tol 2e-2)
 set(rel_tol 1e-5)
 set(coarse_rel_tol 1e-2)
 
+add_test_compareECLFiles(CASENAME spe1flowexp
+                         FILENAME SPE1CASE2
+                         SIMULATOR flowexp_blackoil
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR spe1)
+
 add_test_compareECLFiles(CASENAME spe12
                          FILENAME SPE1CASE2
                          SIMULATOR flow
@@ -299,7 +306,7 @@ add_test_compareECLFiles(CASENAME polymer_simple2D
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${coarse_rel_tol}
-                         TEST_ARGS --tolerance-mb=1.e-7)
+                         TEST_ARGS --tolerance-mb=1.e-7 --tolerance-mb-relaxed=1.e-7)
 
 add_test_compareECLFiles(CASENAME spe5
                          FILENAME SPE5CASE1
@@ -569,6 +576,14 @@ add_test_compareECLFiles(CASENAME udq_in_actionx
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
                          DIR udq_actionx)
+
+add_test_compareECLFiles(CASENAME reg_smry_in_fld_udq
+                         FILENAME UDQ_REG-01
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR udq_actionx
+                         TEST_ARGS --enable-tuning=true)
 
 add_test_compareECLFiles(CASENAME cskin-01
                          FILENAME CSKIN-01
@@ -1428,6 +1443,36 @@ add_test_compareECLFiles(CASENAME 03_multflt
                          DIR mult)
 add_test_compareECLFiles(CASENAME 01_multregt
                          FILENAME MULTREGT-01
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR mult)
+add_test_compareECLFiles(CASENAME 05_multxyz
+                         FILENAME MULTXYZ05
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR mult)
+add_test_compareECLFiles(CASENAME 06_multxyz
+                         FILENAME MULTXYZ06
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR mult)
+add_test_compareECLFiles(CASENAME 07_multxyz
+                         FILENAME MULTXYZ07
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR mult)
+add_test_compareECLFiles(CASENAME 08_multxyz
+                         FILENAME MULTXYZ08
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR mult)
+add_test_compareECLFiles(CASENAME 11_multxyz
+                         FILENAME MULTXYZ11
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}

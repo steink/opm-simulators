@@ -15,10 +15,10 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "config.h"
-#include <flow/flow_ebos_gaswater_dissolution_diffuse.hpp>
+#include <flow/flow_gaswater_dissolution_diffuse.hpp>
 
 
 int main(int argc, char** argv)
 {
-    return Opm::flowEbosGasWaterDissolutionDiffuseMainStandalone(argc, argv);
+    return Opm::flowGasWaterDissolutionDiffuseMainStandalone(argc, argv);
 }

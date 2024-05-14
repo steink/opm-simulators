@@ -13,9 +13,9 @@
 
 # Mandatory call to project
 
-project(opm-simulators C CXX)
-
 cmake_minimum_required (VERSION 3.10)
+
+project(opm-simulators C CXX)
 
 
 option(SIBLING_SEARCH "Search for other modules in sibling directories?" ON)
@@ -33,6 +33,22 @@ option(BUILD_FLOW_ALU_GRID "Build flow blackoil with alu grid" OFF)
 option(USE_DAMARIS_LIB "Use the Damaris library for asynchronous I/O?" OFF)
 option(USE_BDA_BRIDGE "Enable the BDA bridge (GPU/AMGCL solvers)" ON)
 option(USE_TRACY_PROFILER "Enable tracy profiling" OFF)
+option(CONVERT_CUDA_TO_HIP "Convert CUDA code to HIP (to run on AMD cards)" OFF)
+
+# HIP requires cmake version 3.21
+if (CONVERT_CUDA_TO_HIP AND CMAKE_VERSION VERSION_GREATER_EQUAL "3.21")
+  enable_language(HIP)
+  message("CUDA code will be hipified")
+  set(HAVE_CUDA 1) # we still need this defined so that the preprocessor does not remove the code
+  set(CUDA_FOUND ON)
+  set(USE_HIP 1)
+  find_package(hip REQUIRED)
+  find_package(hipsparse REQUIRED)
+  find_package(hipblas REQUIRED)
+  link_libraries(roc::hipblas roc::hipsparse)
+elseif(CONVERT_CUDA_TO_HIP)
+  message("To generate HIP code for AMD GPUs run CMake with version >= 3.21")
+endif()
 
 # The following was copied from CMakeLists.txt in opm-common.
 # TODO: factor out the common parts in opm-common and opm-simulator as a cmake module
@@ -166,6 +182,7 @@ if(NOT CMAKE_DISABLE_FIND_PACKAGE_CUDA AND
     # Hence we call it unconditionally
     # The WellContributions kernel uses __shfl_down_sync, which was introduced in CUDA 9.0
     find_package(CUDA)
+    set(CUDA_FOUND ON)
   endif()
   if(CUDA_FOUND AND CUDA_VERSION VERSION_LESS "9.0")
     set(CUDA_FOUND OFF)
@@ -174,9 +191,13 @@ if(NOT CMAKE_DISABLE_FIND_PACKAGE_CUDA AND
   endif()
 endif()
 
+find_package(CUDAToolkit)
 if(CUDA_FOUND)
   set(HAVE_CUDA 1)
-  include_directories(${CUDA_INCLUDE_DIRS})
+  if(NOT USE_HIP) # no need to include CUDA files if we use rocm stack
+    include_directories(${CUDA_INCLUDE_DIRS})
+    include_directories(${CUDAToolkit_INCLUDE_DIRS})
+  endif()
 endif()
 
 find_package(OpenCL)
@@ -311,7 +332,7 @@ macro (files_hook)
     set(HDF5_FOUND OFF)
     unset(HAVE_HDF5)
   endif()
-  if(HAVE_ROCSPARSE AND HAVE_CUDA)
+  if(HAVE_ROCSPARSE AND HAVE_CUDA AND USE_BDA_BRIDGE) # unsure if this is the correct way to change this
     message(WARNING "WARNING! Using CUDA and ROCm at the same time is not allowed. Please choose only one of them by setting CMAKE_DISABLE_FIND_PACKAGE_<rocsparse|CUDA>=<ON|OFF>. Disabling CUDA...\n")
     set(CUDA_FOUND OFF)
     unset(HAVE_CUDA)
@@ -476,6 +497,51 @@ opm_add_test(test_parallel_wbp_calculation_well_openconns
     2
 )
 
+opm_add_test(test_parallel_region_phase_pvaverage_np2
+  EXE_NAME
+    test_region_phase_pvaverage
+  CONDITION
+    MPI_FOUND AND Boost_UNIT_TEST_FRAMEWORK_FOUND
+  DRIVER_ARGS
+    -n 2
+    -b ${PROJECT_BINARY_DIR}
+  TEST_ARGS
+    --run_test=Parallel/*
+  NO_COMPILE
+  PROCESSORS
+    2
+)
+
+opm_add_test(test_parallel_region_phase_pvaverage_np3
+  EXE_NAME
+    test_region_phase_pvaverage
+  CONDITION
+    MPI_FOUND AND Boost_UNIT_TEST_FRAMEWORK_FOUND
+  DRIVER_ARGS
+    -n 3
+    -b ${PROJECT_BINARY_DIR}
+  TEST_ARGS
+    --run_test=Parallel/*
+  NO_COMPILE
+  PROCESSORS
+    3
+)
+
+opm_add_test(test_parallel_region_phase_pvaverage_np4
+  EXE_NAME
+    test_region_phase_pvaverage
+  CONDITION
+    MPI_FOUND AND Boost_UNIT_TEST_FRAMEWORK_FOUND
+  DRIVER_ARGS
+    -n 4
+    -b ${PROJECT_BINARY_DIR}
+  TEST_ARGS
+    --run_test=Parallel/*
+  NO_COMPILE
+  PROCESSORS
+    4
+)
+
 opm_add_test(test_broadcast
   DEPENDS "opmsimulators"
   LIBRARIES opmsimulators ${Boost_UNIT_TEST_FRAMEWORK_LIBRARY}
@@ -569,7 +635,7 @@ set(FLOW_VARIANT_MODELS brine_energy onephase onephase_energy)
 
 set(FLOW_TGTS)
 foreach(OBJ ${COMMON_MODELS} ${FLOW_MODELS} ${FLOW_VARIANT_MODELS})
-  add_library(flow_lib${OBJ} OBJECT flow/flow_ebos_${OBJ}.cpp)
+  add_library(flow_lib${OBJ} OBJECT flow/flow_${OBJ}.cpp)
   list(APPEND FLOW_TGTS $<TARGET_OBJECTS:flow_lib${OBJ}>)
   if(TARGET fmt::fmt)
     target_link_libraries(flow_lib${OBJ} fmt::fmt)
@@ -627,6 +693,16 @@ opm_add_test(flow_distribute_z
   $<TARGET_OBJECTS:moduleVersion>
   )
 
+opm_add_test(flowexp_blackoil
+  ONLY_COMPILE
+  ALWAYS_ENABLE
+  DEPENDS opmsimulators
+  LIBRARIES opmsimulators
+  SOURCES
+  flowexperimental/flowexp_blackoil.cpp
+  $<TARGET_OBJECTS:moduleVersion>
+)
+
 if(dune-alugrid_FOUND)
   if (NOT BUILD_FLOW_ALU_GRID)
     set(FLOW_ALUGRID_ONLY_DEFAULT_ENABLE_IF "FALSE")
@@ -664,13 +740,19 @@ add_custom_target(extra_test ${CMAKE_CTEST_COMMAND} -C ExtraTests)
 # must link libraries after target 'opmsimulators' has been defined
 
 if(CUDA_FOUND)
-  target_link_libraries( opmsimulators PUBLIC ${CUDA_cusparse_LIBRARY} )
-  target_link_libraries( opmsimulators PUBLIC ${CUDA_cublas_LIBRARY} )
+  if (NOT USE_HIP)
+    target_link_libraries( opmsimulators PUBLIC ${CUDA_cusparse_LIBRARY} )
+    target_link_libraries( opmsimulators PUBLIC ${CUDA_cublas_LIBRARY} )
+  endif()
   if(USE_BDA_BRIDGE)
     set_tests_properties(cusparseSolver PROPERTIES LABELS gpu_cuda)
   endif()
 
   # CUISTL
+  set(gpu_label "gpu_cuda")
+  if(USE_HIP)
+    set(gpu_label "gpu_hip")
+  endif()
   set_tests_properties(cusparse_safe_call
                        cublas_safe_call
                        cuda_safe_call
@@ -685,7 +767,7 @@ if(CUDA_FOUND)
                        cuseqilu0
                        cuowneroverlapcopy
                        solver_adapter
-                       PROPERTIES LABELS gpu_cuda)
+                       PROPERTIES LABELS ${gpu_label})
 endif()
 
 if(USE_BDA_BRIDGE)

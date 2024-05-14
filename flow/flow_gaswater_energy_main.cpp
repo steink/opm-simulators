@@ -15,10 +15,10 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "config.h"
-#include <flow/flow_ebos_gaswater_energy.hpp>
+#include <flow/flow_gaswater_energy.hpp>
 
 
 int main(int argc, char** argv)
 {
-    return Opm::flowEbosGasWaterEnergyMainStandalone(argc, argv);
+    return Opm::flowGasWaterEnergyMainStandalone(argc, argv);
 }

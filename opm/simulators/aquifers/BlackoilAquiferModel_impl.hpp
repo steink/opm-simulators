@@ -18,6 +18,13 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+// Improve IDE experience
+#ifndef OPM_BLACKOILAQUIFERMODEL_HEADER_INCLUDED
+#include <config.h>
+#define OPM_BLACKOILAQUIFERMODEL_IMPL_HEADER_INCLUDED
+#include <opm/simulators/aquifers/BlackoilAquiferModel.hpp>
+#endif
+
 #include <opm/simulators/aquifers/AquiferConstantFlux.hpp>
 
 #include <opm/common/ErrorMacros.hpp>
@@ -355,7 +362,7 @@ void BlackoilAquiferModel<TypeTag>::computeConnectionAreaFraction() const
 
     maxAquID = this->simulator_.vanguard().grid().comm().max(maxAquID);
 
-    auto totalConnArea = std::vector<double>(maxAquID, 0.0);
+    auto totalConnArea = std::vector<Scalar>(maxAquID, 0.0);
     for (const auto& aquifer : this->aquifers) {
         totalConnArea[aquifer->aquiferID() - 1] += aquifer->totalFaceArea();
     }

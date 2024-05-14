@@ -33,11 +33,11 @@ namespace Opm
 {
 
 class DeferredLogger;
-template<class FluidSystem, class Indices, class Scalar> class WellInterfaceIndices;
-class WellState;
+template<class FluidSystem, class Indices> class WellInterfaceIndices;
+template<class Scalar> class WellState;
 
 //! \brief Class holding primary variables for StandardWell.
-template<class FluidSystem, class Indices, class Scalar>
+template<class FluidSystem, class Indices>
 class StandardWellPrimaryVariables {
 protected:
     // the positions of the primary variables for StandardWell
@@ -82,12 +82,13 @@ public:
     static constexpr int GFrac = has_gfrac_variable ? has_wfrac_variable + 1 : -1000;
     static constexpr int SFrac = !Indices::enableSolvent ? -1000 : has_wfrac_variable+has_gfrac_variable+1;
 
+    using Scalar = typename FluidSystem::Scalar;
     //! \brief Evaluation for the well equations.
     using EvalWell = DenseAd::DynamicEvaluation<Scalar, numStaticWellEq + Indices::numEq + 1>;
     using BVectorWell = typename StandardWellEquations<Scalar,Indices::numEq>::BVectorWell;
 
     //! \brief Constructor initializes reference to well interface.
-    StandardWellPrimaryVariables(const WellInterfaceIndices<FluidSystem,Indices,Scalar>& well)
+    StandardWellPrimaryVariables(const WellInterfaceIndices<FluidSystem,Indices>& well)
         : well_(well)
     {}
 
@@ -101,12 +102,12 @@ public:
     int numWellEq() const { return numWellEq_; }
 
     //! \brief Copy values from well state.
-    void update(const WellState& well_state,
+    void update(const WellState<Scalar>& well_state,
                 const bool stop_or_zero_rate_target,
                 DeferredLogger& deferred_logger);
 
     //! \brief Copy polymer molecular weigt values from well state.
-    void updatePolyMW(const WellState& well_state);
+    void updatePolyMW(const WellState<Scalar>& well_state);
 
     //! \brief Update values from newton update vector.
     void updateNewton(const BVectorWell& dwells,
@@ -122,10 +123,11 @@ public:
     void checkFinite(DeferredLogger& deferred_logger) const;
 
     //! \brief Copy values to well state.
-    void copyToWellState(WellState& well_state, DeferredLogger& deferred_logger) const;
+    void copyToWellState(WellState<Scalar>& well_state,
+                         DeferredLogger& deferred_logger) const;
 
     //! \brief Copy polymer molecular weight values to well state.
-    void copyToWellStatePolyMW(WellState& well_state) const;
+    void copyToWellStatePolyMW(WellState<Scalar>& well_state) const;
 
     //! \brief Returns scaled volume fraction for a component.
     EvalWell volumeFractionScaled(const int compIdx) const;
@@ -167,7 +169,7 @@ private:
     //! \details Contain derivatives and are used in AD calculation
     std::vector<EvalWell> evaluation_;
 
-    const WellInterfaceIndices<FluidSystem,Indices,Scalar>& well_; //!< Reference to well interface
+    const WellInterfaceIndices<FluidSystem,Indices>& well_; //!< Reference to well interface
 
     //! \brief Total number of the well equations and primary variables.
     //! \details There might be extra equations be used, numWellEq will be updated during the initialization

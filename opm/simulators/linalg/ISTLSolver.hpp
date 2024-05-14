@@ -25,8 +25,6 @@
 #include <dune/istl/owneroverlapcopy.hh>
 #include <dune/istl/solver.hh>
 
-#include <ebos/eclbasevanguard.hh>
-
 #include <opm/common/ErrorMacros.hpp>
 #include <opm/common/Exceptions.hpp>
 #include <opm/common/TimingMacros.hpp>
@@ -36,6 +34,7 @@
 #include <opm/models/utils/parametersystem.hh>
 #include <opm/models/utils/propertysystem.hh>
 #include <opm/simulators/flow/BlackoilModelParameters.hpp>
+#include <opm/simulators/flow/FlowBaseVanguard.hpp>
 #include <opm/simulators/linalg/ExtractParallelGridInformationToISTL.hpp>
 #include <opm/simulators/linalg/FlowLinearSolverParameters.hpp>
 #include <opm/simulators/linalg/matrixblock.hh>
@@ -66,7 +65,7 @@ struct FlowIstlSolver {
 }
 
 template <class TypeTag, class MyTypeTag>
-struct EclWellModel;
+struct WellModel;
 
 //! Set the type of a global jacobian matrix for linear solvers that are based on
 //! dune-istl.
@@ -148,7 +147,7 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
         using SparseMatrixAdapter = GetPropType<TypeTag, Properties::SparseMatrixAdapter>;
         using Vector = GetPropType<TypeTag, Properties::GlobalEqVector>;
         using Indices = GetPropType<TypeTag, Properties::Indices>;
-        using WellModel = GetPropType<TypeTag, Properties::EclWellModel>;
+        using WellModel = GetPropType<TypeTag, Properties::WellModel>;
         using Simulator = GetPropType<TypeTag, Properties::Simulator>;
         using Matrix = typename SparseMatrixAdapter::IstlMatrix;
         using ThreadManager = GetPropType<TypeTag, Properties::ThreadManager>;
@@ -225,8 +224,8 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
                     para.linsolver_ = "cprw";
                     parameters_.push_back(para);
                     prm_.push_back(setupPropertyTree(parameters_[0],
-                                                     EWOMS_PARAM_IS_SET(TypeTag, int, LinearSolverMaxIter),
-                                                     EWOMS_PARAM_IS_SET(TypeTag, double, LinearSolverReduction)));
+                                                     Parameters::isSet<TypeTag,Properties::LinearSolverMaxIter>(),
+                                                     Parameters::isSet<TypeTag,Properties::LinearSolverReduction>()));
                 }
                 {
                     FlowLinearSolverParameters para;
@@ -234,8 +233,8 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
                     para.linsolver_ = "ilu0";
                     parameters_.push_back(para);
                     prm_.push_back(setupPropertyTree(parameters_[1],
-                                                     EWOMS_PARAM_IS_SET(TypeTag, int, LinearSolverMaxIter),
-                                                     EWOMS_PARAM_IS_SET(TypeTag, double, LinearSolverReduction)));
+                                                     Parameters::isSet<TypeTag,Properties::LinearSolverMaxIter>(),
+                                                     Parameters::isSet<TypeTag,Properties::LinearSolverReduction>()));
                 }
                 // ------------
             } else {
@@ -243,8 +242,8 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
                 assert(parameters_.size() == 1);
                 assert(prm_.empty());
                 prm_.push_back(setupPropertyTree(parameters_[0],
-                                                 EWOMS_PARAM_IS_SET(TypeTag, int, LinearSolverMaxIter),
-                                                 EWOMS_PARAM_IS_SET(TypeTag, double, LinearSolverReduction)));
+                                                 Parameters::isSet<TypeTag,Properties::LinearSolverMaxIter>(),
+                                                 Parameters::isSet<TypeTag,Properties::LinearSolverReduction>()));
             }
             flexibleSolver_.resize(prm_.size());
 
@@ -259,8 +258,8 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
             // Set it up manually
             ElementMapper elemMapper(simulator_.vanguard().gridView(), Dune::mcmgElementLayout());
             detail::findOverlapAndInterior(simulator_.vanguard().grid(), elemMapper, overlapRows_, interiorRows_);
-            useWellConn_ = EWOMS_GET_PARAM(TypeTag, bool, MatrixAddWellContributions);
-            const bool ownersFirst = EWOMS_GET_PARAM(TypeTag, bool, OwnerCellsFirst);
+            useWellConn_ = Parameters::get<TypeTag, Properties::MatrixAddWellContributions>();
+            const bool ownersFirst = Parameters::get<TypeTag, Properties::OwnerCellsFirst>();
             if (!ownersFirst) {
                 const std::string msg = "The linear solver no longer supports --owner-cells-first=false.";
                 if (on_io_rank) {
@@ -325,7 +324,7 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
                 // Outch! We need to be able to scale the linear system! Hence const_cast
                 matrix_ = const_cast<Matrix*>(&M);
 
-                useWellConn_ = EWOMS_GET_PARAM(TypeTag, bool, MatrixAddWellContributions);
+                useWellConn_ = Parameters::get<TypeTag, Properties::MatrixAddWellContributions>();
                 // setup sparsity pattern for jacobi matrix for preconditioner (only used for openclSolver)
             } else {
                 // Pointers should not change

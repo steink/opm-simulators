@@ -43,14 +43,15 @@ public:
     using ElementMapper = GetPropType<TypeTag, Properties::ElementMapper>;
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
     using BlackoilIndices = GetPropType<TypeTag, Properties::Indices>;
+    using Scalar = GetPropType<TypeTag, Properties::Scalar>;
 
     static constexpr int numEq = BlackoilIndices::numEq;
-    using Eval = DenseAd::Evaluation<double, /*size=*/numEq>;
+    using Eval = DenseAd::Evaluation<Scalar, /*size=*/numEq>;
 
     AquiferConstantFlux(const std::vector<Aquancon::AquancCell>& connections,
-                        const Simulator&                         ebos_simulator,
+                        const Simulator&                         simulator,
                         const SingleAquiferFlux&                 aquifer)
-        : AquiferInterface<TypeTag>(aquifer.id, ebos_simulator)
+        : AquiferInterface<TypeTag>(aquifer.id, simulator)
         , connections_             (connections)
         , aquifer_data_            (aquifer)
         , connection_flux_         (connections_.size(), Eval{0})
@@ -58,9 +59,9 @@ public:
         this->total_face_area_ = this->initializeConnections();
     }
 
-    static AquiferConstantFlux serializationTestObject(const Simulator& ebos_simulator)
+    static AquiferConstantFlux serializationTestObject(const Simulator& simulator)
     {
-        AquiferConstantFlux<TypeTag> result({}, ebos_simulator, {});
+        AquiferConstantFlux<TypeTag> result({}, simulator, {});
         result.cumulative_flux_ = 1.0;
 
         return result;
@@ -68,15 +69,15 @@ public:
 
     virtual ~AquiferConstantFlux() = default;
 
-    void computeFaceAreaFraction(const std::vector<double>& total_face_area) override
+    void computeFaceAreaFraction(const std::vector<Scalar>& total_face_area) override
     {
-        assert (total_face_area.size() >= static_cast<std::vector<double>::size_type>(this->aquiferID()));
+        assert (total_face_area.size() >= static_cast<typename std::vector<Scalar>::size_type>(this->aquiferID()));
 
         this->area_fraction_ = this->totalFaceArea()
             / total_face_area[this->aquiferID() - 1];
     }
 
-    double totalFaceArea() const override
+    Scalar totalFaceArea() const override
     {
         return this->total_face_area_;
     }
@@ -106,7 +107,7 @@ public:
     {
         this->flux_rate_ = this->totalFluxRate();
         this->cumulative_flux_ +=
-            this->flux_rate_ * this->ebos_simulator_.timeStepSize();
+            this->flux_rate_ * this->simulator_.timeStepSize();
     }
 
     data::AquiferData aquiferData() const override
@@ -136,7 +137,7 @@ public:
             return;
         }
 
-        const auto& model = this->ebos_simulator_.model();
+        const auto& model = this->simulator_.model();
 
         const auto fw = this->aquifer_data_.flux;
 
@@ -163,21 +164,21 @@ private:
     SingleAquiferFlux aquifer_data_;
     std::vector<Eval> connection_flux_{};
     std::vector<int> cellToConnectionIdx_{};
-    double flux_rate_{};
-    double cumulative_flux_{};
-    double total_face_area_{0.0};
-    double area_fraction_{1.0};
+    Scalar flux_rate_{};
+    Scalar cumulative_flux_{};
+    Scalar total_face_area_{0.0};
+    Scalar area_fraction_{1.0};
 
-    double initializeConnections()
+    Scalar initializeConnections()
     {
         auto connected_face_area = 0.0;
 
         this->cellToConnectionIdx_
-            .resize(this->ebos_simulator_.gridView().size(/*codim=*/0), -1);
+            .resize(this->simulator_.gridView().size(/*codim=*/0), -1);
 
         for (std::size_t idx = 0; idx < this->connections_.size(); ++idx) {
             const auto global_index = this->connections_[idx].global_index;
-            const int cell_index = this->ebos_simulator_.vanguard()
+            const int cell_index = this->simulator_.vanguard()
                 .compressedIndexForInterior(global_index);
 
             if (cell_index < 0) {
@@ -196,9 +197,9 @@ private:
         return connected_face_area;
     }
 
-    double computeFaceAreaFraction(const double connected_face_area) const
+    Scalar computeFaceAreaFraction(const Scalar connected_face_area) const
     {
-        const auto tot_face_area = this->ebos_simulator_.vanguard()
+        const auto tot_face_area = this->simulator_.vanguard()
             .grid().comm().sum(connected_face_area);
 
         return (tot_face_area > 0.0)
@@ -215,11 +216,11 @@ private:
         return FluidSystem::waterCompIdx;
     }
 
-    double totalFluxRate() const
+    Scalar totalFluxRate() const
     {
         return std::accumulate(this->connection_flux_.begin(),
                                this->connection_flux_.end(), 0.0,
-                               [](const double rate, const auto& q)
+                               [](const Scalar rate, const auto& q)
                                {
                                    return rate + getValue(q);
                                });

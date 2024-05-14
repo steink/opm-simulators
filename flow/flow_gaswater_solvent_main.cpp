@@ -15,10 +15,10 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "config.h"
-#include <flow/flow_ebos_gaswater_solvent.hpp>
+#include <flow/flow_gaswater_solvent.hpp>
 
 
 int main(int argc, char** argv)
 {
-    return Opm::flowEbosGasWaterSolventMainStandalone(argc, argv);
+    return Opm::flowGasWaterSolventMainStandalone(argc, argv);
 }

@@ -24,23 +24,24 @@
 #define OPM_BLACKOILWELLMODEL_CONSTRAINTS_HEADER_INCLUDED
 
 #include <opm/input/eclipse/Schedule/Group/Group.hpp>
-
+#include <optional>
 #include <utility>
 
 namespace Opm {
 
-class BlackoilWellModelGeneric;
+template<class Scalar> class BlackoilWellModelGeneric;
 class DeferredLogger;
-class GroupState;
+template<class Scalar> class GroupState;
 class SummaryState;
-class WellState;
+template<class Scalar> class WellState;
 
 /// Class for handling constraints for the blackoil well model.
+template<class Scalar>
 class BlackoilWellModelConstraints
 {
 public:
     //! \brief Constructor initializes reference to the well model.
-    BlackoilWellModelConstraints(const BlackoilWellModelGeneric& wellModel)
+    BlackoilWellModelConstraints(const BlackoilWellModelGeneric<Scalar>& wellModel)
         : wellModel_(wellModel)
     {}
 
@@ -56,39 +57,43 @@ public:
     void actionOnBrokenConstraints(const Group& group,
                                    const Group::InjectionCMode& newControl,
                                    const Phase& controlPhase,
-                                   GroupState& group_state,
+                                   GroupState<Scalar>& group_state,
                                    DeferredLogger& deferred_logger) const;
 
-    //! \brief Execute action on broken constraint for a production well group.
-    void actionOnBrokenConstraints(const Group& group,
+    //! \brief Execute action on broken constraint for a production well group. Return true if a group control is changed
+    bool actionOnBrokenConstraints(const Group& group,
+                                   const int reportStepIdx,
                                    const Group::GroupLimitAction group_limit_action,
                                    const Group::ProductionCMode& newControl,
-                                   GroupState& group_state,
+                                   const WellState<Scalar>& well_state,
+                                   std::optional<std::string>& worst_offending_well,
+                                   GroupState<Scalar>& group_state,
                                    DeferredLogger& deferred_logger) const;
 
-    //! \brief Update the individual controls for wells in a group.
+    //! \brief Update the individual controls for wells in a group. Return true if a group control is changed
     bool updateGroupIndividualControl(const Group& group,
                                       const int reportStepIdx,
-                                      std::map<std::pair<std::string,Opm::Phase>,std::string>& switched_inj,
+                                      std::map<std::pair<std::string,Phase>,std::string>& switched_inj,
                                       std::map<std::string, std::string>& switched_prod,
-                                      GroupState& group_state,
-                                      WellState& well_state,
+                                      std::map<std::string, std::pair<std::string, std::string>>& closed_offending_wells,
+                                      GroupState<Scalar>& group_state,
+                                      WellState<Scalar>& well_state,
                                       DeferredLogger& deferred_logger) const;
 
 private:
     //! \brief Check and return value and type of constraints for an injection well group.
-    std::pair<Group::InjectionCMode, double>
+    std::pair<Group::InjectionCMode, Scalar>
     checkGroupInjectionConstraints(const Group& group,
                                    const int reportStepIdx,
                                    const Phase& phase) const;
 
     //! \brief Check and return value and type of constraints for a production well group.
-    std::pair<Group::ProductionCMode, double>
+    std::pair<Group::ProductionCMode, Scalar>
     checkGroupProductionConstraints(const Group& group,
                                     const int reportStepIdx,
                                     DeferredLogger& deferred_logger) const;
 
-    const BlackoilWellModelGeneric& wellModel_; //!< Reference to well model
+    const BlackoilWellModelGeneric<Scalar>& wellModel_; //!< Reference to well model
 };
 
 } // namespace Opm

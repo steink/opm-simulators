@@ -26,8 +26,6 @@
 
 #include <fmt/format.h>
 
-#include <ebos/eclproblem.hh>
-
 #include <opm/common/ErrorMacros.hpp>
 #include <opm/common/Exceptions.hpp>
 #include <opm/common/OpmLog/OpmLog.hpp>
@@ -42,6 +40,7 @@
 #include <opm/simulators/flow/BlackoilModelNldd.hpp>
 #include <opm/simulators/flow/BlackoilModelParameters.hpp>
 #include <opm/simulators/flow/countGlobalCells.hpp>
+#include <opm/simulators/flow/FlowProblem.hpp>
 #include <opm/simulators/flow/NonlinearSolver.hpp>
 #include <opm/simulators/flow/RSTConv.hpp>
 #include <opm/simulators/timestepping/AdaptiveTimeStepping.hpp>
@@ -74,79 +73,79 @@
 namespace Opm::Properties {
 
 namespace TTag {
-struct EclFlowProblem {
+struct FlowProblem {
     using InheritsFrom = std::tuple<FlowTimeSteppingParameters, FlowModelParameters,
-                                    FlowNonLinearSolver, EclBaseProblem, BlackOilModel>;
+                                    FlowNonLinearSolver, FlowBaseProblem, BlackOilModel>;
 };
 }
 template<class TypeTag>
-struct OutputDir<TypeTag, TTag::EclFlowProblem> {
+struct OutputDir<TypeTag, TTag::FlowProblem> {
     static constexpr auto value = "";
 };
 template<class TypeTag>
-struct EnableDebuggingChecks<TypeTag, TTag::EclFlowProblem> {
+struct EnableDebuggingChecks<TypeTag, TTag::FlowProblem> {
     static constexpr bool value = false;
 };
 // default in flow is to formulate the equations in surface volumes
 template<class TypeTag>
-struct BlackoilConserveSurfaceVolume<TypeTag, TTag::EclFlowProblem> {
+struct BlackoilConserveSurfaceVolume<TypeTag, TTag::FlowProblem> {
     static constexpr bool value = true;
 };
 template<class TypeTag>
-struct UseVolumetricResidual<TypeTag, TTag::EclFlowProblem> {
+struct UseVolumetricResidual<TypeTag, TTag::FlowProblem> {
     static constexpr bool value = false;
 };
 
 template<class TypeTag>
-struct EclAquiferModel<TypeTag, TTag::EclFlowProblem> {
+struct AquiferModel<TypeTag, TTag::FlowProblem> {
     using type = BlackoilAquiferModel<TypeTag>;
 };
 
 // disable all extensions supported by black oil model. this should not really be
 // necessary but it makes things a bit more explicit
 template<class TypeTag>
-struct EnablePolymer<TypeTag, TTag::EclFlowProblem> {
+struct EnablePolymer<TypeTag, TTag::FlowProblem> {
     static constexpr bool value = false;
 };
 template<class TypeTag>
-struct EnableSolvent<TypeTag, TTag::EclFlowProblem> {
+struct EnableSolvent<TypeTag, TTag::FlowProblem> {
     static constexpr bool value = false;
 };
 template<class TypeTag>
-struct EnableTemperature<TypeTag, TTag::EclFlowProblem> {
+struct EnableTemperature<TypeTag, TTag::FlowProblem> {
     static constexpr bool value = true;
 };
 template<class TypeTag>
-struct EnableEnergy<TypeTag, TTag::EclFlowProblem> {
+struct EnableEnergy<TypeTag, TTag::FlowProblem> {
     static constexpr bool value = false;
 };
 template<class TypeTag>
-struct EnableFoam<TypeTag, TTag::EclFlowProblem> {
+struct EnableFoam<TypeTag, TTag::FlowProblem> {
     static constexpr bool value = false;
 };
 template<class TypeTag>
-struct EnableBrine<TypeTag, TTag::EclFlowProblem> {
+struct EnableBrine<TypeTag, TTag::FlowProblem> {
     static constexpr bool value = false;
 };
 template<class TypeTag>
-struct EnableSaltPrecipitation<TypeTag, TTag::EclFlowProblem> {
+struct EnableSaltPrecipitation<TypeTag, TTag::FlowProblem> {
     static constexpr bool value = false;
 };
 template<class TypeTag>
-struct EnableMICP<TypeTag, TTag::EclFlowProblem> {
+struct EnableMICP<TypeTag, TTag::FlowProblem> {
     static constexpr bool value = false;
 };
 template<class TypeTag>
-struct EnableDispersion<TypeTag, TTag::EclFlowProblem> {
+struct EnableDispersion<TypeTag, TTag::FlowProblem> {
     static constexpr bool value = false;
 };
 
 template<class TypeTag>
-struct EclWellModel<TypeTag, TTag::EclFlowProblem> {
+struct WellModel<TypeTag, TTag::FlowProblem> {
     using type = BlackoilWellModel<TypeTag>;
 };
 template<class TypeTag>
-struct LinearSolverSplice<TypeTag, TTag::EclFlowProblem> {
+struct LinearSolverSplice<TypeTag, TTag::FlowProblem> {
     using type = TTag::FlowIstlSolver;
 };
 
@@ -234,7 +233,7 @@ namespace Opm {
         , phaseUsage_(phaseUsageFromDeck(eclState()))
         , param_( param )
         , well_model_ (well_model)
-        , rst_conv_(simulator_.problem().eclWriter()->collectToIORank().localIdxToGlobalIdxMapping(),
+        , rst_conv_(simulator_.problem().eclWriter()->collectOnIORank().localIdxToGlobalIdxMapping(),
                     grid_.comm())
         , terminal_output_ (terminal_output)
         , current_relaxation_(1.0)
@@ -335,6 +334,7 @@ namespace Opm {
         void initialLinearization(SimulatorReportSingle& report,
                                   const int iteration,
                                   const int minIter,
+                                  const int maxIter,
                                   const SimulatorTimerInterface& timer)
         {
             // -----------   Set up reports and timer   -----------
@@ -361,7 +361,7 @@ namespace Opm {
             perfTimer.start();
             // the step is not considered converged until at least minIter iterations is done
             {
-                auto convrep = getConvergence(timer, iteration, residual_norms);
+                auto convrep = getConvergence(timer, iteration, maxIter, residual_norms);
                 report.converged = convrep.converged() && iteration >= minIter;
                 ConvergenceReport::Severity severity = convrep.severityOfWorstFailure();
                 convergence_reports_.back().report.push_back(std::move(convrep));
@@ -426,7 +426,7 @@ namespace Opm {
             SimulatorReportSingle report;
             Dune::Timer perfTimer;
 
-            this->initialLinearization(report, iteration, nonlinear_solver.minIter(), timer);
+            this->initialLinearization(report, iteration, nonlinear_solver.minIter(), nonlinear_solver.maxIter(), timer);
 
             // -----------   If not converged, solve linear system and do Newton update  -----------
             if (!report.converged) {
@@ -704,7 +704,7 @@ namespace Opm {
             {
                 OPM_TIMEBLOCK(invalidateAndUpdateIntensiveQuantities);
                 simulator_.model().invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/0);
-                simulator_.problem().eclWriter()->mutableEclOutputModule().invalidateLocalData();
+                simulator_.problem().eclWriter()->mutableOutputModule().invalidateLocalData();
             }
         }
 
@@ -842,7 +842,7 @@ namespace Opm {
             IsNumericalAquiferCell isNumericalAquiferCell(gridView.grid());
 
             OPM_BEGIN_PARALLEL_TRY_CATCH();
-            for (const auto& elem : elements(gridView, Dune::Partitions::interiorBorder))
+            for (const auto& elem : elements(gridView, Dune::Partitions::interior))
             {
                 // Skip cells of numerical Aquifer
                 if (isNumericalAquiferCell(elem))
@@ -875,7 +875,7 @@ namespace Opm {
         }
 
 
-        void updateTUNING(const Tuning& tuning) {          
+        void updateTUNING(const Tuning& tuning) {
             param_.tolerance_mb_ = tuning.XXXMBE;
             if ( terminal_output_ ) {
                 OpmLog::debug(fmt::format("Setting BlackoilModel mass balance limit (XXXMBE) to {:.2e}", tuning.XXXMBE));
@@ -886,6 +886,7 @@ namespace Opm {
         ConvergenceReport getReservoirConvergence(const double reportTime,
                                                   const double dt,
                                                   const int iteration,
+                                                  const int maxIter,
                                                   std::vector<Scalar>& B_avg,
                                                   std::vector<Scalar>& residual_norms)
         {
@@ -896,7 +897,8 @@ namespace Opm {
             Vector R_sum(numComp, 0.0 );
             Vector maxCoeff(numComp, std::numeric_limits< Scalar >::lowest() );
             std::vector<int> maxCoeffCell(numComp, -1);
-            const auto [ pvSumLocal, numAquiferPvSumLocal] = localConvergenceData(R_sum, maxCoeff, B_avg, maxCoeffCell);
+            const auto [ pvSumLocal, numAquiferPvSumLocal] =
+                this->localConvergenceData(R_sum, maxCoeff, B_avg, maxCoeffCell);
 
             // compute global sum and max of quantities
             const auto [ pvSum, numAquiferPvSum ] =
@@ -904,20 +906,46 @@ namespace Opm {
                                      numAquiferPvSumLocal,
                                      R_sum, maxCoeff, B_avg);
 
-            auto cnvErrorPvFraction = computeCnvErrorPv(B_avg, dt);
-            cnvErrorPvFraction /= (pvSum - numAquiferPvSum);
+            const auto cnvErrorPvFraction =
+                computeCnvErrorPv(B_avg, dt)
+                / (pvSum - numAquiferPvSum);
 
-            const double tol_mb  = param_.tolerance_mb_;
-            // Default value of relaxed_max_pv_fraction_ is 0.03 and min_strict_cnv_iter_ is 0.
-            // For each iteration, we need to determine whether to use the relaxed CNV tolerance.
-            // To disable the usage of relaxed CNV tolerance, you can set the relaxed_max_pv_fraction_ to be 0.
-            const bool use_relaxed = cnvErrorPvFraction < param_.relaxed_max_pv_fraction_ && iteration >= param_.min_strict_cnv_iter_;
-            const double tol_cnv = use_relaxed ? param_.tolerance_cnv_relaxed_ :  param_.tolerance_cnv_;
+            // For each iteration, we need to determine whether to use the relaxed tolerances.
+            // To disable the usage of relaxed tolerances, you can set the relaxed tolerances as the strict tolerances.
+
+            // If min_strict_mb_iter = -1 (default) we use a relaxed tolerance for the mass balance for the last iterations
+            // For positive values we use the relaxed tolerance after the given number of iterations
+            const bool relax_final_iteration_mb = (param_.min_strict_mb_iter_ < 0) && (iteration == maxIter);
+            const bool use_relaxed_mb = relax_final_iteration_mb || (param_.min_strict_mb_iter_ >= 0 && iteration >= param_.min_strict_mb_iter_);
+
+
+            // If min_strict_cnv_iter = -1 we use a relaxed tolerance for the cnv for the last iterations
+            // For positive values we use the relaxed tolerance after the given number of iterations
+            // We also use relaxed tolerances for cells with total poro volume less than relaxed_max_pv_fraction_
+            // Default value of relaxed_max_pv_fraction_ is 0.03
+            const bool relax_final_iteration_cnv = (param_.min_strict_cnv_iter_ < 0) && (iteration == maxIter);
+            const bool relax_iter_cnv = param_.min_strict_mb_iter_ >= 0 && iteration >= param_.min_strict_mb_iter_;
+            const bool relax_pv_fraction_cnv = cnvErrorPvFraction < param_.relaxed_max_pv_fraction_;
+            const bool use_relaxed_cnv = relax_final_iteration_cnv || relax_pv_fraction_cnv || relax_iter_cnv;
+
+            if (relax_final_iteration_mb || relax_final_iteration_cnv) {
+                if ( terminal_output_ ) {
+                    std::string message = "Number of newton iterations reached its maximum try to continue with relaxed tolerances:";
+                    if (relax_final_iteration_mb)
+                        message += fmt::format("  MB: {:.1e}", param_.tolerance_mb_relaxed_);
+                    if (relax_final_iteration_cnv)
+                        message += fmt::format(" CNV: {:.1e}", param_.tolerance_cnv_relaxed_);
+
+                    OpmLog::debug(message);
+                }
+            }
+            const double tol_cnv = use_relaxed_cnv ? param_.tolerance_cnv_relaxed_ :  param_.tolerance_cnv_;
+            const double tol_mb  = use_relaxed_mb ? param_.tolerance_mb_relaxed_ : param_.tolerance_mb_;
 
             // Finish computation
             std::vector<Scalar> CNV(numComp);
             std::vector<Scalar> mass_balance_residual(numComp);
-            for ( int compIdx = 0; compIdx < numComp; ++compIdx )
+            for (int compIdx = 0; compIdx < numComp; ++compIdx)
             {
                 CNV[compIdx]                    = B_avg[compIdx] * dt * maxCoeff[compIdx];
                 mass_balance_residual[compIdx]  = std::abs(B_avg[compIdx]*R_sum[compIdx]) * dt / pvSum;
@@ -926,12 +954,15 @@ namespace Opm {
 
             // Create convergence report.
             ConvergenceReport report{reportTime};
+            report.setPoreVolCnvViolationFraction(cnvErrorPvFraction, pvSum - numAquiferPvSum);
+
             using CR = ConvergenceReport;
             for (int compIdx = 0; compIdx < numComp; ++compIdx) {
-                double res[2] = { mass_balance_residual[compIdx], CNV[compIdx] };
-                CR::ReservoirFailure::Type types[2] = { CR::ReservoirFailure::Type::MassBalance,
+                const double res[2] = { mass_balance_residual[compIdx], CNV[compIdx] };
+                const CR::ReservoirFailure::Type types[2] = { CR::ReservoirFailure::Type::MassBalance,
                                                         CR::ReservoirFailure::Type::Cnv };
-                double tol[2] = { tol_mb, tol_cnv };
+                const double tol[2] = { tol_mb, tol_cnv };
+
                 for (int ii : {0, 1}) {
                     if (std::isnan(res[ii])) {
                         report.setReservoirFailed({types[ii], CR::Severity::NotANumber, compIdx});
@@ -995,9 +1026,11 @@ namespace Opm {
         /// residual mass balance (tol_cnv).
         /// \param[in]   timer       simulation timer
         /// \param[in]   iteration   current iteration number
+        /// \param[in]   maxIter     maximum number of iterations
         /// \param[out]  residual_norms   CNV residuals by phase
         ConvergenceReport getConvergence(const SimulatorTimerInterface& timer,
                                          const int iteration,
+                                         const int maxIter,
                                          std::vector<double>& residual_norms)
         {
             OPM_TIMEBLOCK(getConvergence);
@@ -1005,7 +1038,7 @@ namespace Opm {
             std::vector<Scalar> B_avg(numEq, 0.0);
             auto report = getReservoirConvergence(timer.simulationTimeElapsed(),
                                                   timer.currentStepLength(),
-                                                  iteration, B_avg, residual_norms);
+                                                  iteration, maxIter, B_avg, residual_norms);
             {
                 OPM_TIMEBLOCK(getWellConvergence);
                 report += wellModel().getWellConvergence(B_avg, /*checkWellGroupControls*/report.converged());

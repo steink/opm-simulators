@@ -20,9 +20,8 @@
 #ifndef OPM_DAMARISKEYWORDS_HEADER_INCLUDED
 #define OPM_DAMARISKEYWORDS_HEADER_INCLUDED
 
+#include <opm/simulators/flow/DamarisProperties.hpp>
 #include <opm/simulators/utils/ParallelCommunication.hpp>
-
-#include <ebos/damaris_properties.hh>
 
 #include <map>
 #include <string>
@@ -86,20 +85,22 @@ std::map<std::string, std::string>
 getDamarisKeywords(const Parallel::Communication& comm, const std::string& OutputDir)
 {
     DamarisSettings settings;
-    // Get all of the Damaris keywords (except for --enable-damaris, which is used in simulators/flow/Main.hpp)
-    // These command line arguments are defined in ebos/damariswriter.hh and defaults are set in ebos/eclproblem_properties.hh
-    settings.enableDamarisOutputCollective_ = EWOMS_GET_PARAM(TypeTag, bool, DamarisOutputHdfCollective);
-    settings.saveMeshToHDF5_ = EWOMS_GET_PARAM(TypeTag, bool, DamarisSaveMeshToHdf);
-    settings.saveToDamarisHDF5_ = EWOMS_GET_PARAM(TypeTag, bool, DamarisSaveToHdf);
-    settings.pythonFilename_ = EWOMS_GET_PARAM(TypeTag, std::string, DamarisPythonScript);
-    settings.paraviewPythonFilename_ = EWOMS_GET_PARAM(TypeTag, std::string, DamarisPythonParaviewScript);
-    settings.damarisSimName_ = EWOMS_GET_PARAM(TypeTag, std::string, DamarisSimName);
-    settings.nDamarisCores_ = EWOMS_GET_PARAM(TypeTag, int, DamarisDedicatedCores);
-    settings.nDamarisNodes_ = EWOMS_GET_PARAM(TypeTag, int, DamarisDedicatedNodes);
-    settings.shmemSizeBytes_ = EWOMS_GET_PARAM(TypeTag, long, DamarisSharedMemorySizeBytes);
-    settings.shmemName_ = EWOMS_GET_PARAM(TypeTag, std::string, DamarisSharedMemoryName);
-    settings.damarisLogLevel_ = EWOMS_GET_PARAM(TypeTag, std::string, DamarisLogLevel);
-    settings.damarisDaskFile_ = EWOMS_GET_PARAM(TypeTag, std::string, DamarisDaskFile);
+    // Get all of the Damaris keywords (except for --enable-damaris,
+    // which is used in simulators/flow/Main.hpp)
+    // These command line arguments are defined in opm/simulators/flow/DamarisWriter.hpp and
+    // defaults are set in opm/simulators/flow/FlowProblemProperties.hpp
+    settings.enableDamarisOutputCollective_ = Parameters::get<TypeTag, Properties::DamarisOutputHdfCollective>();
+    settings.saveMeshToHDF5_ = Parameters::get<TypeTag, Properties::DamarisSaveMeshToHdf>();
+    settings.saveToDamarisHDF5_ = Parameters::get<TypeTag, Properties::DamarisSaveToHdf>();
+    settings.pythonFilename_ = Parameters::get<TypeTag, Properties::DamarisPythonScript>();
+    settings.paraviewPythonFilename_ = Parameters::get<TypeTag, Properties::DamarisPythonParaviewScript>();
+    settings.damarisSimName_ = Parameters::get<TypeTag, Properties::DamarisSimName>();
+    settings.nDamarisCores_ = Parameters::get<TypeTag, Properties::DamarisDedicatedCores>();
+    settings.nDamarisNodes_ = Parameters::get<TypeTag, Properties::DamarisDedicatedNodes>();
+    settings.shmemSizeBytes_ = Parameters::get<TypeTag, Properties::DamarisSharedMemorySizeBytes>();
+    settings.shmemName_ = Parameters::get<TypeTag, Properties::DamarisSharedMemoryName>();
+    settings.damarisLogLevel_ = Parameters::get<TypeTag, Properties::DamarisLogLevel>();
+    settings.damarisDaskFile_ = Parameters::get<TypeTag, Properties::DamarisDaskFile>();
     return settings.getKeywords(comm, OutputDir);
 }
 

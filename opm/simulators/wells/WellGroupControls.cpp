@@ -30,6 +30,7 @@
 
 #include <opm/material/densead/Evaluation.hpp>
 
+#include <opm/simulators/wells/FractionCalculator.hpp>
 #include <opm/simulators/wells/GroupState.hpp>
 #include <opm/simulators/wells/TargetCalculator.hpp>
 #include <opm/simulators/wells/WellGroupHelpers.hpp>
@@ -46,8 +47,8 @@ namespace Opm
 template<class EvalWell>
 void WellGroupControls::
 getGroupInjectionControl(const Group& group,
-                         const WellState& well_state,
-                         const GroupState& group_state,
+                         const WellState<double>& well_state,
+                         const GroupState<double>& group_state,
                          const Schedule& schedule,
                          const SummaryState& summaryState,
                          const InjectorType& injectorType,
@@ -135,17 +136,27 @@ getGroupInjectionControl(const Group& group,
         const auto& gconsale = schedule[well_.currentStep()].gconsale().get(group.name(), summaryState);
         sales_target = gconsale.sales_target;
     }
-    WellGroupHelpers::InjectionTargetCalculator tcalc(currentGroupControl, pu,
-                                                      resv_coeff, group.name(),
-                                                      sales_target, group_state,
-                                                      injectionPhase,
-                                                      group.has_gpmaint_control(injectionPhase, currentGroupControl),
-                                                      deferred_logger);
-    WellGroupHelpers::FractionCalculator fcalc(schedule, well_state,
-                                               group_state, well_.currentStep(),
-                                               well_.guideRate(),
-                                               tcalc.guideTargetMode(),
-                                               pu, false, injectionPhase);
+
+    WGHelpers::InjectionTargetCalculator tcalc(currentGroupControl,
+                                               pu,
+                                               resv_coeff,
+                                               group.name(),
+                                               sales_target,
+                                               group_state,
+                                               injectionPhase,
+                                               group.has_gpmaint_control(injectionPhase,
+                                                                         currentGroupControl),
+                                               deferred_logger);
+
+    WGHelpers::FractionCalculator fcalc(schedule,
+                                        well_state,
+                                        group_state,
+                                        well_.currentStep(),
+                                        well_.guideRate(),
+                                        tcalc.guideTargetMode(),
+                                        pu,
+                                        false,
+                                        injectionPhase);
 
     auto localFraction = [&](const std::string& child) {
         return fcalc.localFraction(child, child);
@@ -162,8 +173,8 @@ getGroupInjectionControl(const Group& group,
 
     const double orig_target = tcalc.groupTarget(ctrl,
                                                 deferred_logger);
-    const auto chain = WellGroupHelpers::groupChainTopBot(well_.name(), group.name(),
-                                                          schedule, well_.currentStep());
+    const auto chain = WellGroupHelpers<double>::groupChainTopBot(well_.name(), group.name(),
+                                                                  schedule, well_.currentStep());
     // Because 'name' is the last of the elements, and not an ancestor, we subtract one below.
     const std::size_t num_ancestors = chain.size() - 1;
     double target = orig_target;
@@ -186,8 +197,8 @@ getGroupInjectionControl(const Group& group,
 std::optional<double>
 WellGroupControls::
 getGroupInjectionTargetRate(const Group& group,
-                            const WellState& well_state,
-                            const GroupState& group_state,
+                            const WellState<double>& well_state,
+                            const GroupState<double>& group_state,
                             const Schedule& schedule,
                             const SummaryState& summaryState,
                             const InjectorType& injectorType,
@@ -259,14 +270,26 @@ getGroupInjectionTargetRate(const Group& group,
         const auto& gconsale = schedule[well_.currentStep()].gconsale().get(group.name(), summaryState);
         sales_target = gconsale.sales_target;
     }
-    WellGroupHelpers::InjectionTargetCalculator tcalc(currentGroupControl, pu, resv_coeff,
-                                                      group.name(), sales_target, group_state,
-                                                      injectionPhase,
-                                                      group.has_gpmaint_control(injectionPhase, currentGroupControl),
-                                                      deferred_logger);
-    WellGroupHelpers::FractionCalculator fcalc(schedule, well_state, group_state,
-                                               well_.currentStep(), well_.guideRate(),
-                                               tcalc.guideTargetMode(), pu, false, injectionPhase);
+    WGHelpers::InjectionTargetCalculator tcalc(currentGroupControl,
+                                               pu,
+                                               resv_coeff,
+                                               group.name(),
+                                               sales_target,
+                                               group_state,
+                                               injectionPhase,
+                                               group.has_gpmaint_control(injectionPhase,
+                                                                         currentGroupControl),
+                                               deferred_logger);
+
+    WGHelpers::FractionCalculator fcalc(schedule,
+                                        well_state,
+                                        group_state,
+                                        well_.currentStep(),
+                                        well_.guideRate(),
+                                        tcalc.guideTargetMode(),
+                                        pu,
+                                        false,
+                                        injectionPhase);
 
     auto localFraction = [&](const std::string& child) {
         return fcalc.localFraction(child, child); //Note child needs to be passed to always include since the global isGrup map is not updated yet.
@@ -283,7 +306,10 @@ getGroupInjectionTargetRate(const Group& group,
 
     const double orig_target = tcalc.groupTarget(ctrl, deferred_logger);
 
-    const auto chain = WellGroupHelpers::groupChainTopBot(well_.name(), group.name(), schedule, well_.currentStep());
+    const auto chain = WellGroupHelpers<double>::groupChainTopBot(well_.name(),
+                                                                  group.name(),
+                                                                  schedule,
+                                                                  well_.currentStep());
     // Because 'name' is the last of the elements, and not an ancestor, we subtract one below.
     const std::size_t num_ancestors = chain.size() - 1;
     double target = orig_target;
@@ -301,8 +327,8 @@ getGroupInjectionTargetRate(const Group& group,
 
 template<class EvalWell>
 void WellGroupControls::getGroupProductionControl(const Group& group,
-                                                  const WellState& well_state,
-                                                  const GroupState& group_state,
+                                                  const WellState<double>& well_state,
+                                                  const GroupState<double>& group_state,
                                                   const Schedule& schedule,
                                                   const SummaryState& summaryState,
                                                   const EvalWell& bhp,
@@ -362,15 +388,23 @@ void WellGroupControls::getGroupProductionControl(const Group& group,
     if (group_state.has_grat_sales_target(group.name()))
         gratTargetFromSales = group_state.grat_sales_target(group.name());
 
-    WellGroupHelpers::TargetCalculator tcalc(currentGroupControl, pu, resv_coeff,
-                                             gratTargetFromSales, group.name(),
-                                             group_state,
-                                             group.has_gpmaint_control(currentGroupControl));
-    WellGroupHelpers::FractionCalculator fcalc(schedule, well_state, group_state,
-                                               well_.currentStep(),
-                                               well_.guideRate(),
-                                               tcalc.guideTargetMode(),
-                                               pu, true, Phase::OIL);
+    WGHelpers::TargetCalculator tcalc(currentGroupControl,
+                                      pu,
+                                      resv_coeff,
+                                      gratTargetFromSales,
+                                      group.name(),
+                                      group_state,
+                                      group.has_gpmaint_control(currentGroupControl));
+
+    WGHelpers::FractionCalculator fcalc(schedule,
+                                        well_state,
+                                        group_state,
+                                        well_.currentStep(),
+                                        well_.guideRate(),
+                                        tcalc.guideTargetMode(),
+                                        pu,
+                                        true,
+                                        Phase::OIL);
 
     auto localFraction = [&](const std::string& child) {
         return fcalc.localFraction(child, child);
@@ -386,8 +420,8 @@ void WellGroupControls::getGroupProductionControl(const Group& group,
         ctrl = group.productionControls(summaryState);
 
     const double orig_target = tcalc.groupTarget(ctrl, deferred_logger);
-    const auto chain = WellGroupHelpers::groupChainTopBot(well_.name(), group.name(),
-                                                          schedule, well_.currentStep());
+    const auto chain = WellGroupHelpers<double>::groupChainTopBot(well_.name(), group.name(),
+                                                                  schedule, well_.currentStep());
     // Because 'name' is the last of the elements, and not an ancestor, we subtract one below.
     const std::size_t num_ancestors = chain.size() - 1;
     double target = orig_target;
@@ -408,8 +442,8 @@ void WellGroupControls::getGroupProductionControl(const Group& group,
 
 double WellGroupControls::
 getGroupProductionTargetRate(const Group& group,
-                             const WellState& well_state,
-                             const GroupState& group_state,
+                             const WellState<double>& well_state,
+                             const GroupState<double>& group_state,
                              const Schedule& schedule,
                              const SummaryState& summaryState,
                              const RateConvFunc& rateConverter,
@@ -451,12 +485,23 @@ getGroupProductionTargetRate(const Group& group,
     if (group_state.has_grat_sales_target(group.name()))
         gratTargetFromSales = group_state.grat_sales_target(group.name());
 
-    WellGroupHelpers::TargetCalculator tcalc(currentGroupControl, pu, resv_coeff, gratTargetFromSales, group.name(), group_state, group.has_gpmaint_control(currentGroupControl));
-    WellGroupHelpers::FractionCalculator fcalc(schedule, well_state, group_state,
-                                               well_.currentStep(),
-                                               well_.guideRate(),
-                                               tcalc.guideTargetMode(),
-                                               pu, true, Phase::OIL);
+    WGHelpers::TargetCalculator tcalc(currentGroupControl,
+                                      pu,
+                                      resv_coeff,
+                                      gratTargetFromSales,
+                                      group.name(),
+                                      group_state,
+                                      group.has_gpmaint_control(currentGroupControl));
+
+    WGHelpers::FractionCalculator fcalc(schedule,
+                                        well_state,
+                                        group_state,
+                                        well_.currentStep(),
+                                        well_.guideRate(),
+                                        tcalc.guideTargetMode(),
+                                        pu,
+                                        true,
+                                        Phase::OIL);
 
     auto localFraction = [&](const std::string& child) {
         return fcalc.localFraction(child, child); //Note child needs to be passed to always include since the global isGrup map is not updated yet.
@@ -472,8 +517,8 @@ getGroupProductionTargetRate(const Group& group,
         ctrl = group.productionControls(summaryState);
 
     const double orig_target = tcalc.groupTarget(ctrl, deferred_logger);
-    const auto chain = WellGroupHelpers::groupChainTopBot(well_.name(), group.name(),
-                                                          schedule, well_.currentStep());
+    const auto chain = WellGroupHelpers<double>::groupChainTopBot(well_.name(), group.name(),
+                                                                  schedule, well_.currentStep());
     // Because 'name' is the last of the elements, and not an ancestor, we subtract one below.
     const std::size_t num_ancestors = chain.size() - 1;
     double target = orig_target;
@@ -504,8 +549,8 @@ getGroupProductionTargetRate(const Group& group,
 #define INSTANCE(...) \
 template void WellGroupControls:: \
 getGroupInjectionControl<__VA_ARGS__>(const Group&, \
-                                      const WellState&, \
-                                      const GroupState&, \
+                                      const WellState<double>&, \
+                                      const GroupState<double>&, \
                                       const Schedule&, \
                                       const SummaryState&, \
                                       const InjectorType&, \
@@ -517,8 +562,8 @@ getGroupInjectionControl<__VA_ARGS__>(const Group&, \
                                       DeferredLogger& deferred_logger) const; \
 template void WellGroupControls:: \
 getGroupProductionControl<__VA_ARGS__>(const Group&, \
-                                       const WellState&, \
-                                       const GroupState&, \
+                                       const WellState<double>&, \
+                                       const GroupState<double>&, \
                                        const Schedule&, \
                                        const SummaryState&, \
                                        const __VA_ARGS__& bhp, \
@@ -544,4 +589,5 @@ INSTANCE(DenseAd::Evaluation<double,-1,8u>)
 INSTANCE(DenseAd::Evaluation<double,-1,9u>)
 INSTANCE(DenseAd::Evaluation<double,-1,10u>)
 INSTANCE(DenseAd::Evaluation<double,-1,11u>)
+
 } // namespace Opm

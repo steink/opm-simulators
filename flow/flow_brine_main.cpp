@@ -15,10 +15,10 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "config.h"
-#include <flow/flow_ebos_brine.hpp>
+#include <flow/flow_brine.hpp>
 
 
 int main(int argc, char** argv)
 {
-    return Opm::flowEbosBrineMainStandalone(argc, argv);
+    return Opm::flowBrineMainStandalone(argc, argv);
 }

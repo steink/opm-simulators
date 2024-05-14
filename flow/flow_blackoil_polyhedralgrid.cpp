@@ -18,59 +18,67 @@
 */
 #include <config.h>
 
-#include <ebos/eclpolyhedralgridvanguard.hh>
-
 #include <opm/grid/polyhedralgrid.hh>
+
 #include <opm/models/blackoil/blackoillocalresidualtpfa.hh>
 #include <opm/models/discretization/common/tpfalinearizer.hh>
+
+#include <opm/simulators/flow/PolyhedralGridVanguard.hpp>
 #include <opm/simulators/flow/Main.hpp>
 
 // these are not explicitly instanced in library
-#include <ebos/collecttoiorank_impl.hh>
-#include <ebos/eclgenericproblem_impl.hh>
-#include <ebos/eclgenericthresholdpressure_impl.hh>
-#include <ebos/eclgenerictracermodel_impl.hh>
-#include <ebos/ecltransmissibility_impl.hh>
-#include <ebos/eclgenericwriter_impl.hh>
-#include <ebos/equil/initstateequil_impl.hh>
+#include <opm/simulators/flow/CollectDataOnIORank_impl.hpp>
+#include <opm/simulators/flow/EclGenericWriter_impl.hpp>
+#include <opm/simulators/flow/FlowGenericProblem_impl.hpp>
+#include <opm/simulators/flow/GenericThresholdPressure_impl.hpp>
+#include <opm/simulators/flow/GenericTracerModel_impl.hpp>
+#include <opm/simulators/flow/Transmissibility_impl.hpp>
+#include <opm/simulators/flow/equil/InitStateEquil_impl.hpp>
 #include <opm/simulators/utils/GridDataOutput_impl.hpp>
 
 namespace Opm {
 namespace Properties {
     namespace TTag {
-        struct EclFlowProblemPoly {
-            using InheritsFrom = std::tuple<EclFlowProblem>;
+        struct FlowProblemPoly {
+            using InheritsFrom = std::tuple<FlowProblem>;
         };
     }
 
     template<class TypeTag>
-    struct Linearizer<TypeTag, TTag::EclFlowProblemPoly> { using type = TpfaLinearizer<TypeTag>; };
+    struct Linearizer<TypeTag, TTag::FlowProblemPoly> { using type = TpfaLinearizer<TypeTag>; };
 
     template<class TypeTag>
-    struct LocalResidual<TypeTag, TTag::EclFlowProblemPoly> { using type = BlackOilLocalResidualTPFA<TypeTag>; };
+    struct LocalResidual<TypeTag, TTag::FlowProblemPoly> { using type = BlackOilLocalResidualTPFA<TypeTag>; };
 
     template<class TypeTag>
-    struct EnableDiffusion<TypeTag, TTag::EclFlowProblemPoly> { static constexpr bool value = false; };
+    struct EnableDiffusion<TypeTag, TTag::FlowProblemPoly> { static constexpr bool value = false; };
 
     template<class TypeTag>
-    struct Grid<TypeTag, TTag::EclFlowProblemPoly> {
+    struct Grid<TypeTag, TTag::FlowProblemPoly> {
         using type = Dune::PolyhedralGrid<3, 3>;
     };
     template<class TypeTag>
-    struct EquilGrid<TypeTag, TTag::EclFlowProblemPoly> {
+    struct EquilGrid<TypeTag, TTag::FlowProblemPoly> {
         //using type = Dune::CpGrid;
         using type = GetPropType<TypeTag, Properties::Grid>;
     };
 
     template<class TypeTag>
-    struct Vanguard<TypeTag, TTag::EclFlowProblemPoly> {
-        using type = Opm::EclPolyhedralGridVanguard<TypeTag>;
+    struct Vanguard<TypeTag, TTag::FlowProblemPoly> {
+        using type = Opm::PolyhedralGridVanguard<TypeTag>;
     };
 }
+
+template<>
+class SupportsFaceTag<Dune::PolyhedralGrid<3, 3>>
+    : public std::bool_constant<true>
+{};
+
 }
+
 int main(int argc, char** argv)
 {
-    using TypeTag = Opm::Properties::TTag::EclFlowProblemPoly;
+    using TypeTag = Opm::Properties::TTag::FlowProblemPoly;
     auto mainObject = std::make_unique<Opm::Main>(argc, argv);
     auto ret = mainObject->runStatic<TypeTag>();
     // Destruct mainObject as the destructor calls MPI_Finalize!
