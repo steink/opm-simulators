@@ -1650,9 +1650,18 @@ namespace Opm
         // fetch potentials (sign is updated on the outside).
         well_potentials.clear();
         well_potentials.resize(np, 0.0);
-        for (int compIdx = 0; compIdx < this->num_components_; ++compIdx) {
-            const EvalWell rate = well_copy.primary_variables_.getQs(compIdx);
-            well_potentials[this->modelCompIdxToFlowCompIdx(compIdx)] = rate.value();
+        for (int phase = 0; phase < np; ++phase) {
+            const EvalWell rate = well_copy.primary_variables_.getQs(phase);
+            well_potentials[this->modelCompIdxToFlowCompIdx(phase)] = rate.value();
+        }
+
+        // the solvent contribution is added to the gas potentials
+        if constexpr (has_solvent) {
+            const auto& pu = this->phaseUsage();
+            assert(pu.phase_used[Gas]);
+            const int gas_pos = pu.phase_pos[Gas];
+            const EvalWell rate = well_copy.primary_variables_.getQs(Indices::contiSolventEqIdx);
+            well_potentials[gas_pos] += rate.value();
         }
         return converged;
     }
