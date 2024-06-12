@@ -201,6 +201,20 @@ init(std::vector<Scalar>& perf_depth,
     this->linSys_.init(num_cells, numWellEq, baseif_.numPerfs(), baseif_.cells());
 }
 
+template<typename FluidSystem, typename Indices>
+typename StandardWellEval<FluidSystem,Indices>::Scalar
+StandardWellEval<FluidSystem,Indices>::
+getResidualMeasureValue(const WellState<Scalar>& well_state,
+                        const std::vector<Scalar>& B_avg) const
+{
+    //residuals.resize(this->primary_variables_.numWellEq());
+    Scalar measure = 0;
+    for (int eq_idx = 0; eq_idx < this->primary_variables_.numWellEq()-1; ++eq_idx) {
+        measure += B_avg[eq_idx]*std::abs(this->linSys_.residual()[0][eq_idx]);
+    }
+    return measure;
+}
+
 #define INSTANCE(...) \
 template class StandardWellEval<BlackOilFluidSystem<double,BlackOilDefaultIndexTraits>,__VA_ARGS__>;
 

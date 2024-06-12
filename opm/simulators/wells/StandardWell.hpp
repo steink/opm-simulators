@@ -265,7 +265,8 @@ namespace Opm
         void updateWellState(const Simulator& simulator,
                              const BVectorWell& dwells,
                              WellState<Scalar>& well_state,
-                             DeferredLogger& deferred_logger);
+                             DeferredLogger& deferred_logger,
+                             const Scalar relaxation_factor);
 
         // calculate the properties for the well connections
         // to calulate the pressure difference between well connections.
@@ -342,7 +343,8 @@ namespace Opm
 
         void updatePrimaryVariablesNewton(const BVectorWell& dwells,
                                           const bool stop_or_zero_rate_target,
-                                          DeferredLogger& deferred_logger);
+                                          DeferredLogger& deferred_logger,
+                                          const Scalar relaxation_factor);
 
         void updateWellStateFromPrimaryVariables(const bool stop_or_zero_rate_target,
                                                  WellState<Scalar>& well_state,

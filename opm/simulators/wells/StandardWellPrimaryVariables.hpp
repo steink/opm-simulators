@@ -114,7 +114,8 @@ public:
                       const bool stop_or_zero_rate_target,
                       const Scalar dFLimit,
                       const Scalar dBHPLimit,
-                      DeferredLogger& deferred_logger);
+                      DeferredLogger& deferred_logger, 
+                      const Scalar relaxation_factor);
 
     //! \brief Update polymer molecular weight values from newton update vector.
     void updateNewtonPolyMW(const BVectorWell& dwells);

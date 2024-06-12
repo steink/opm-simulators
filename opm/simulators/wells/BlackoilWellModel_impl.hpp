@@ -1950,7 +1950,7 @@ namespace Opm {
             OPM_BEGIN_PARALLEL_TRY_CATCH()
                 for (const auto& well : well_container_) {
                     const auto mode = WellInterface<TypeTag>::IndividualOrGroup::Individual;
-                    const bool changed_well = well->updateWellControl(simulator_, mode, this->wellState(), this->groupState(), deferred_logger);
+                    const bool changed_well = false;//well->updateWellControl(simulator_, mode, this->wellState(), this->groupState(), deferred_logger);
                     if (changed_well) {
                         changed_well_individual = changed_well || changed_well_individual;
                     }

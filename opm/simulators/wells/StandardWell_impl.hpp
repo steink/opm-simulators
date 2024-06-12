@@ -697,12 +697,13 @@ namespace Opm
     updateWellState(const Simulator& simulator,
                     const BVectorWell& dwells,
                     WellState<Scalar>& well_state,
-                    DeferredLogger& deferred_logger)
+                    DeferredLogger& deferred_logger, 
+                    const Scalar relaxation_factor)
     {
         if (!this->isOperableAndSolvable() && !this->wellIsStopped()) return;
 
         const bool stop_or_zero_rate_target = this->stoppedOrZeroRateTarget(simulator, well_state, deferred_logger);
-        updatePrimaryVariablesNewton(dwells, stop_or_zero_rate_target, deferred_logger);
+        updatePrimaryVariablesNewton(dwells, stop_or_zero_rate_target, deferred_logger, relaxation_factor);
 
         const auto& summary_state = simulator.vanguard().summaryState();
         updateWellStateFromPrimaryVariables(stop_or_zero_rate_target, well_state, summary_state, deferred_logger);
@@ -711,18 +712,17 @@ namespace Opm
 
 
 
-
-
     template<typename TypeTag>
     void
     StandardWell<TypeTag>::
     updatePrimaryVariablesNewton(const BVectorWell& dwells,
                                  const bool stop_or_zero_rate_target,
-                                 DeferredLogger& deferred_logger)
+                                 DeferredLogger& deferred_logger,
+                                 const Scalar relaxation_factor)
     {
         const Scalar dFLimit = this->param_.dwell_fraction_max_;
         const Scalar dBHPLimit = this->param_.dbhp_max_rel_;
-        this->primary_variables_.updateNewton(dwells, stop_or_zero_rate_target, dFLimit, dBHPLimit, deferred_logger);
+        this->primary_variables_.updateNewton(dwells, stop_or_zero_rate_target, dFLimit, dBHPLimit, deferred_logger, relaxation_factor);
 
         // for the water velocity and skin pressure
         if constexpr (Base::has_polymermw) {
@@ -1375,7 +1375,7 @@ namespace Opm
         dx_well[0].resize(this->primary_variables_.numWellEq());
         this->linSys_.solve( dx_well);
 
-        updateWellState(simulator, dx_well, well_state, deferred_logger);
+        updateWellState(simulator, dx_well, well_state, deferred_logger, 1.0);
     }
 
 
@@ -1443,7 +1443,7 @@ namespace Opm
         xw[0].resize(this->primary_variables_.numWellEq());
 
         this->linSys_.recoverSolutionWell(x, xw);
-        updateWellState(simulator, xw, well_state, deferred_logger);
+        updateWellState(simulator, xw, well_state, deferred_logger, 1.0);
     }
 
 
@@ -2358,7 +2358,7 @@ namespace Opm
         // Always take a few (more than one) iterations after a switch before allowing a new switch
         // The optimal number here is subject to further investigation, but it has been observerved
         // that unless this number is >1, we may get stuck in a cycle
-        constexpr int min_its_after_switch = 4;
+        constexpr int min_its_after_switch = 0;
         int its_since_last_switch = min_its_after_switch;
         int switch_count= 0;
         // if we fail to solve eqs, we reset status/operability before leaving
@@ -2379,9 +2379,11 @@ namespace Opm
         // well needs to be set operable or else solving/updating of re-opened wells is skipped
         this->operability_status_.resetOperability();
         this->operability_status_.solvable = true;
+        Scalar measure_prev = 1e100;
+        WellState<Scalar> well_state_copy = simulator.problem().wellModel().wellState();
         do {
             its_since_last_switch++;
-            if (allow_switching && its_since_last_switch >= min_its_after_switch){
+            if (allow_switching && its_since_last_switch >= min_its_after_switch && converged){
                 const Scalar wqTotal = this->primary_variables_.eval(WQTotal).value();
                 changed = this->updateWellControlAndStatusLocalIteration(simulator, well_state, group_state,
                                                                          inj_controls, prod_controls, wqTotal,
@@ -2414,7 +2416,7 @@ namespace Opm
             if (converged) {
                 // if equations are sufficiently linear they might converge in less than min_its_after_switch
                 // in this case, make sure all constraints are satisfied before returning
-                if (switch_count > 0 && its_since_last_switch < min_its_after_switch) {
+                if (!final_check){//(switch_count > 0 && its_since_last_switch < min_its_after_switch) {
                     final_check = true;
                     its_since_last_switch = min_its_after_switch;
                 } else {
@@ -2423,7 +2425,38 @@ namespace Opm
             }
 
             ++it;
-            solveEqAndUpdateWellState(simulator, well_state, deferred_logger);
+            if (it > 10) {
+                BVectorWell dx_well(1);
+                dx_well[0].resize(this->primary_variables_.numWellEq());
+                this->linSys_.solve( dx_well);
+                const Scalar m0 = this->getResidualMeasureValue(well_state, Base::B_avg_);
+                Scalar m = m0;
+                Scalar mp = m;
+                Scalar alpha = 1;
+                const Scalar tau = 0.7;
+                Scalar relax = 1.0;
+                for (int i=0; i<25; ++i) {
+                    updateWellState(simulator, dx_well, well_state, deferred_logger, alpha);
+                    initPrimaryVariablesEvaluation();
+                    assembleWellEqWithoutIteration(simulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
+                    mp = m;
+                    m = this->getResidualMeasureValue(well_state, Base::B_avg_);
+                    if (m < measure_prev*(1.0 - 0.1*alpha)) {
+                        break;
+                    } else {
+                        alpha *= tau;
+                        relax = alpha*(1-1/tau); // note negative since we're chopping previous update
+                        well_state = well_state_copy;
+                        const bool stopped_or_zero_target = this->stoppedOrZeroRateTarget(simulator, well_state, deferred_logger);
+                        this->primary_variables_.update(well_state, stopped_or_zero_target, deferred_logger);
+                    }
+                }
+                measure_prev = m;
+        
+            } else {
+                solveEqAndUpdateWellState(simulator, well_state, deferred_logger);
+                measure_prev = this->getResidualMeasureValue(well_state, Base::B_avg_);
+            }
             initPrimaryVariablesEvaluation();
 
         } while (it < max_iter);

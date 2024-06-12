@@ -247,7 +247,8 @@ updateNewton(const BVectorWell& dwells,
              const bool stop_or_zero_rate_target,
              const Scalar dFLimit,
              const Scalar dBHPLimit,
-             DeferredLogger& deferred_logger)
+             DeferredLogger& deferred_logger, 
+             const Scalar relaxation_factor)
 {
     // for injectors, very typical one of the fractions will be one, and it is easy to get zero value
     // fractions. not sure what is the best way to handle it yet, so we just use 1.0 here
@@ -259,27 +260,27 @@ updateNewton(const BVectorWell& dwells,
 
     // update the second and third well variable (The flux fractions)
     if constexpr (has_wfrac_variable) {
-        const int sign2 = dwells[0][WFrac] > 0 ? 1: -1;
-        const Scalar dx2_limited = sign2 * std::min(std::abs(dwells[0][WFrac] * relaxation_factor_fractions), dFLimit);
+        const int sign2 = dwells[0][WFrac] * relaxation_factor > 0 ? 1: -1;
+        const Scalar dx2_limited = sign2 * std::min(std::abs(dwells[0][WFrac] * relaxation_factor_fractions * relaxation_factor), dFLimit);
         value_[WFrac] = value_[WFrac] - dx2_limited;
     }
 
     if constexpr (has_gfrac_variable) {
-        const int sign3 = dwells[0][GFrac] > 0 ? 1: -1;
-        const Scalar dx3_limited = sign3 * std::min(std::abs(dwells[0][GFrac] * relaxation_factor_fractions), dFLimit);
+        const int sign3 = dwells[0][GFrac] * relaxation_factor > 0 ? 1: -1;
+        const Scalar dx3_limited = sign3 * std::min(std::abs(dwells[0][GFrac] * relaxation_factor_fractions * relaxation_factor), dFLimit);
         value_[GFrac] = value_[GFrac] - dx3_limited;
     }
 
     if constexpr (Indices::enableSolvent) {
-        const int sign4 = dwells[0][SFrac] > 0 ? 1: -1;
-        const Scalar dx4_limited = sign4 * std::min(std::abs(dwells[0][SFrac]) * relaxation_factor_fractions, dFLimit);
+        const int sign4 = dwells[0][SFrac] * relaxation_factor > 0 ? 1: -1;
+        const Scalar dx4_limited = sign4 * std::min(std::abs(dwells[0][SFrac]) * relaxation_factor_fractions * relaxation_factor, dFLimit);
         value_[SFrac] = value_[SFrac] - dx4_limited;
     }
 
     this->processFractions();
 
     // updating the total rates Q_t
-    value_[WQTotal] -= dwells[0][WQTotal];
+    value_[WQTotal] -= dwells[0][WQTotal] * relaxation_factor;
 
     // here, we make sure it is zero for wells with zero rate target(including stopped wells)
     if (stop_or_zero_rate_target) {
@@ -294,8 +295,8 @@ updateNewton(const BVectorWell& dwells,
     }
 
     // updating the bottom hole pressure
-    const int sign1 = dwells[0][Bhp] > 0 ? 1: -1;
-    const Scalar dx1_limited = sign1 * std::min(std::abs(dwells[0][Bhp]),
+    const int sign1 = dwells[0][Bhp] * relaxation_factor > 0 ? 1: -1;
+    const Scalar dx1_limited = sign1 * std::min(std::abs(dwells[0][Bhp] * relaxation_factor),
                                                 std::abs(value_[Bhp]) * dBHPLimit);
     // some cases might have defaulted bhp constraint of 1 bar, we use a slightly smaller value as the bhp lower limit for Newton update
     // so that bhp constaint can be an active control when needed.
