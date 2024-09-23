@@ -340,7 +340,7 @@ namespace Opm
 
         //const bool oscillating = std::count(this->well_control_log_.begin(), this->well_control_log_.end(), from) >= param_.max_number_of_well_switches_;
 
-        if (oscillating || this->wellUnderZeroRateTarget(simulator, well_state, deferred_logger) || !(this->well_ecl_.getStatus() == WellStatus::OPEN)) {
+        if (this->wellUnderZeroRateTarget(simulator, well_state, deferred_logger) || !(this->well_ecl_.getStatus() == WellStatus::OPEN)) {
            return false;
         }
 
@@ -351,7 +351,7 @@ namespace Opm
                 return true;
             } else {
                 bool changed = false;
-                if (!fixed_control) {
+                if (!fixed_control && !oscillating) {
                     // We don't allow changing to group controls here since this may lead to inconsistencies
                     // in the group handling which in turn may result in excessive back and forth switching.
                     // If we are to allow this change, one needs to make sure all necessary information propagates  
