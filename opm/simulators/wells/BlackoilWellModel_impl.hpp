@@ -617,6 +617,8 @@ namespace Opm {
                     }
                 }
             }
+            const int iterationIdx = simulator_.model().newtonMethod().numIterations();
+            updateAndCommunicate(reportStepIdx, iterationIdx, local_deferredLogger);
         }
         // Catch clauses for all errors setting exc_type and exc_msg
         OPM_PARALLEL_CATCH_CLAUSE(exc_type, exc_msg);
@@ -1266,8 +1268,13 @@ namespace Opm {
         OPM_END_PARALLEL_TRY_CATCH_LOG(local_deferredLogger, "updateWellControlsAndNetworkIteration() failed: ",
                                        this->terminal_output_, grid().comm());
 
-        //update guide rates
+        const int iterationIdx = simulator_.model().newtonMethod().numIterations();
         const int reportStepIdx = simulator_.episodeIndex();
+        //const auto& comm = simulator_.vanguard().grid().comm();
+        updateAndCommunicate(reportStepIdx, iterationIdx, local_deferredLogger);
+        
+        //update guide rates
+        //const int reportStepIdx = simulator_.episodeIndex();
         if (alq_updated || BlackoilWellModelGuideRates(*this).
                               guideRateUpdateIsNeeded(reportStepIdx)) {
             const double simulationTime = simulator_.time();
@@ -2660,6 +2667,10 @@ namespace Opm {
             // operability, so reset before main iterations begin
             well->resetWellOperability();
         }
+
+        const int iterationIdx = simulator_.model().newtonMethod().numIterations();
+        const int reportStepIdx = simulator_.episodeIndex();
+        updateAndCommunicate(reportStepIdx, iterationIdx, deferred_logger);
         updatePrimaryVariables(deferred_logger);
 
         // Actually do the pre-step network rebalance, using the updated well states and initial solutions
