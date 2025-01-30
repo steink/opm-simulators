@@ -105,6 +105,7 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/flow/KeywordValidation.cpp
   opm/simulators/flow/LogOutputHelper.cpp
   opm/simulators/flow/Main.cpp
+  opm/simulators/flow/MainDispatchDynamic.cpp
   opm/simulators/flow/MixingRateControls.cpp
   opm/simulators/flow/NonlinearSolver.cpp
   opm/simulators/flow/partitionCells.cpp
@@ -855,6 +856,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/flow/SimulatorSerializer.hpp
   opm/simulators/flow/SolutionContainers.hpp
   opm/simulators/flow/SubDomain.hpp
+  opm/simulators/flow/TTagFlowProblemTPFA.hpp
   opm/simulators/flow/TracerModel.hpp
   opm/simulators/flow/Transmissibility.hpp
   opm/simulators/flow/Transmissibility_impl.hpp
