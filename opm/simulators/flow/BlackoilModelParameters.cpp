@@ -49,6 +49,7 @@ BlackoilModelParameters<Scalar>::BlackoilModelParameters()
     tolerance_cnv_energy_relaxed_ = std::max(tolerance_cnv_energy_, Parameters::Get<Parameters::ToleranceCnvEnergyRelaxed<Scalar>>());
     tolerance_wells_ = Parameters::Get<Parameters::ToleranceWells<Scalar>>();
     tolerance_well_control_ = Parameters::Get<Parameters::ToleranceWellControl<Scalar>>();
+    tolerance_well_constraints_ = Parameters::Get<Parameters::ToleranceWellConstraints<Scalar>>();
     max_welleq_iter_ = Parameters::Get<Parameters::MaxWelleqIter>();
     use_multisegment_well_ = Parameters::Get<Parameters::UseMultisegmentWell>();
     tolerance_pressure_ms_wells_ = Parameters::Get<Parameters::TolerancePressureMsWells<Scalar>>();
@@ -153,6 +154,8 @@ void BlackoilModelParameters<Scalar>::registerParameters()
         ("Well convergence tolerance");
     Parameters::Register<Parameters::ToleranceWellControl<Scalar>>
         ("Tolerance for the well control equations");
+    Parameters::Register<Parameters::ToleranceWellConstraints<Scalar>>
+        ("Relative tolerance for the well constraint violation");
     Parameters::Register<Parameters::MaxWelleqIter>
         ("Maximum number of iterations to determine solution the well equations");
     Parameters::Register<Parameters::UseMultisegmentWell>

@@ -58,6 +58,7 @@ public:
                                const SummaryState& summaryState,
                                const RateConvFunc& calcReservoirVoidageRates,
                                bool& thp_limit_violated_but_not_switched,
+                               const Scalar& tolerance_well_constraints,
                                DeferredLogger& deferred_logger,
                                const std::optional<Well::InjectionControls>& inj_controls = std::nullopt,
                                const std::optional<Well::ProductionControls>& prod_controls = std::nullopt) const;
@@ -67,6 +68,7 @@ private:
     activeInjectionConstraint(const SingleWellState<Scalar>& ws,
                               const SummaryState& summaryState,
                               bool& thp_limit_violated_but_not_switched,
+                              const Scalar& tol,
                               DeferredLogger& deferred_logger,
                               const std::optional<Well::InjectionControls>& inj_controls = std::nullopt) const;
 
@@ -75,6 +77,7 @@ private:
                                const SummaryState& summaryState,
                                const RateConvFunc& calcReservoirVoidageRates,
                                bool& thp_limit_violated_but_not_switched,
+                               const Scalar& tol,
                                DeferredLogger& deferred_logger,
                                const std::optional<Well::ProductionControls>& prod_controls = std::nullopt) const;
 

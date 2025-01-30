@@ -173,6 +173,7 @@ checkIndividualConstraints(SingleWellState<Scalar>& ws,
     return WellConstraints(*this).
             checkIndividualConstraints(ws, summaryState, rRates,
                                        this->operability_status_.thp_limit_violated_but_not_switched,
+                                       this->param_.tolerance_well_constraints_,
                                        deferred_logger, inj_controls, prod_controls);
 }
 

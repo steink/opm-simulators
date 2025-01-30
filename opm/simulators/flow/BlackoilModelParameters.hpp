@@ -79,6 +79,9 @@ struct ToleranceWells { static constexpr Scalar value = 1e-4; };
 template<class Scalar>
 struct ToleranceWellControl { static constexpr Scalar value = 1e-7; };
 
+template<class Scalar>
+struct ToleranceWellConstraints { static constexpr Scalar value = 0.0; };
+
 struct MaxWelleqIter { static constexpr int value = 30; };
 
 template<class Scalar>
@@ -206,6 +209,8 @@ public:
     /// Tolerance for the well control equations
     //  TODO: it might need to distinguish between rate control and pressure control later
     Scalar tolerance_well_control_;
+    /// Relative tolerance for well constraint violation
+    Scalar tolerance_well_constraints_;
     /// Tolerance for the pressure equations for multisegment wells
     Scalar tolerance_pressure_ms_wells_;
     /// Relaxed tolerance for for the well flow residual
