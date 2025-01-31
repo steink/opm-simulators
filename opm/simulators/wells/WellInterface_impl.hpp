@@ -351,7 +351,7 @@ namespace Opm
                                                          groupTargetReduction);
 
                         if (isNowGroupControl) {
-                            updateWellStateWithTarget(simulator, group_state, well_state, deferred_logger);
+                            updateWellStateWithTarget(simulator, group_state, well_state, deferred_logger, /*initialize*/ false);
                             updatePrimaryVariables(simulator, well_state, deferred_logger);
                         }
                     }    
