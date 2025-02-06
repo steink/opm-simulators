@@ -1531,6 +1531,9 @@ namespace Opm
 
                 // we don't want to scale with zero and get zero rates.
                 if (scale > 0) {
+                    if (true) {
+                        deferred_logger.debug("UpdateTarget (group control): " + this->name() + " scaled by: " + std::to_string(scale));
+                    }
                     for (int p = 0; p<np; ++p) {
                         ws.surface_rates[p] *= scale;
                     }

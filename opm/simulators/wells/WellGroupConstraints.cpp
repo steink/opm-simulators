@@ -29,6 +29,8 @@
 #include <opm/simulators/wells/WellInterfaceGeneric.hpp>
 #include <opm/simulators/wells/WellState.hpp>
 
+#include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
+
 #include <opm/simulators/utils/BlackoilPhases.hpp>
 
 namespace Opm
@@ -192,6 +194,9 @@ checkGroupConstraints(WellState<Scalar>& well_state,
             // If a group constraint was broken, we set the current well control to
             // be GRUP.
             if (group_constraint.first) {
+                if (true) {
+                        deferred_logger.debug("WellGroupConstraints: " + well.name() + " changed to group, scaled by: " + std::to_string(group_constraint.second));
+                    }
                 ws.production_cmode = Well::ProducerCMode::GRUP;
                 const int np = well_state.numPhases();
                 for (int p = 0; p<np; ++p) {

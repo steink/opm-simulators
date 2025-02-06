@@ -30,6 +30,8 @@
 
 #include <opm/material/densead/Evaluation.hpp>
 
+#include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
+
 #include <opm/simulators/wells/FractionCalculator.hpp>
 #include <opm/simulators/wells/GroupState.hpp>
 #include <opm/simulators/wells/TargetCalculator.hpp>
@@ -442,6 +444,9 @@ getGroupProductionControl(const Group& group,
     // Avoid negative target rates coming from too large local reductions.
     const Scalar target_rate = std::max(Scalar(0.0), target / efficiencyFactor);
     const auto current_rate = -tcalc.calcModeRateFromRates(rates); // Switch sign since 'rates' are negative for producers.
+    if (true) {
+        deferred_logger.debug("WellGroupControls (control eq) " + well.name() + ", current_rate = " + std::to_string(current_rate.value()) + ", target_rate = " + std::to_string(target_rate));
+    }
     control_eq = current_rate - target_rate;
 }
 
