@@ -604,6 +604,8 @@ updateWellRatesFromGroupTargetScale(const Scalar scale,
                 }
             }
         }
+        auto deferred_logger = Opm::DeferredLogger();
+        deferred_logger.debug("updateWellRatesFromGroupTargetScale: " + wellName + " scaled by: " + std::to_string(scale));
     }
 
 

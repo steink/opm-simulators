@@ -28,7 +28,7 @@
 #include <opm/simulators/wells/WellGroupHelpers.hpp>
 #include <opm/simulators/wells/WellInterfaceGeneric.hpp>
 #include <opm/simulators/wells/WellState.hpp>
-
+#include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
 #include <opm/simulators/utils/BlackoilPhases.hpp>
 
 namespace Opm
@@ -162,6 +162,7 @@ checkGroupConstraints(WellState<Scalar>& well_state,
             // be GRUP.
             if (group_constraint.first) {
                 ws.injection_cmode = Well::InjectorCMode::GRUP;
+                deferred_logger.debug("checkGroupConstraints: " + well.name() + " changed to group, scaled by: " + std::to_string(group_constraint.second));
                 const int np = well_state.numPhases();
                 for (int p = 0; p<np; ++p) {
                     ws.surface_rates[p] *= group_constraint.second;
@@ -193,6 +194,7 @@ checkGroupConstraints(WellState<Scalar>& well_state,
             // be GRUP.
             if (group_constraint.first) {
                 ws.production_cmode = Well::ProducerCMode::GRUP;
+                deferred_logger.debug("checkGroupConstraints: " + well.name() + " changed to group, scaled by: " + std::to_string(group_constraint.second));
                 const int np = well_state.numPhases();
                 for (int p = 0; p<np; ++p) {
                     ws.surface_rates[p] *= group_constraint.second;

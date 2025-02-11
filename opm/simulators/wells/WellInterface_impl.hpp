@@ -1272,8 +1272,10 @@ namespace Opm
                                                           injectorType,
                                                           efficiencyFactor,
                                                           deferred_logger);
-                if (target)
+                if (target) {
                     ws.surface_rates[phasePos] = *target;
+                    deferred_logger.debug("UpdateTarget (group control): " + this->name() + " set to target: " + std::to_string(target.value()));
+                }
                 break;
             }
             case Well::InjectorCMode::CMODE_UNDEFINED:
@@ -1498,6 +1500,7 @@ namespace Opm
 
                 // we don't want to scale with zero and get zero rates.
                 if (scale > 0) {
+                    deferred_logger.debug("UpdateTarget (group control): " + this->name() + " scaled by: " + std::to_string(scale));
                     for (int p = 0; p<np; ++p) {
                         ws.surface_rates[p] *= scale;
                     }
