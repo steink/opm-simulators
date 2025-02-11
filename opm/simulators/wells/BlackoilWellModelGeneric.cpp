@@ -708,7 +708,8 @@ checkGroupHigherConstraints(const Group& group,
                                                                                   reportStepIdx,
                                                                                   /* isInjector */ true,
                                                                                   this->groupState(),
-                                                                                  this->wellState());
+                                                                                  this->wellState(), 
+                                                                                  deferred_logger);
                     changed = true;
                 }
             }
@@ -791,7 +792,8 @@ checkGroupHigherConstraints(const Group& group,
                                                                                   reportStepIdx,
                                                                                   /* isInjector */ false,
                                                                                   this->groupState(),
-                                                                                  this->wellState());
+                                                                                  this->wellState(), 
+                                                                                  deferred_logger);
                 }
             }
         }
