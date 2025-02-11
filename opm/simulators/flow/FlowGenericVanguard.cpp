@@ -113,28 +113,34 @@ FlowGenericVanguard::FlowGenericVanguard(SimulationModelParams&& params)
     edgeWeightsMethod_   = Dune::EdgeWeightMethod(Parameters::Get<Parameters::EdgeWeightsMethod>());
 
 #if HAVE_OPENCL || HAVE_ROCSPARSE || HAVE_CUDA
-        numJacobiBlocks_ = Parameters::Get<Parameters::NumJacobiBlocks>();
-#endif
+    numJacobiBlocks_ = Parameters::Get<Parameters::NumJacobiBlocks>();
+#endif // HAVE_OPENCL || HAVE_ROCSPARSE || HAVE_CUDA
 
-        ownersFirst_ = Parameters::Get<Parameters::OwnerCellsFirst>();
+    ownersFirst_ = Parameters::Get<Parameters::OwnerCellsFirst>();
+
 #if HAVE_MPI
-        partitionMethod_   = Dune::PartitionMethod(Parameters::Get<Parameters::PartitionMethod>());
-        serialPartitioning_ = Parameters::Get<Parameters::SerialPartitioning>();
-        zoltanParams_ = Parameters::Get<Parameters::ZoltanParams>();
+    numOverlap_ = Parameters::Get<Parameters::NumOverlap>();
+    addCorners_ = Parameters::Get<Parameters::AddCorners>();
+    partitionMethod_ = Dune::PartitionMethod(Parameters::Get<Parameters::PartitionMethod>());
+    serialPartitioning_ = Parameters::Get<Parameters::SerialPartitioning>();
+    zoltanParams_ = Parameters::Get<Parameters::ZoltanParams>();
 
-        metisParams_ = Parameters::Get<Parameters::MetisParams>();
+    metisParams_ = Parameters::Get<Parameters::MetisParams>();
 
-        externalPartitionFile_ = Parameters::Get<Parameters::ExternalPartition>();
-#endif
-        enableDistributedWells_ = Parameters::Get<Parameters::AllowDistributedWells>();
-        enableEclOutput_ = Parameters::Get<Parameters::EnableEclOutput>();
-        allow_splitting_inactive_wells_ = Parameters::Get<Parameters::AllowSplittingInactiveWells>();
-        ignoredKeywords_ = Parameters::Get<Parameters::IgnoreKeywords>();
-        int output_param = Parameters::Get<Parameters::EclOutputInterval>();
-        if (output_param >= 0) {
-            outputInterval_ = output_param;
-        }
-        useMultisegmentWell_ = Parameters::Get<Parameters::UseMultisegmentWell>();
+    externalPartitionFile_ = Parameters::Get<Parameters::ExternalPartition>();
+#endif // HAVE_MPI
+
+    enableDistributedWells_ = Parameters::Get<Parameters::AllowDistributedWells>();
+    enableEclOutput_ = Parameters::Get<Parameters::EnableEclOutput>();
+    allow_splitting_inactive_wells_ = Parameters::Get<Parameters::AllowSplittingInactiveWells>();
+    ignoredKeywords_ = Parameters::Get<Parameters::IgnoreKeywords>();
+
+    const int output_param = Parameters::Get<Parameters::EclOutputInterval>();
+    if (output_param >= 0) {
+        outputInterval_ = output_param;
+    }
+
+    useMultisegmentWell_ = Parameters::Get<Parameters::UseMultisegmentWell>();
 }
 
 FlowGenericVanguard::SimulationModelParams
@@ -447,13 +453,18 @@ void FlowGenericVanguard::registerParameters_()
 #if HAVE_OPENCL || HAVE_ROCSPARSE || HAVE_CUDA
     Parameters::Register<Parameters::NumJacobiBlocks>
         ("Number of blocks to be created for the Block-Jacobi preconditioner.");
-#endif
+#endif // HAVE_OPENCL || HAVE_ROCSPARSE || HAVE_CUDA
 
     Parameters::Register<Parameters::OwnerCellsFirst>
         ("Order cells owned by rank before ghost/overlap cells.");
 #if HAVE_MPI
+    Parameters::Register<Parameters::AddCorners>
+        ("Add corners to partition.");
+    Parameters::Register<Parameters::NumOverlap>
+        ("Numbers of layers overlap in parallel partition");
     Parameters::Register<Parameters::PartitionMethod>
-        ("Choose partitioning strategy: 0=simple, 1=Zoltan, 2=METIS, 3=Zoltan with all cells of well represented by one vertex.");
+        ("Choose partitioning strategy: 0=simple, 1=Zoltan, 2=METIS, "
+         "3=Zoltan with all cells of well represented by one vertex.");
     Parameters::Register<Parameters::SerialPartitioning>
         ("Perform partitioning for parallel runs on a single process.");
     Parameters::Register<Parameters::ZoltanImbalanceTol<Scalar>>
@@ -482,7 +493,8 @@ void FlowGenericVanguard::registerParameters_()
 
     Parameters::Hide<Parameters::ZoltanImbalanceTol<Scalar>>();
     Parameters::Hide<Parameters::ZoltanParams>();
-#endif
+#endif // HAVE_MPI
+
     Parameters::Register<Parameters::AllowDistributedWells>
         ("Allow the perforations of a well to be distributed to interior of multiple processes");
     Parameters::Register<Parameters::AllowSplittingInactiveWells>
@@ -496,6 +508,6 @@ template void FlowGenericVanguard::registerParameters_<double>();
 
 #if FLOW_INSTANTIATE_FLOAT
 template void FlowGenericVanguard::registerParameters_<float>();
-#endif
+#endif // FLOW_INSTANTIATE_FLOAT
 
 } // namespace Opm

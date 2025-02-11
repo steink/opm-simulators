@@ -144,6 +144,8 @@ template<class ElementMapper, class GridView, class Scalar>
 void GenericCpGridVanguard<ElementMapper, GridView, Scalar>::
 doLoadBalance_(const Dune::EdgeWeightMethod             edgeWeightsMethod,
                const bool                               ownersFirst,
+               const bool                               addCorners,
+               const int                                numOverlap,
                const Dune::PartitionMethod              partitionMethod,
                const bool                               serialPartitioning,
                const bool                               enableDistributedWells,
@@ -176,7 +178,11 @@ doLoadBalance_(const Dune::EdgeWeightMethod             edgeWeightsMethod,
         auto loadBalancerSet = static_cast<int>(externalLoadBalancer.has_value());
         this->grid_->comm().broadcast(&loadBalancerSet, 1, 0);
 
-        if ((this->grid_->size(0) > 0) && (enableEclOutput || loadBalancerSet == 0 || partitionJacobiBlocks)) {
+        if ((this->grid_->size(0) > 0) &&
+            (enableEclOutput ||
+             (loadBalancerSet == 0) ||
+             partitionJacobiBlocks))
+        {
             this->allocTrans();
         }
 
@@ -200,7 +206,8 @@ doLoadBalance_(const Dune::EdgeWeightMethod             edgeWeightsMethod,
         const auto& possibleFutureConnections = schedule.getPossibleFutureConnections();
         // Distribute the grid and switch to the distributed view.
         if (mpiSize > 1) {
-            this->distributeGrid(edgeWeightsMethod, ownersFirst, partitionMethod,
+            this->distributeGrid(edgeWeightsMethod, ownersFirst,
+                                 addCorners, numOverlap, partitionMethod,
                                  serialPartitioning, enableDistributedWells,
                                  imbalanceTol, loadBalancerSet != 0,
                                  faceTrans, wells,
@@ -328,6 +335,8 @@ void
 GenericCpGridVanguard<ElementMapper, GridView, Scalar>::
 distributeGrid(const Dune::EdgeWeightMethod                          edgeWeightsMethod,
                const bool                                            ownersFirst,
+               const bool                                            addCorners,
+               const int                                             numOverlap,
                const Dune::PartitionMethod                           partitionMethod,
                const bool                                            serialPartitioning,
                const bool                                            enableDistributedWells,
@@ -342,10 +351,12 @@ distributeGrid(const Dune::EdgeWeightMethod                          edgeWeights
     if (auto* eclState = dynamic_cast<ParallelEclipseState*>(&eclState1);
         eclState != nullptr)
     {
-        this->distributeGrid(edgeWeightsMethod, ownersFirst, partitionMethod,
+        this->distributeGrid(edgeWeightsMethod, ownersFirst, addCorners,
+                             numOverlap, partitionMethod,
                              serialPartitioning, enableDistributedWells,
                              imbalanceTol, loadBalancerSet, faceTrans,
-                             wells, possibleFutureConnections, eclState, parallelWells);
+                             wells, possibleFutureConnections,
+                             eclState, parallelWells);
     }
     else {
         const auto message = std::string {
@@ -366,6 +377,8 @@ void
 GenericCpGridVanguard<ElementMapper, GridView, Scalar>::
 distributeGrid(const Dune::EdgeWeightMethod                          edgeWeightsMethod,
                const bool                                            ownersFirst,
+               const bool                                            addCorners,
+               const int                                             numOverlap,
                const Dune::PartitionMethod                           partitionMethod,
                const bool                                            serialPartitioning,
                const bool                                            enableDistributedWells,
@@ -384,27 +397,29 @@ distributeGrid(const Dune::EdgeWeightMethod                          edgeWeights
         *this->grid_, *eclState
     };
 
-    const auto addCornerCells = false;
-    const auto overlapLayers = 1;
+    const auto addCornerCells = addCorners;
+    const auto overlapLayers = numOverlap;
 
     if (loadBalancerSet) {
         auto parts = isIORank
             ? (*externalLoadBalancer)(*this->grid_)
             : std::vector<int>{};
-        //For this case, simple partitioning is selected automatically
-        parallelWells =
-            std::get<1>(this->grid_->loadBalance(handle, parts, &wells, possibleFutureConnections, ownersFirst,
-                                                 addCornerCells, overlapLayers));
+
+        // For this case, simple partitioning is selected automatically.
+        parallelWells = std::get<1>
+            (this->grid_->loadBalance(handle, parts, &wells,
+                                      possibleFutureConnections, ownersFirst,
+                                      addCornerCells, overlapLayers));
     }
     else {
-        parallelWells =
-            std::get<1>(this->grid_->loadBalance(handle, edgeWeightsMethod,
-                                                 &wells, possibleFutureConnections,
-                                                 serialPartitioning,
-                                                 faceTrans.data(), ownersFirst,
-                                                 addCornerCells, overlapLayers,
-                                                 partitionMethod, imbalanceTol,
-                                                 enableDistributedWells));
+        parallelWells = std::get<1>
+            (this->grid_->loadBalance(handle, edgeWeightsMethod,
+                                      &wells, possibleFutureConnections,
+                                      serialPartitioning,
+                                      faceTrans.data(), ownersFirst,
+                                      addCornerCells, overlapLayers,
+                                      partitionMethod, imbalanceTol,
+                                      enableDistributedWells));
     }
 }
 
@@ -413,12 +428,14 @@ distributeGrid(const Dune::EdgeWeightMethod                          edgeWeights
 template<class ElementMapper, class GridView, class Scalar>
 void GenericCpGridVanguard<ElementMapper,GridView,Scalar>::doCreateGrids_(EclipseState& eclState)
 {
-    const EclipseGrid* input_grid = nullptr;
-    std::vector<double> global_porv;
+    const auto isRoot = this->mpiRank == 0;
+
     // At this stage the ParallelEclipseState instance is still in global
     // view; on rank 0 we have undistributed data for the entire grid, on
     // the other ranks the EclipseState is empty.
-    if (mpiRank == 0) {
+    const EclipseGrid* input_grid = nullptr;
+    std::vector<double> global_porv;
+    if (isRoot) {
         input_grid = &eclState.getInputGrid();
         global_porv = eclState.fieldProps().porv(true);
         OpmLog::info("\nProcessing grid");
@@ -426,6 +443,7 @@ void GenericCpGridVanguard<ElementMapper,GridView,Scalar>::doCreateGrids_(Eclips
 
     // --- Create grid ---
     OPM_TIMEBLOCK(createGrids);
+
 #if HAVE_MPI
     this->grid_ = std::make_unique<Dune::CpGrid>(FlowGenericVanguard::comm());
 #else
@@ -433,14 +451,14 @@ void GenericCpGridVanguard<ElementMapper,GridView,Scalar>::doCreateGrids_(Eclips
 #endif
 
     // Note: removed_cells is guaranteed to be empty on ranks other than 0.
-    auto removed_cells =
-        this->grid_->processEclipseFormat(input_grid,
-                                          &eclState,
-                                          /*isPeriodic=*/false,
-                                          /*flipNormals=*/false,
-                                          /*clipZ=*/false);
+    auto removed_cells = this->grid_
+        ->processEclipseFormat(input_grid,
+                               &eclState,
+                               /* isPeriodic = */ false,
+                               /* flipNormals = */ false,
+                               /* clipZ = */ false);
 
-    if (mpiRank == 0) {
+    if (isRoot) {
         const auto& active_porv = eclState.fieldProps().porv(false);
         const auto& unit_system = eclState.getUnits();
         const auto& volume_unit = unit_system.name( UnitSystem::measure::volume);
@@ -465,45 +483,38 @@ void GenericCpGridVanguard<ElementMapper,GridView,Scalar>::doCreateGrids_(Eclips
 
     // --- Add LGRs and update Leaf Grid View ---
     // Check if input file contains Lgrs.
-    const auto& lgrs = eclState.getLgrs();
-    const auto lgrsSize = lgrs.size();
+    //
     // If there are lgrs, create the grid with them, and update the leaf grid view.
-    if (lgrsSize)
-    {
+    if (const auto& lgrs = eclState.getLgrs(); lgrs.size() > 0) {
         OpmLog::info("\nAdding LGRs to the grid and updating its leaf grid view");
-        this->addLgrsUpdateLeafView(lgrs, lgrsSize, *(this->grid_));
+        this->addLgrsUpdateLeafView(lgrs, lgrs.size(), *this->grid_);
     }
 
 #if HAVE_MPI
-    {
-        const bool has_numerical_aquifer = eclState.aquifer().hasNumericalAquifer();
-        int mpiSize = 1;
-        MPI_Comm_size(grid_->comm(), &mpiSize);
+    if (this->grid_->comm().size() > 1) {
+        // Numerical aquifers generate new NNCs during grid processing.  We
+        // need to distribute these NNCs from the root process to all other
+        // MPI processes.
+        if (eclState.aquifer().hasNumericalAquifer()) {
+            auto nnc_input = eclState.getInputNNC();
+            Parallel::MpiSerializer ser(this->grid_->comm());
+            ser.broadcast(nnc_input);
 
-        // when there is numerical aquifers, new NNC are generated during
-        // grid processing we need to pass the NNC from root process to
-        // other processes
-        if ( mpiSize > 1)
-        {
-            if (has_numerical_aquifer) {
-                auto nnc_input = eclState.getInputNNC();
-                Parallel::MpiSerializer ser(grid_->comm());
-                ser.broadcast(nnc_input);
-                if (mpiRank > 0) {
-                    eclState.setInputNNC(nnc_input);
-                }
+            if (! isRoot) {
+                eclState.setInputNNC(nnc_input);
             }
-            bool hasPinchNnc = eclState.hasPinchNNC();
-            grid_->comm().broadcast(&hasPinchNnc, 1, 0);
+        }
 
-            if(hasPinchNnc)
-            {
-                auto pinch_nnc = eclState.getPinchNNC();
-                Parallel::MpiSerializer ser(grid_->comm());
-                ser.broadcast(pinch_nnc);
-                if (mpiRank > 0) {
-                    eclState.setPinchNNC(std::move(pinch_nnc));
-                }
+        bool hasPinchNnc = eclState.hasPinchNNC();
+        grid_->comm().broadcast(&hasPinchNnc, 1, 0);
+
+        if (hasPinchNnc) {
+            auto pinch_nnc = eclState.getPinchNNC();
+            Parallel::MpiSerializer ser(this->grid_->comm());
+            ser.broadcast(pinch_nnc);
+
+            if (! isRoot) {
+                eclState.setPinchNNC(std::move(pinch_nnc));
             }
         }
     }
@@ -518,21 +529,20 @@ void GenericCpGridVanguard<ElementMapper,GridView,Scalar>::doCreateGrids_(Eclips
     //
     // After loadbalance, grid_ will contain a global and distribute view.
     // equilGrid_ being a shallow copy only the global view.
-    if (mpiRank == 0)
-    {
-        equilGrid_.reset(new Dune::CpGrid(*grid_));
-        equilCartesianIndexMapper_ = std::make_unique<CartesianIndexMapper>(*equilGrid_);
+    if (isRoot) {
+        this->equilGrid_ = std::make_unique<Dune::CpGrid>(*this->grid_);
+        this->equilCartesianIndexMapper_ =
+            std::make_unique<CartesianIndexMapper>(*this->equilGrid_);
 
-        eclState.reset_actnum(UgGridHelpers::createACTNUM(*grid_));
+        eclState.reset_actnum(UgGridHelpers::createACTNUM(*this->grid_));
         eclState.set_active_indices(this->grid_->globalCell());
     }
 
     {
         auto size = removed_cells.size();
-
         this->grid_->comm().broadcast(&size, 1, 0);
 
-        if (mpiRank != 0) {
+        if (! isRoot) {
             removed_cells.resize(size);
         }
 

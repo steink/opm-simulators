@@ -66,7 +66,7 @@ struct MetisParams { static constexpr auto value = "default"; };
 
 #if HAVE_OPENCL || HAVE_ROCSPARSE || HAVE_CUDA
 struct NumJacobiBlocks { static constexpr int value = 0; };
-#endif
+#endif // HAVE_OPENCL || HAVE_ROCSPARSE || HAVE_CUDA
 
 struct OwnerCellsFirst { static constexpr bool value = true; };
 struct ParsingStrictness { static constexpr auto value = "normal"; };
@@ -75,6 +75,8 @@ struct ActionParsingStrictness { static constexpr auto value = "normal"; };
 /// 0: simple, 1: Zoltan, 2: METIS, 3: Zoltan with a all cells of a well
 /// represented by one vertex in the graph, see GridEnums.hpp
 struct PartitionMethod { static constexpr int value = 3; };
+struct AddCorners { static constexpr bool value = false; };
+struct NumOverlap { static constexpr int value = 1; };
 
 struct SchedRestart{ static constexpr bool value = false; };
 struct SerialPartitioning{ static constexpr bool value = false; };
@@ -246,7 +248,7 @@ public:
         return numJacobiBlocks_;
 #else
         return 0;
-#endif
+#endif // HAVE_OPENCL || HAVE_ROCSPARSE || HAVE_CUDA
     }
 
     /*!
@@ -256,11 +258,18 @@ public:
     { return ownersFirst_; }
 
 #if HAVE_MPI
+    bool addCorners() const
+    { return addCorners_; }
+
+    int numOverlap() const
+    { return numOverlap_; }
+
     /*!
      * \brief Parameter deciding which partition method to use
      */
     Dune::PartitionMethod partitionMethod() const
     { return partitionMethod_; }
+
     /*!
      * \brief Parameter that decides if partitioning for parallel runs
      *        should be performed on a single process only.
@@ -269,12 +278,15 @@ public:
     { return serialPartitioning_; }
 
     /*!
-     * \brief Parameter that sets the imbalance tolarance, depending on the chosen partition method
+     * \brief Parameter that sets the imbalance tolarance, depending on the
+     * chosen partition method
      */
     double imbalanceTol() const
     {
         if (zoltanImbalanceTolSet_) {
-            OpmLog::info("The parameter --zoltan-imbalance-tol is deprecated and has been renamed to --imbalance-tol, please adjust your calls and scripts!");
+            OpmLog::info("The parameter --zoltan-imbalance-tol is deprecated "
+                         "and has been renamed to --imbalance-tol, please "
+                         "adjust your calls and scripts!");
             return zoltanImbalanceTol_;
         } else {
             return imbalanceTol_;
@@ -285,7 +297,7 @@ public:
     {
         return this->externalPartitionFile_;
     }
-#endif
+#endif // HAVE_MPI
 
     /*!
      * \brief Whether perforations of a well might be distributed.
@@ -294,14 +306,16 @@ public:
     { return enableDistributedWells_; }
 
     /*!
-     * \brief Wheter to write binary output which is compatible with the commercial Eclipse simulator.
+     * \brief Whether or not to emit result files that are compatible with
+     * a commercial reservoir simulator.
      */
     bool enableEclOutput() const
     { return enableEclOutput_; }
 
     /*!
-     * \brief Returns vector with name and whether the has local perforated cells
-     *        for all wells.
+     * \brief Retrieve collection (a vector of pairs) of well names and
+     * whether or not the corresponding well objects are perforated on the
+     * current rank.
      *
      * Will only have usable values for CpGrid.
      */
@@ -315,7 +329,7 @@ public:
     //! \brief Obtain global communicator.
     static Parallel::Communication& comm()
     {
-        assert(comm_);
+        assert(comm_ != nullptr);
         return *comm_;
     }
 
@@ -353,10 +367,13 @@ protected:
 
 #if HAVE_OPENCL || HAVE_ROCSPARSE || HAVE_CUDA
     int numJacobiBlocks_{0};
-#endif
+#endif // HAVE_OPENCL || HAVE_ROCSPARSE || HAVE_CUDA
 
     bool ownersFirst_;
 #if HAVE_MPI
+    bool addCorners_;
+    int numOverlap_;
+
     Dune::PartitionMethod partitionMethod_;
     bool serialPartitioning_;
     double imbalanceTol_;
@@ -368,7 +385,8 @@ protected:
     std::string metisParams_;
 
     std::string externalPartitionFile_{};
-#endif
+#endif // HAVE_MPI
+
     bool enableDistributedWells_;
     bool enableEclOutput_;
     bool allow_splitting_inactive_wells_;

@@ -66,107 +66,6 @@
 
 namespace {
 
-std::string EclString(const Opm::Inplace::Phase phase)
-{
-    switch (phase) {
-    case Opm::Inplace::Phase::WATER:
-        return "WIP";
-
-    case Opm::Inplace::Phase::OIL:
-        return "OIP";
-
-    case Opm::Inplace::Phase::GAS:
-        return "GIP";
-
-    case Opm::Inplace::Phase::OilInLiquidPhase:
-        return "OIPL";
-
-    case Opm::Inplace::Phase::OilInGasPhase:
-        return "OIPG";
-
-    case Opm::Inplace::Phase::GasInLiquidPhase:
-        return "GIPL";
-
-    case Opm::Inplace::Phase::GasInGasPhase:
-        return "GIPG";
-
-    case Opm::Inplace::Phase::PoreVolume:
-        return "RPV";
-
-    case Opm::Inplace::Phase::WaterResVolume:
-        return "WIPR";
-
-    case Opm::Inplace::Phase::OilResVolume:
-        return "OIPR";
-
-    case Opm::Inplace::Phase::GasResVolume:
-        return "GIPR";
-
-    case Opm::Inplace::Phase::SALT:
-        return "SIP";
-
-    case Opm::Inplace::Phase::CO2InWaterPhase:
-        return "WCD";
-
-    case Opm::Inplace::Phase::CO2InGasPhaseInMob:
-        return "GCDI";
-
-    case Opm::Inplace::Phase::CO2InGasPhaseMob:
-        return "GCDM";
-
-    case Opm::Inplace::Phase::CO2InGasPhaseInMobKrg:
-        return "GKDI";
-
-    case Opm::Inplace::Phase::CO2InGasPhaseMobKrg:
-        return "GKDM";
-
-    case Opm::Inplace::Phase::WaterInGasPhase:
-        return "WIPG";
-
-    case Opm::Inplace::Phase::WaterInWaterPhase:
-        return "WIPL";
-
-    case Opm::Inplace::Phase::CO2Mass:
-        return "GMIP";
-
-    case Opm::Inplace::Phase::CO2MassInWaterPhase:
-        return "GMDS";
-
-    case Opm::Inplace::Phase::CO2MassInGasPhase:
-        return "GMGP";
-
-    case Opm::Inplace::Phase::CO2MassInGasPhaseInMob:
-        return "GCDI_KG"; //Not used
-        
-    case Opm::Inplace::Phase::CO2MassInGasPhaseMob:
-        return "GKDM_KG"; //Not used
-
-    case Opm::Inplace::Phase::CO2MassInGasPhaseInMobKrg:
-        return "GKTR";
-        
-    case Opm::Inplace::Phase::CO2MassInGasPhaseMobKrg:
-        return "GKMO";
-
-    case Opm::Inplace::Phase::CO2MassInGasPhaseMaximumTrapped:
-        return "GMTR";
-
-    case Opm::Inplace::Phase::CO2MassInGasPhaseMaximumUnTrapped:
-        return "GMMO";
-
-    case Opm::Inplace::Phase::CO2MassInGasPhaseEffectiveTrapped:
-        return "GMST";
-
-    case Opm::Inplace::Phase::CO2MassInGasPhaseEffectiveUnTrapped:
-        return "GMUS";
-
-    default:
-        throw std::logic_error {
-            fmt::format("Phase enum with integer value: "
-                        "{} not recognized", static_cast<int>(phase))
-        };
-    }
-}
-
     std::size_t numCells(const Opm::EclipseState& eclState)
     {
         return eclState.fieldProps().get_int("FIPNUM").size();
@@ -239,7 +138,7 @@ GenericOutputBlackoilModule(const EclipseState& eclState,
     this->RPRPNodes_ = summaryConfig_.keywords("RPRP*");
 
     for (const auto& phase : Inplace::phases()) {
-        std::string key_pattern = "R" + EclString(phase) + "*";
+        std::string key_pattern = "R" + Inplace::EclString(phase) + "*";
         this->regionNodes_[phase] = summaryConfig_.keywords(key_pattern);
     }
 
@@ -511,9 +410,9 @@ void GenericOutputBlackoilModule<FluidSystem>::
 assignToSolution(data::Solution& sol)
 {
     using DataEntry =
-        std::tuple<std::string, UnitSystem::measure, const std::vector<Scalar>&>;
+        std::tuple<std::string, UnitSystem::measure, std::vector<Scalar>&>;
 
-    auto doInsert = [&sol](const DataEntry&       entry,
+    auto doInsert = [&sol](DataEntry&       entry,
                            const data::TargetType target)
     {
         if (std::get<2>(entry).empty()) {
@@ -527,12 +426,15 @@ assignToSolution(data::Solution& sol)
     };
 
     // if index not specified, we treat it as valid (>= 0)
-    auto addEntry = [](std::vector<DataEntry>& container, const std::string& name, UnitSystem::measure measure, const auto& flowArray, int index = 1) {
+    auto addEntry = [](std::vector<DataEntry>& container,
+                       const std::string& name,
+                       UnitSystem::measure measure,
+                       auto& flowArray, int index = 1)
+    {
         if (index >= 0) {  // Only add if index is valid
             container.emplace_back(name, measure, flowArray);
         }
     };
-
 
     std::vector<DataEntry> baseSolutionVector;
     addEntry(baseSolutionVector, "1OVERBG",  UnitSystem::measure::gas_inverse_formation_volume_factor,   invB_[gasPhaseIdx],                                              gasPhaseIdx);
@@ -611,25 +513,10 @@ assignToSolution(data::Solution& sol)
     addEntry(flowsSolutionVector, "FLRWATJ-", UnitSystem::measure::rate,                flores_[FaceDir::ToIntersectionIndex(Dir::YMinus)][waterCompIdx], waterCompIdx);
     addEntry(flowsSolutionVector, "FLRWATK-", UnitSystem::measure::rate,                flores_[FaceDir::ToIntersectionIndex(Dir::ZMinus)][waterCompIdx], waterCompIdx);
 
-    const auto extendedSolutionArrays = std::array {
-        DataEntry{"BIOFILM",  UnitSystem::measure::identity,           cBiofilm_},
-        DataEntry{"CALCITE",  UnitSystem::measure::identity,           cCalcite_},
-        DataEntry{"DELSTRXX", UnitSystem::measure::pressure,           delstressXX_},
-        DataEntry{"DELSTRYY", UnitSystem::measure::pressure,           delstressYY_},
-        DataEntry{"DELSTRZZ", UnitSystem::measure::pressure,           delstressZZ_},
-        DataEntry{"DELSTRXY", UnitSystem::measure::pressure,           delstressXY_},
-        DataEntry{"DELSTRXZ", UnitSystem::measure::pressure,           delstressXZ_},
-        DataEntry{"DELSTRYZ", UnitSystem::measure::pressure,           delstressYZ_},
-        DataEntry{"DISPX",    UnitSystem::measure::length,             dispX_},
-        DataEntry{"DISPY",    UnitSystem::measure::length,             dispY_},
-        DataEntry{"DISPZ",    UnitSystem::measure::length,             dispZ_},
+    auto extendedSolutionArrays = std::array {
         DataEntry{"DRSDTCON", UnitSystem::measure::gas_oil_ratio_rate, drsdtcon_},
-        DataEntry{"MECHPOTF", UnitSystem::measure::pressure,           mechPotentialForce_},
-        DataEntry{"MICROBES", UnitSystem::measure::density,            cMicrobes_},
-        DataEntry{"OXYGEN",   UnitSystem::measure::density,            cOxygen_},
         DataEntry{"PERMFACT", UnitSystem::measure::identity,           permFact_},
         DataEntry{"PORV_RC",  UnitSystem::measure::identity,           rockCompPorvMultiplier_},
-        DataEntry{"PRESPOTF", UnitSystem::measure::pressure,           mechPotentialPressForce_},
         DataEntry{"PRES_OVB", UnitSystem::measure::pressure,           overburdenPressure_},
         DataEntry{"RSW",      UnitSystem::measure::gas_oil_ratio,      rsw_},
         DataEntry{"RSWSAT",   UnitSystem::measure::gas_oil_ratio,      gasDissolutionFactorInWater_},
@@ -637,27 +524,7 @@ assignToSolution(data::Solution& sol)
         DataEntry{"RVW",      UnitSystem::measure::oil_gas_ratio,      rvw_},
         DataEntry{"RVWSAT",   UnitSystem::measure::oil_gas_ratio,      waterVaporizationFactor_},
         DataEntry{"SALTP",    UnitSystem::measure::identity,           pSalt_},
-        DataEntry{"SS_X",     UnitSystem::measure::identity,           extboX_},
-        DataEntry{"SS_Y",     UnitSystem::measure::identity,           extboY_},
-        DataEntry{"SS_Z",     UnitSystem::measure::identity,           extboZ_},
-        DataEntry{"STD_CO2",  UnitSystem::measure::identity,           mFracCo2_},
-        DataEntry{"STD_GAS",  UnitSystem::measure::identity,           mFracGas_},
-        DataEntry{"STD_OIL",  UnitSystem::measure::identity,           mFracOil_},
-        DataEntry{"STRAINXX", UnitSystem::measure::identity,           strainXX_},
-        DataEntry{"STRAINYY", UnitSystem::measure::identity,           strainYY_},
-        DataEntry{"STRAINZZ", UnitSystem::measure::identity,           strainZZ_},
-        DataEntry{"STRAINXY", UnitSystem::measure::identity,           strainXY_},
-        DataEntry{"STRAINXZ", UnitSystem::measure::identity,           strainXZ_},
-        DataEntry{"STRAINYZ", UnitSystem::measure::identity,           strainYZ_},
-        DataEntry{"STRESSXX", UnitSystem::measure::length,             stressXX_},
-        DataEntry{"STRESSYY", UnitSystem::measure::length,             stressYY_},
-        DataEntry{"STRESSZZ", UnitSystem::measure::length,             stressZZ_},
-        DataEntry{"STRESSXY", UnitSystem::measure::length,             stressXY_},
-        DataEntry{"STRESSXZ", UnitSystem::measure::length,             stressXZ_},
-        DataEntry{"STRESSYZ", UnitSystem::measure::length,             stressYZ_},
-        DataEntry{"TEMPPOTF", UnitSystem::measure::pressure,           mechPotentialTempForce_},
         DataEntry{"TMULT_RC", UnitSystem::measure::identity,           rockCompTransMultiplier_},
-        DataEntry{"UREA",     UnitSystem::measure::density,            cUrea_},
     };
 
     // basically, for compositional, we can not use std::array for this.  We need to generate the ZMF1, ZMF2, and so on
@@ -687,24 +554,31 @@ assignToSolution(data::Solution& sol)
             }
         }
 
-        for (const auto& array: compositionalEntries) {
+        for (auto& array: compositionalEntries) {
             doInsert(array, data::TargetType::RESTART_SOLUTION);
         }
     }
 
-    for (const auto& array : baseSolutionVector) {
+    for (auto& array : baseSolutionVector) {
         doInsert(array, data::TargetType::RESTART_SOLUTION);
     }
 
     if (this->enableFlows_) {
-        for (const auto& array : flowsSolutionVector) {
+        for (auto& array : flowsSolutionVector) {
             doInsert(array, data::TargetType::RESTART_SOLUTION);
         }
     }
 
-    for (const auto& array : extendedSolutionArrays) {
+    if (this->micpC_.allocated()) {
+        this->micpC_.outputRestart(sol);
+    }
+
+    for (auto& array : extendedSolutionArrays) {
         doInsert(array, data::TargetType::RESTART_OPM_EXTENDED);
     }
+
+    this->mech_.outputRestart(sol);
+    this->extboC_.outputRestart(sol);
 
     if (! this->temperature_.empty())
     {
@@ -797,53 +671,7 @@ assignToSolution(data::Solution& sol)
     }
 
     // Fluid in place
-    if (this->outputFipRestart_) {
-        using namespace std::string_literals;
-
-        using M = UnitSystem::measure;
-        using FIPEntry = std::tuple<std::string, M, Inplace::Phase>;
-
-        auto fipArrays = std::vector<FIPEntry> {};
-        if (this->outputFipRestart_.surface) {
-            fipArrays.insert(fipArrays.end(), {
-                    FIPEntry {"SFIPOIL"s, M::liquid_surface_volume, Inplace::Phase::OIL   },
-                    FIPEntry {"SFIPWAT"s, M::liquid_surface_volume, Inplace::Phase::WATER },
-                    FIPEntry {"SFIPGAS"s, M::gas_surface_volume,    Inplace::Phase::GAS   },
-                });
-        }
-
-        if (this->outputFipRestart_.reservoir) {
-            fipArrays.insert(fipArrays.end(), {
-                    FIPEntry {"RFIPOIL"s, M::volume, Inplace::Phase::OilResVolume   },
-                    FIPEntry {"RFIPWAT"s, M::volume, Inplace::Phase::WaterResVolume },
-                    FIPEntry {"RFIPGAS"s, M::volume, Inplace::Phase::GasResVolume   },
-                });
-        }
-
-        if (this->outputFipRestart_.noPrefix && !this->outputFipRestart_.surface) {
-            fipArrays.insert(fipArrays.end(), {
-                    FIPEntry { "FIPOIL"s, M::liquid_surface_volume, Inplace::Phase::OIL   },
-                    FIPEntry { "FIPWAT"s, M::liquid_surface_volume, Inplace::Phase::WATER },
-                    FIPEntry { "FIPGAS"s, M::gas_surface_volume,    Inplace::Phase::GAS   },
-                });
-        }
-
-        for (const auto& [mnemonic, unit, phase] : fipArrays) {
-            if (! this->fip_[phase].empty()) {
-                sol.insert(mnemonic, unit, std::move(this->fip_[phase]),
-                           data::TargetType::RESTART_SOLUTION);
-            }
-        }
-
-        for (const auto& phase : Inplace::mixingPhases()) {
-            if (! this->fip_[phase].empty()) {
-                sol.insert(EclString(phase),
-                           UnitSystem::measure::volume,
-                           this->fip_[phase],
-                           data::TargetType::SUMMARY);
-            }
-        }
-    }
+    this->fipC_.outputRestart(sol);
 
     // Tracers
     if (! this->freeTracerConcentrations_.empty()) {
@@ -929,11 +757,7 @@ setRestart(const data::Solution& sol,
     };
 
     const auto fields = std::array{
-        std::pair{"BIOFILM",  &cBiofilm_},
-        std::pair{"CALCITE",  &cCalcite_},
         std::pair{"FOAM",     &cFoam_},
-        std::pair{"MICROBES", &cMicrobes_},
-        std::pair{"OXYGEN",   &cOxygen_},
         std::pair{"PERMFACT", &permFact_},
         std::pair{"POLYMER",  &cPolymer_},
         std::pair{"PPCW",     &ppcw_},
@@ -951,12 +775,15 @@ setRestart(const data::Solution& sol,
         std::pair{"SWHY1",    &swmin_},
         std::pair{"SWMAX",    &swMax_},
         std::pair{"TEMP",     &temperature_},
-        std::pair{"UREA",     &cUrea_},
     };
 
     std::for_each(fields.begin(), fields.end(),
                   [&assign](const auto& p)
                   { assign(p.first, *p.second); });
+
+    if (this->micpC_.allocated()) {
+        this->micpC_.readRestart(globalDofIndex, elemIdx, sol);
+    }
 }
 
 template<class FluidSystem>
@@ -1026,37 +853,10 @@ doAllocBuffers(const unsigned bufferSize,
     }
 
     // Fluid in place
-    {
-        using namespace std::string_literals;
-
-        const auto fipctrl = std::array {
-            std::pair { "FIP"s , &OutputFIPRestart::noPrefix  },
-            std::pair { "SFIP"s, &OutputFIPRestart::surface   },
-            std::pair { "RFIP"s, &OutputFIPRestart::reservoir },
-        };
-
-        this->outputFipRestart_.clearBits();
-        this->computeFip_ = false;
-
-        for (const auto& [mnemonic, kind] : fipctrl) {
-            if (auto fipPos = rstKeywords.find(mnemonic);
-                fipPos != rstKeywords.end())
-            {
-                fipPos->second = 0;
-                this->outputFipRestart_.*kind = true;
-            }
-        }
-
-        for (const auto& phase : Inplace::phases()) {
-            if (!substep || summaryConfig_.require3DField(EclString(phase))) {
-                this->fip_[phase].resize(bufferSize, 0.0);
-                this->computeFip_ = true;
-            }
-            else {
-                this->fip_[phase].clear();
-            }
-        }
-    }
+    this->computeFip_ = this->fipC_.allocate(bufferSize,
+                                             summaryConfig_,
+                                             !substep,
+                                             rstKeywords);
 
     const auto needAvgPress = !substep         ||
         !this->RPRNodes_.empty()               ||
@@ -1068,7 +868,7 @@ doAllocBuffers(const unsigned bufferSize,
         this->summaryConfig_.match("RHPV*");
 
     if (needPoreVolume) {
-        this->fip_[Inplace::Phase::PoreVolume].resize(bufferSize, 0.0);
+        this->fipC_.add(Inplace::Phase::PoreVolume);
         this->dynamicPoreVolume_.resize(bufferSize, 0.0);
         this->hydrocarbonPoreVolume_.resize(bufferSize, 0.0);
     }
@@ -1154,63 +954,7 @@ doAllocBuffers(const unsigned bufferSize,
     rstKeywords["PRESSURE"] = 0;
 
     if (enableMech_ && eclState_.runspec().mech()) {
-        this->mechPotentialForce_.resize(bufferSize,0.0);
-        rstKeywords["MECHPOTF"] = 0;
-        this->mechPotentialTempForce_.resize(bufferSize,0.0);
-        rstKeywords["TEMPPOTF"] = 0;
-        this->mechPotentialPressForce_.resize(bufferSize,0.0);
-        rstKeywords["PRESPOTF"] = 0;
-
-        this->dispX_.resize(bufferSize,0.0);
-        rstKeywords["DISPX"] = 0;
-        this->dispY_.resize(bufferSize,0.0);
-        rstKeywords["DISPY"] = 0;
-        this->dispZ_.resize(bufferSize,0.0);
-        rstKeywords["DISPZ"] = 0;
-        this->stressXX_.resize(bufferSize,0.0);
-        rstKeywords["STRESSXX"] = 0;
-        this->stressYY_.resize(bufferSize,0.0);
-        rstKeywords["STRESSYY"] = 0;
-        this->stressZZ_.resize(bufferSize,0.0);
-        rstKeywords["STRESSZZ"] = 0;
-        this->stressXY_.resize(bufferSize,0.0);
-        rstKeywords["STRESSXY"] = 0;
-        this->stressXZ_.resize(bufferSize,0.0);
-        rstKeywords["STRESSXZ"] = 0;
-        this->stressXY_.resize(bufferSize,0.0);
-        rstKeywords["STRESSXY"] = 0;
-        this->stressYZ_.resize(bufferSize,0.0);
-        rstKeywords["STRESSYZ"] = 0;
-
-        this->strainXX_.resize(bufferSize,0.0);
-        rstKeywords["STRAINXX"] = 0;
-        this->strainYY_.resize(bufferSize,0.0);
-        rstKeywords["STRAINYY"] = 0;
-        this->strainZZ_.resize(bufferSize,0.0);
-        rstKeywords["STRAINZZ"] = 0;
-        this->strainXY_.resize(bufferSize,0.0);
-        rstKeywords["STRAINXY"] = 0;
-        this->strainXZ_.resize(bufferSize,0.0);
-        rstKeywords["STRAINXZ"] = 0;
-        this->strainXY_.resize(bufferSize,0.0);
-        rstKeywords["STRAINXY"] = 0;
-        this->strainYZ_.resize(bufferSize,0.0);
-        rstKeywords["STRAINYZ"] = 0;
-
-        this->delstressXX_.resize(bufferSize,0.0);
-        rstKeywords["DELSTRXX"] = 0;
-        this->delstressYY_.resize(bufferSize,0.0);
-        rstKeywords["DELSTRYY"] = 0;
-        this->delstressZZ_.resize(bufferSize,0.0);
-        rstKeywords["DELSTRZZ"] = 0;
-        this->delstressXY_.resize(bufferSize,0.0);
-        rstKeywords["DELSTRXY"] = 0;
-        this->delstressXZ_.resize(bufferSize,0.0);
-        rstKeywords["DELSTRXZ"] = 0;
-        this->delstressXY_.resize(bufferSize,0.0);
-        rstKeywords["DELSTRXY"] = 0;
-        this->delstressYZ_.resize(bufferSize,0.0);
-        rstKeywords["DELSTRYZ"] = 0;
+        this->mech_.allocate(bufferSize, rstKeywords);
     }
 
     // If TEMP is set in RPTRST we output temperature even if THERMAL
@@ -1276,20 +1020,11 @@ doAllocBuffers(const unsigned bufferSize,
     }
 
     if (enableExtbo_) {
-        extboX_.resize(bufferSize, 0.0);
-        extboY_.resize(bufferSize, 0.0);
-        extboZ_.resize(bufferSize, 0.0);
-        mFracOil_.resize(bufferSize, 0.0);
-        mFracGas_.resize(bufferSize, 0.0);
-        mFracCo2_.resize(bufferSize, 0.0);
+        extboC_.allocate(bufferSize);
     }
 
     if (enableMICP_) {
-        cMicrobes_.resize(bufferSize, 0.0);
-        cOxygen_.resize(bufferSize, 0.0);
-        cUrea_.resize(bufferSize, 0.0);
-        cBiofilm_.resize(bufferSize, 0.0);
-        cCalcite_.resize(bufferSize, 0.0);
+        this->micpC_.allocate(bufferSize);
     }
 
     if (vapparsActive) {
@@ -1691,10 +1426,7 @@ makeRegionSum(Inplace& inplace,
                    this->dynamicPoreVolume_);
 
     for (const auto& phase : Inplace::phases()) {
-        auto fipPos = this->fip_.find(phase);
-        if (fipPos != this->fip_.end()) {
-            update_inplace(phase, fipPos->second);
-        }
+        update_inplace(phase, this->fipC_.get(phase));
     }
 }
 
@@ -1737,7 +1469,7 @@ updateSummaryRegionValues(const Inplace& inplace,
     // The field summary vectors should only use the FIPNUM based region sum.
     {
         for (const auto& phase : Inplace::phases()) {
-            const std::string key = "F" + EclString(phase);
+            const std::string key = "F" + Inplace::EclString(phase);
             if (this->summaryConfig_.hasKeyword(key)) {
                 miscSummaryData[key] = inplace.get(phase);
             }
@@ -1856,6 +1588,8 @@ INSTANTIATE_TYPE(float)
 #define INSTANTIATE_COMP(NUM) \
     template<class T> using FS##NUM = GenericOilGasFluidSystem<T, NUM>; \
     template class GenericOutputBlackoilModule<FS##NUM<double>>;
+
+INSTANTIATE_COMP(0) // \Note: to register the parameter ForceDisableFluidInPlaceOutput
 
 INSTANTIATE_COMP(2)
 INSTANTIATE_COMP(3)

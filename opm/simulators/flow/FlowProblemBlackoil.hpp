@@ -80,8 +80,10 @@ template <class TypeTag>
 class FlowProblemBlackoil : public FlowProblem<TypeTag>
 {
     // TODO: the naming of the Types might be able to be adjusted
+public:
     using FlowProblemType = FlowProblem<TypeTag>;
 
+private:
     using typename FlowProblemType::Scalar;
     using typename FlowProblemType::Simulator;
     using typename FlowProblemType::GridView;
@@ -436,11 +438,14 @@ public:
     void endTimeStep() override
     {
         FlowProblemType::endTimeStep();
+        this->endStepApplyAction();
+    }
 
-        // after the solution is updated, the values in output module needs also updated
+    void endStepApplyAction()
+    {
+        // After the solution is updated, the values in output module needs
+        // also updated.
         this->eclWriter()->mutableOutputModule().invalidateLocalData();
-
-        const bool isSubStep = !this->simulator().episodeWillBeOver();
 
         // For CpGrid with LGRs, ecl/vtk output is not supported yet.
         const auto& grid = this->simulator().vanguard().gridView().grid();
@@ -448,6 +453,8 @@ public:
         using GridType = std::remove_cv_t<std::remove_reference_t<decltype(grid)>>;
         constexpr bool isCpGrid = std::is_same_v<GridType, Dune::CpGrid>;
         if (!isCpGrid || (grid.maxLevel() == 0)) {
+            const bool isSubStep = !this->simulator().episodeWillBeOver();
+
             this->eclWriter_->evalSummaryState(isSubStep);
         }
 
@@ -1135,6 +1142,10 @@ protected:
         // Initialize mixing controls before trying to set any lastRx valuesx
         this->mixControls_.init(numElems, restart_step, eclState.runspec().tabdims().getNumPVTTables());
 
+        if constexpr (enableMICP) {
+            this->micp_ = this->eclWriter_->outputModule().getMICP().getSolution();
+        }
+
         for (std::size_t elemIdx = 0; elemIdx < numElems; ++elemIdx) {
             auto& elemFluidState = this->initialFluidStates_[elemIdx];
             elemFluidState.setPvtRegionIndex(pvtRegionIndex(elemIdx));
@@ -1172,13 +1183,6 @@ protected:
 
             if constexpr (enablePolymer)
                 this->polymer_.concentration[elemIdx] = this->eclWriter_->outputModule().getPolymerConcentration(elemIdx);
-            if constexpr (enableMICP){
-                this->micp_.microbialConcentration[elemIdx] = this->eclWriter_->outputModule().getMicrobialConcentration(elemIdx);
-                this->micp_.oxygenConcentration[elemIdx] = this->eclWriter_->outputModule().getOxygenConcentration(elemIdx);
-                this->micp_.ureaConcentration[elemIdx] = this->eclWriter_->outputModule().getUreaConcentration(elemIdx);
-                this->micp_.biofilmConcentration[elemIdx] = this->eclWriter_->outputModule().getBiofilmConcentration(elemIdx);
-                this->micp_.calciteConcentration[elemIdx] = this->eclWriter_->outputModule().getCalciteConcentration(elemIdx);
-            }
             // if we need to restart for polymer molecular weight simulation, we need to add related here
         }
 
