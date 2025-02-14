@@ -345,6 +345,7 @@ getGroupProductionControl(const Group& group,
                           DeferredLogger& deferred_logger) const
 {
     const Group::ProductionCMode& currentGroupControl = group_state.production_control(group.name());
+    const auto& well = well_.wellEcl();
     if (currentGroupControl == Group::ProductionCMode::FLD ||
         currentGroupControl == Group::ProductionCMode::NONE) {
         if (!group.productionGroupControlAvailable()) {
@@ -357,6 +358,7 @@ getGroupProductionControl(const Group& group,
             // containing groups. We will therefore use the wells' bhp
             // limit equation as a fallback.
             const auto& controls = well_.wellEcl().productionControls(summaryState);
+            deferred_logger.debug("getGroupProductionControl (control eq) " + well.name() + " did not find valid control, using bhp limit!!");
             control_eq = bhp - controls.bhp_limit;
             return;
         } else {
@@ -370,13 +372,12 @@ getGroupProductionControl(const Group& group,
             return;
         }
     }
-
-    const auto& well = well_.wellEcl();
     const auto pu = well_.phaseUsage();
 
     if (!group.isProductionGroup()) {
         // use bhp as control eq and let the updateControl code find a valid control
         const auto& controls = well.productionControls(summaryState);
+        deferred_logger.debug("getGroupProductionControl (control eq) " + well.name() + " did not find valid control, using bhp limit!!");
         control_eq = bhp - controls.bhp_limit;
         return;
     }
@@ -554,7 +555,7 @@ getGroupProductionTargetRate(const Group& group,
     if (current_rate > 1e-14) {
         scale = target_rate / current_rate;
     } else {
-        deferred_logger.debug("getGroupProductionTargetRate" + well_.name() + " has approx zero current_rate");
+        deferred_logger.debug("getGroupProductionTargetRate " + well_.name() + " has approx zero current_rate: " + std::to_string(current_rate));
     }
     return scale;
 }

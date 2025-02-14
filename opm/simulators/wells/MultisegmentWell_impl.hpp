@@ -1669,6 +1669,8 @@ namespace Opm
         this->operability_status_.resetOperability();
         this->operability_status_.solvable = true;
 
+        updatePrimaryVariables(simulator, well_state, deferred_logger);
+        initPrimaryVariablesEvaluation();
         for (; it < max_iter_number; ++it, ++debug_cost_counter_) {
             ++its_since_last_switch;
             if (allow_switching && its_since_last_switch >= min_its_after_switch){

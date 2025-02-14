@@ -2433,6 +2433,9 @@ namespace Opm
         // well needs to be set operable or else solving/updating of re-opened wells is skipped
         this->operability_status_.resetOperability();
         this->operability_status_.solvable = true;
+
+        updatePrimaryVariables(simulator, well_state, deferred_logger);
+        initPrimaryVariablesEvaluation();
         do {
             its_since_last_switch++;
             if (allow_switching && its_since_last_switch >= min_its_after_switch){

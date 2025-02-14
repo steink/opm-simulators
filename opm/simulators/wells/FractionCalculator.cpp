@@ -94,7 +94,12 @@ localFraction(const std::string& name,
         always_use_potentials = true;
         const Scalar my_pot = guideRate(name, always_included_child, always_use_potentials);
         const Scalar my_total_pot = guideRateSum(parent_group, always_included_child, always_use_potentials).first;
+        if (my_total_pot == 0) {
+            std::cout << "Parent group of " << name << " has zero total potential, returning unit fraction" << std::endl;
+            return 1.0;
+        }
         return my_pot / my_total_pot;
+        
     }
     return my_guide_rate / total_guide_rate;
 }

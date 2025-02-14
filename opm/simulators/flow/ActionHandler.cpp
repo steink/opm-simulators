@@ -228,7 +228,7 @@ applyActions(const int reportStep,
         const auto actionResult = action->eval(context);
         if (! actionResult.conditionSatisfied()) {
             ++non_triggered;
-            logInactiveAction(action->name(), ts);
+            //logInactiveAction(action->name(), ts);
             continue;
         }
 

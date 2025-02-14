@@ -303,6 +303,7 @@ namespace Opm
         if (!this->wellIsStopped()){
             if (wqTotal*sgn <= 0.0 && !fixed_status){
                 this->stopWell();
+                deferred_logger.debug("Well " + this->name() + " is stopped during local solve, control was " + from);
                 return true;
             } else {
                 bool changed = false;
@@ -322,6 +323,13 @@ namespace Opm
                     }
 
                     if (changed) {
+                        std::string to;
+                        if (this->isInjector()) {
+                            to = WellInjectorCMode2String(ws.injection_cmode);
+                        } else {
+                            to = WellProducerCMode2String(ws.production_cmode);
+                        }
+                        deferred_logger.debug("Well " + this->name() + " changed control from " + from + " to " + to + " during local solve");
                         const bool thp_controlled = this->isInjector() ? ws.injection_cmode == Well::InjectorCMode::THP :
                                                                         ws.production_cmode == Well::ProducerCMode::THP;
                         if (!thp_controlled){
@@ -364,6 +372,7 @@ namespace Opm
             }
             const Scalar bhp_diff = (this->isInjector())? inj_limit - bhp: bhp - prod_limit;
             if (bhp_diff > 0){
+                deferred_logger.debug("Well " + this->name() + " is opened during local solve, control is " + from);
                 this->openWell();
                 well_state.well(this->index_of_well_).bhp = (this->isInjector())? inj_limit : prod_limit;
                 if (has_thp) {
@@ -1507,6 +1516,7 @@ namespace Opm
                     ws.trivial_target = false;
                 } else {
                     ws.trivial_target = true;
+                    deferred_logger.debug("UpdateTarget (group control): " + this->name() + " gets zero target ");
                 }
                 break;
             }
