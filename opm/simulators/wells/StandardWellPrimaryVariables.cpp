@@ -163,7 +163,7 @@ update(const WellState<Scalar>& well_state,
             }
     }
 
-    if (ws.primaryvar.size() > 0) {
+    if (false) {//(ws.primaryvar.size() > 0) {
         if constexpr (has_wfrac_variable) {
              value_[WFrac] = ws.primaryvar[WFrac];
         }

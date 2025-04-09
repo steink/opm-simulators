@@ -553,6 +553,8 @@ namespace Opm
                 // no intersection with ipr
                 const auto msg = fmt::format("estimateOperableBhp: Did not find operable BHP for well {}", this->name());
                 deferred_logger.debug(msg);
+                const auto msg2 = fmt::format("Explicit rates: [{}, {}, {}] ", ws.prev_surface_rates[0], ws.prev_surface_rates[1], ws.prev_surface_rates[2]);
+                deferred_logger.debug(msg2);
                 is_operable = false;
                 // solve with zero rates
                 solveWellWithZeroRate(simulator, dt, well_state, deferred_logger);
