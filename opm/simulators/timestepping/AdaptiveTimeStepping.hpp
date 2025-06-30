@@ -48,6 +48,10 @@ struct TimeStepControlFileName { static constexpr auto value = "timesteps"; };
 struct MinTimeStepBeforeShuttingProblematicWellsInDays { static constexpr double value = 0.01; };
 struct MinTimeStepBasedOnNewtonIterations { static constexpr double value = 0.0; };
 struct TimeStepControlSafetyFactor { static constexpr double value = 0.8; };
+struct TimeStepControlRejectCompletedStep { static constexpr bool value = false; };
+struct TimeStepControlToleranceTestVersion { static constexpr auto value = "standard"; };
+struct TimeStepControlMaxReductionTimeStep { static constexpr double value = 0.1; };
+struct TimeStepControlParameters { static constexpr auto value = "0.125;0.25;0.125;0.75;0.25"; };
 
 } // namespace Opm::Parameters
 
@@ -77,6 +81,7 @@ public:
 
 private:
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
+
     template <class Solver>
     class SolutionTimeErrorSolverWrapper : public RelativeChangeInterface
     {
@@ -89,8 +94,6 @@ private:
     };
 
     // Forward declaration of SubStepIteration
-    // TODO: This forward declaration is not enough for GCC version 9.4.0 (released June 2021),
-    //  but it works fine with GCC version 13.2.0 (released July 2023).
     template <class Solver> class SubStepIteration;
 
     template <class Solver>
@@ -104,7 +107,7 @@ private:
 
         AdaptiveTimeStepping<TypeTag>& getAdaptiveTimerStepper();
         SimulatorReport run();
-        friend class AdaptiveTimeStepping<TypeTag>::template SubStepIteration<Solver>;
+        friend class SubStepIteration<Solver>;
 
     private:
         bool isReservoirCouplingMaster_() const;
@@ -199,12 +202,9 @@ public:
     bool operator==(const AdaptiveTimeStepping<TypeTag>& rhs);
 
     static void registerParameters();
-#ifdef RESERVOIR_COUPLING_ENABLED
-    void setReservoirCouplingMaster(ReservoirCouplingMaster *reservoir_coupling_master);
-    void setReservoirCouplingSlave(ReservoirCouplingSlave *reservoir_coupling_slave);
-#endif
     void setSuggestedNextStep(const double x);
     double suggestedNextStep() const;
+    const TimeStepControlInterface& timeStepControl() const;
 
     template <class Solver>
     SimulatorReport step(const SimulatorTimer& simulator_timer,
@@ -263,10 +263,6 @@ protected:
 
     //! < shut problematic wells when time step size in days are less than this
     double min_time_step_before_shutting_problematic_wells_{};
-#ifdef RESERVOIR_COUPLING_ENABLED
-    ReservoirCouplingMaster *reservoir_coupling_master_ = nullptr;
-    ReservoirCouplingSlave *reservoir_coupling_slave_ = nullptr;
-#endif
     // We store a copy of the full simulator run report for output purposes,
     // so it can be updated and passed to the summary writing code every
     // substep (not just every report step).

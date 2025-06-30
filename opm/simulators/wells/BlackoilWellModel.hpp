@@ -23,6 +23,14 @@
 #ifndef OPM_BLACKOILWELLMODEL_HEADER_INCLUDED
 #define OPM_BLACKOILWELLMODEL_HEADER_INCLUDED
 
+#if HAVE_MPI
+#define RESERVOIR_COUPLING_ENABLED
+#endif
+#ifdef RESERVOIR_COUPLING_ENABLED
+#include <opm/simulators/flow/ReservoirCouplingMaster.hpp>
+#include <opm/simulators/flow/ReservoirCouplingSlave.hpp>
+#endif
+
 #include <dune/common/fmatrix.hh>
 #include <dune/istl/bcrsmatrix.hh>
 #include <dune/istl/matrixmatrix.hh>
@@ -53,6 +61,7 @@
 #include <opm/simulators/wells/GasLiftSingleWell.hpp>
 #include <opm/simulators/wells/GasLiftSingleWellGeneric.hpp>
 #include <opm/simulators/wells/GasLiftWellState.hpp>
+#include <opm/simulators/wells/GuideRateHandler.hpp>
 #include <opm/simulators/wells/MultisegmentWell.hpp>
 #include <opm/simulators/wells/ParallelWBPCalculation.hpp>
 #include <opm/simulators/wells/ParallelWellInfo.hpp>
@@ -184,14 +193,16 @@ template<class Scalar> class WellContributions;
                 initFromRestartFile(restartValues,
                                     this->simulator_.vanguard().transferWTestState(),
                                     grid().size(0),
-                                    param_.use_multisegment_well_);
+                                    param_.use_multisegment_well_,
+                                    this->simulator_.vanguard().enableDistributedWells());
             }
 
             using BlackoilWellModelGeneric<Scalar>::prepareDeserialize;
             void prepareDeserialize(const int report_step)
             {
                 prepareDeserialize(report_step, grid().size(0),
-                                   param_.use_multisegment_well_);
+                                   param_.use_multisegment_well_,
+                                   this->simulator_.vanguard().enableDistributedWells());
             }
 
             data::Wells wellData() const
@@ -339,6 +350,11 @@ template<class Scalar> class WellContributions;
                 return simulator_.vanguard().compressedIndexForInterior(cartesian_cell_idx);
             }
 
+            int compressedIndexForInteriorLGR(const std::string& lgr_tag, const Connection& conn) const override
+            {
+                return simulator_.vanguard().compressedIndexForInteriorLGR(lgr_tag, conn);
+            }            
+
             // using the solution x to recover the solution xw for wells and applying
             // xw to update Well State
             void recoverWellSolutionAndUpdateWellState(const BVector& x);
@@ -357,6 +373,28 @@ template<class Scalar> class WellContributions;
             void setNlddAdapter(BlackoilWellModelNldd<TypeTag>* mod)
             { nldd_ = mod; }
 
+#ifdef RESERVOIR_COUPLING_ENABLED
+            ReservoirCouplingMaster& reservoirCouplingMaster() {
+                return *(this->simulator_.reservoirCouplingMaster());
+            }
+            ReservoirCouplingSlave& reservoirCouplingSlave() {
+                return *(this->simulator_.reservoirCouplingSlave());
+            }
+            bool isReservoirCouplingMaster() const {
+                return this->simulator_.reservoirCouplingMaster() != nullptr;
+            }
+            bool isReservoirCouplingSlave() const {
+                return this->simulator_.reservoirCouplingSlave() != nullptr;
+            }
+            void setReservoirCouplingMaster(ReservoirCouplingMaster *master)
+            {
+                this->guide_rate_handler_.setReservoirCouplingMaster(master);
+            }
+            void setReservoirCouplingSlave(ReservoirCouplingSlave *slave)
+            {
+                this->guide_rate_handler_.setReservoirCouplingSlave(slave);
+            }
+        #endif
         protected:
             Simulator& simulator_;
 
@@ -395,6 +433,7 @@ template<class Scalar> class WellContributions;
             std::map<std::string, std::unique_ptr<AverageRegionalPressureType>> regionalAveragePressureCalculator_{};
 
             SimulatorReportSingle last_report_{};
+            GuideRateHandler<Scalar> guide_rate_handler_{};
 
             // Pre-step network solve at static reservoir conditions (group and well states might be updated)
             void doPreStepNetworkRebalance(DeferredLogger& deferred_logger);

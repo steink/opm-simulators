@@ -29,7 +29,7 @@
 #include <opm/simulators/wells/SegmentState.hpp>
 #include <opm/simulators/wells/PerfData.hpp>
 #include <opm/simulators/wells/ParallelWellInfo.hpp>
-
+#include <opm/simulators/wells/ALQState.hpp>
 #include <opm/simulators/utils/BlackoilPhases.hpp>
 
 namespace Opm {
@@ -77,6 +77,8 @@ public:
         serializer(filtrate_conc);
         serializer(perf_data);
         serializer(primaryvar);
+        serializer(alq_state);
+        serializer(group_target);
     }
 
     bool operator==(const SingleWellState&) const;
@@ -112,11 +114,13 @@ public:
     std::vector<Scalar> prev_surface_rates;
     PerfData<Scalar> perf_data;
     bool trivial_group_target;
+    std::optional<Scalar> group_target;
     SegmentState<Scalar> segments;
     Events events;
     WellInjectorCMode injection_cmode{WellInjectorCMode::CMODE_UNDEFINED};
     WellProducerCMode production_cmode{WellProducerCMode::CMODE_UNDEFINED};
     std::vector<Scalar> primaryvar;
+    ALQState<Scalar> alq_state;
 
     /// Special purpose method to support dynamically rescaling a well's
     /// CTFs through WELPI.
@@ -132,7 +136,7 @@ public:
     /// This called after ACTIONX is executed to update well rates. The new status is
     /// in ecl_well and st.
     /// \return whether well was switched to a producer
-    bool update_type_and_targets(const Well& ecl_well, const SummaryState& st);
+    void update_type_and_targets(const Well& ecl_well, const SummaryState& st);
     void updateStatus(WellStatus status);
     void init_timestep(const SingleWellState& other);
     void shut();

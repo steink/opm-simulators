@@ -42,6 +42,7 @@
 
 #include <opm/simulators/wells/BlackoilWellModelConstraints.hpp>
 #include <opm/simulators/wells/BlackoilWellModelNldd.hpp>
+#include <opm/simulators/wells/GuideRateHandler.hpp>
 #include <opm/simulators/wells/ParallelPAvgDynamicSourceData.hpp>
 #include <opm/simulators/wells/ParallelWBPCalculation.hpp>
 #include <opm/simulators/wells/VFPProperties.hpp>
@@ -78,6 +79,12 @@ namespace Opm {
                                            phase_usage,
                                            simulator.gridView().comm())
         , simulator_(simulator)
+        , guide_rate_handler_{
+            *this,
+            simulator.vanguard().schedule(),
+            simulator.vanguard().summaryState(),
+            simulator.vanguard().grid().comm()
+        }
         , gaslift_(this->terminal_output_, this->phase_usage_)
     {
         local_num_cells_ = simulator_.gridView().size(0);
@@ -370,7 +377,7 @@ namespace Opm {
         const int reportStepIdx = simulator_.episodeIndex();
         this->updateAndCommunicateGroupData(reportStepIdx,
                                             simulator_.model().newtonMethod().numIterations(),
-                                            param_.nupcol_group_rate_tolerance_,
+                                            param_.nupcol_group_rate_tolerance_, /*update_wellgrouptarget*/ false,
                                             local_deferredLogger);
 
         this->wellState().updateWellsDefaultALQ(this->schedule(), reportStepIdx, this->summaryState());
@@ -411,6 +418,7 @@ namespace Opm {
             }
 
         }
+
         OPM_END_PARALLEL_TRY_CATCH_LOG(local_deferredLogger, "beginTimeStep() failed: ",
                                         this->terminal_output_, simulator_.vanguard().grid().comm());
 
@@ -446,8 +454,6 @@ namespace Opm {
                 well->setPrevSurfaceRates(this->wellState(), this->prevWellState());
             }
         }
-
-        // calculate the well potentials
         try {
             this->updateWellPotentials(reportStepIdx,
                                        /*onlyAfterEvent*/true,
@@ -457,23 +463,21 @@ namespace Opm {
             const std::string msg = "A zero well potential is returned for output purposes. ";
             local_deferredLogger.warning("WELL_POTENTIAL_CALCULATION_FAILED", msg);
         }
-
+        this->guide_rate_handler_.setLogger(&local_deferredLogger);
+#ifdef RESERVOIR_COUPLING_ENABLED
+        if (this->isReservoirCouplingMaster()) {
+            this->guide_rate_handler_.receiveMasterGroupPotentialsFromSlaves();
+        }
+#endif
         //update guide rates
-        const auto& comm = simulator_.vanguard().grid().comm();
-        std::vector<Scalar> pot(this->numPhases(), 0.0);
-        const Group& fieldGroup = this->schedule().getGroup("FIELD", reportStepIdx);
-        WellGroupHelpers<Scalar>::updateGuideRates(fieldGroup,
-                                                   this->schedule(),
-                                                   this->summaryState(),
-                                                   this->phase_usage_,
-                                                   reportStepIdx,
-                                                   simulationTime,
-                                                   this->wellState(),
-                                                   this->groupState(),
-                                                   comm,
-                                                   &this->guideRate_,
-                                                   pot,
-                                                   local_deferredLogger);
+        this->guide_rate_handler_.updateGuideRates(
+            reportStepIdx, simulationTime, this->wellState(), this->groupState()
+        );
+#ifdef RESERVOIR_COUPLING_ENABLED
+        if (this->isReservoirCouplingSlave()) {
+            this->guide_rate_handler_.sendSlaveGroupPotentialsToMaster(this->groupState());
+        }
+#endif
         std::string exc_msg;
         auto exc_type = ExceptionType::NONE;
         // update gpmaint targets
@@ -482,6 +486,7 @@ namespace Opm {
                 calculator.second->template defineState<ElementContext>(simulator_);
             }
             const double dt = simulator_.timeStepSize();
+            const Group& fieldGroup = this->schedule().getGroup("FIELD", reportStepIdx);
             WellGroupHelpers<Scalar>::updateGpMaintTargetForGroups(fieldGroup,
                                                                    this->schedule_,
                                                                    regionalAveragePressureCalculator_,
@@ -490,6 +495,12 @@ namespace Opm {
                                                                    this->wellState(),
                                                                    this->groupState());
         }
+
+        this->updateAndCommunicateGroupData(reportStepIdx,
+                                    simulator_.model().newtonMethod().numIterations(),
+                                    param_.nupcol_group_rate_tolerance_,
+                                    /*update_wellgrouptarget*/ true,
+                                    local_deferredLogger);
         try {
             // Compute initial well solution for new wells and injectors that change injection type i.e. WAG.
             for (auto& well : well_container_) {
@@ -523,6 +534,7 @@ namespace Opm {
             local_deferredLogger.warning("WELL_INITIAL_SOLVE_FAILED", msg);
         }
 
+        const auto& comm = simulator_.vanguard().grid().comm();
         logAndCheckForExceptionsAndThrow(local_deferredLogger,
                                          exc_type, "beginTimeStep() failed: " + exc_msg, this->terminal_output_, comm);
 
@@ -1124,6 +1136,7 @@ namespace Opm {
         OPM_TIMEFUNCTION();
         DeferredLogger local_deferredLogger;
 
+        this->guide_rate_handler_.setLogger(&local_deferredLogger);
         if constexpr (BlackoilWellModelGasLift<TypeTag>::glift_debug) {
             if (gaslift_.terminalOutput()) {
                 const std::string msg =
@@ -1244,7 +1257,8 @@ namespace Opm {
         OPM_TIMEFUNCTION();
         const int iterationIdx = simulator_.model().newtonMethod().numIterations();
         const int reportStepIdx = simulator_.episodeIndex();
-        this->updateAndCommunicateGroupData(reportStepIdx, iterationIdx, param_.nupcol_group_rate_tolerance_, local_deferredLogger);
+        this->updateAndCommunicateGroupData(reportStepIdx, iterationIdx, 
+            param_.nupcol_group_rate_tolerance_, /*update_wellgrouptarget*/ true, local_deferredLogger);
         const auto [more_inner_network_update, network_imbalance] =
                 updateNetworks(mandatory_network_balance,
                                local_deferredLogger,
@@ -1271,22 +1285,12 @@ namespace Opm {
         if (alq_updated || BlackoilWellModelGuideRates(*this).
                               guideRateUpdateIsNeeded(reportStepIdx)) {
             const double simulationTime = simulator_.time();
-            const auto& comm = simulator_.vanguard().grid().comm();
-            const auto& summaryState = simulator_.vanguard().summaryState();
-            std::vector<Scalar> pot(this->numPhases(), 0.0);
-            const Group& fieldGroup = this->schedule().getGroup("FIELD", reportStepIdx);
-            WellGroupHelpers<Scalar>::updateGuideRates(fieldGroup,
-                                                       this->schedule(),
-                                                       summaryState,
-                                                       this->phase_usage_,
-                                                       reportStepIdx,
-                                                       simulationTime,
-                                                       this->wellState(),
-                                                       this->groupState(),
-                                                       comm,
-                                                       &this->guideRate_,
-                                                       pot,
-                                                       local_deferredLogger);
+            // NOTE: For reservoir coupling: Slave group potentials are only communicated
+            //    at the start of the time step, see beginTimeStep(). Here, we assume those
+            //    potentials remain unchanged during the time step when updating guide rates below.
+            this->guide_rate_handler_.updateGuideRates(
+                reportStepIdx, simulationTime, this->wellState(), this->groupState()
+            );
         }
         // we need to re-iterate the network when the well group controls changed or gaslift/alq is changed or
         // the inner iterations are did not converge
@@ -1763,57 +1767,62 @@ namespace Opm {
         const int episodeIdx = simulator_.episodeIndex();
         const int iterationIdx = simulator_.model().newtonMethod().numIterations();
         const auto& comm = simulator_.vanguard().grid().comm();
-
+        size_t iter = 0;
         bool changed_well_group = false;
-        // Check group individual constraints.
         const Group& fieldGroup = this->schedule().getGroup("FIELD", episodeIdx);
-        changed_well_group = updateGroupControls(fieldGroup, deferred_logger, episodeIdx, iterationIdx);
+        // Check group individual constraints.
+        // iterate a few times to make sure all constraints are honored
+        const std::size_t max_iter = param_.well_group_constraints_max_iterations_;
+        while(!changed_well_group && iter < max_iter) {
+            changed_well_group = updateGroupControls(fieldGroup, deferred_logger, episodeIdx, iterationIdx);
 
-        // Check wells' group constraints and communicate.
-        bool changed_well_to_group = false;
-        {
-            OPM_TIMEBLOCK(UpdateWellControls);
-            // For MS Wells a linear solve is performed below and the matrix might be singular.
-            // We need to communicate the exception thrown to the others and rethrow.
-            OPM_BEGIN_PARALLEL_TRY_CATCH()
-                for (const auto& well : well_container_) {
-                    const auto mode = WellInterface<TypeTag>::IndividualOrGroup::Group;
-                    const bool changed_well = well->updateWellControl(simulator_, mode, this->wellState(), this->groupState(), deferred_logger);
-                    if (changed_well) {
-                        changed_well_to_group = changed_well || changed_well_to_group;
+            // Check wells' group constraints and communicate.
+            bool changed_well_to_group = false;
+            {
+                OPM_TIMEBLOCK(UpdateWellControls);
+                // For MS Wells a linear solve is performed below and the matrix might be singular.
+                // We need to communicate the exception thrown to the others and rethrow.
+                OPM_BEGIN_PARALLEL_TRY_CATCH()
+                    for (const auto& well : well_container_) {
+                        const auto mode = WellInterface<TypeTag>::IndividualOrGroup::Group;
+                        const bool changed_well = well->updateWellControl(simulator_, mode, this->wellState(), this->groupState(), deferred_logger);
+                        if (changed_well) {
+                            changed_well_to_group = changed_well || changed_well_to_group;
+                        }
                     }
-                }
-            OPM_END_PARALLEL_TRY_CATCH("BlackoilWellModel: updating well controls failed: ",
-                                       simulator_.gridView().comm());
-        }
+                OPM_END_PARALLEL_TRY_CATCH("BlackoilWellModel: updating well controls failed: ",
+                                        simulator_.gridView().comm());
+            }
 
-        changed_well_to_group = comm.sum(static_cast<int>(changed_well_to_group));
-        if (changed_well_to_group) {
-            updateAndCommunicate(episodeIdx, iterationIdx, deferred_logger);
-            changed_well_group = true;
-        }
+            changed_well_to_group = comm.sum(static_cast<int>(changed_well_to_group));
+            if (changed_well_to_group) {
+                updateAndCommunicate(episodeIdx, iterationIdx, deferred_logger);
+                changed_well_group = true;
+            }
 
-        // Check individual well constraints and communicate.
-        bool changed_well_individual = false;
-        {
-            // For MS Wells a linear solve is performed below and the matrix might be singular.
-            // We need to communicate the exception thrown to the others and rethrow.
-            OPM_BEGIN_PARALLEL_TRY_CATCH()
-                for (const auto& well : well_container_) {
-                    const auto mode = WellInterface<TypeTag>::IndividualOrGroup::Individual;
-                    const bool changed_well = well->updateWellControl(simulator_, mode, this->wellState(), this->groupState(), deferred_logger);
-                    if (changed_well) {
-                        changed_well_individual = changed_well || changed_well_individual;
+            // Check individual well constraints and communicate.
+            bool changed_well_individual = false;
+            {
+                // For MS Wells a linear solve is performed below and the matrix might be singular.
+                // We need to communicate the exception thrown to the others and rethrow.
+                OPM_BEGIN_PARALLEL_TRY_CATCH()
+                    for (const auto& well : well_container_) {
+                        const auto mode = WellInterface<TypeTag>::IndividualOrGroup::Individual;
+                        const bool changed_well = well->updateWellControl(simulator_, mode, this->wellState(), this->groupState(), deferred_logger);
+                        if (changed_well) {
+                            changed_well_individual = changed_well || changed_well_individual;
+                        }
                     }
-                }
-            OPM_END_PARALLEL_TRY_CATCH("BlackoilWellModel: updating well controls failed: ",
-                                       simulator_.gridView().comm());
-        }
+                OPM_END_PARALLEL_TRY_CATCH("BlackoilWellModel: updating well controls failed: ",
+                                        simulator_.gridView().comm());
+            }
 
-        changed_well_individual = comm.sum(static_cast<int>(changed_well_individual));
-        if (changed_well_individual) {
-            updateAndCommunicate(episodeIdx, iterationIdx, deferred_logger);
-            changed_well_group = true;
+            changed_well_individual = comm.sum(static_cast<int>(changed_well_individual));
+            if (changed_well_individual) {
+                updateAndCommunicate(episodeIdx, iterationIdx, deferred_logger);
+                changed_well_group = true;
+            }
+            iter++;
         }
 
         // update wsolvent fraction for REIN wells
@@ -1875,7 +1884,8 @@ namespace Opm {
                         }
                     }
                 }
-                this->updateAndCommunicateGroupData(episodeIdx, iterationIdx, param_.nupcol_group_rate_tolerance_, deferred_logger);
+                this->updateAndCommunicateGroupData(episodeIdx, iterationIdx, param_.nupcol_group_rate_tolerance_,
+                                                    /*update_wellgrouptarget*/ true, deferred_logger);
             }
             more_network_update = more_network_sub_update || well_group_thp_updated;
         }
@@ -1893,6 +1903,7 @@ namespace Opm {
         this->updateAndCommunicateGroupData(reportStepIdx,
                                             iterationIdx,
                                             param_.nupcol_group_rate_tolerance_,
+                                            /*update_wellgrouptarget*/ true,
                                             deferred_logger);
 
         // updateWellStateWithTarget might throw for multisegment wells hence we
@@ -1914,6 +1925,7 @@ namespace Opm {
         this->updateAndCommunicateGroupData(reportStepIdx,
                                             iterationIdx,
                                             param_.nupcol_group_rate_tolerance_,
+                                            /*update_wellgrouptarget*/ true,
                                             deferred_logger);
     }
 

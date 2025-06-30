@@ -72,15 +72,15 @@ template <class TypeTag>
 class BlackOilIntensiveQuantitiesGlobalIndex
     : public GetPropType<TypeTag, Properties::DiscIntensiveQuantities>
     , public GetPropType<TypeTag, Properties::FluxModule>::FluxIntensiveQuantities
-    , public BlackOilDiffusionIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableDiffusion>() >
-    , public BlackOilSolventIntensiveQuantities<TypeTag>
-    , public BlackOilExtboIntensiveQuantities<TypeTag>
-    , public BlackOilPolymerIntensiveQuantities<TypeTag>
-    , public BlackOilFoamIntensiveQuantities<TypeTag>
-    , public BlackOilBrineIntensiveQuantities<TypeTag>
-    , public BlackOilEnergyIntensiveQuantitiesGlobalIndex<TypeTag>
-    , public BlackOilMICPIntensiveQuantities<TypeTag>
-    , public BlackOilConvectiveMixingIntensiveQuantities<TypeTag>
+    , public BlackOilDiffusionIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableDiffusion>()>
+    , public BlackOilSolventIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableSolvent>()>
+    , public BlackOilExtboIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableExtbo>()>
+    , public BlackOilPolymerIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnablePolymer>()>
+    , public BlackOilFoamIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableFoam>()>
+    , public BlackOilBrineIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableBrine>()>
+    , public BlackOilEnergyIntensiveQuantitiesGlobalIndex<TypeTag, getPropValue<TypeTag, Properties::EnableEnergy>()>
+    , public BlackOilMICPIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableMICP>()>
+    , public BlackOilConvectiveMixingIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableConvectiveMixing>()>
 {
     using ParentType = GetPropType<TypeTag, Properties::DiscIntensiveQuantities>;
     using Implementation = GetPropType<TypeTag, Properties::IntensiveQuantities>;
@@ -129,7 +129,7 @@ class BlackOilIntensiveQuantitiesGlobalIndex
     using FluxIntensiveQuantities = typename FluxModule::FluxIntensiveQuantities;
     using DiffusionIntensiveQuantities = BlackOilDiffusionIntensiveQuantities<TypeTag, enableDiffusion>;
 
-    using DirectionalMobilityPtr = Opm::Utility::CopyablePtr<DirectionalMobility<TypeTag, Evaluation>>;
+    using DirectionalMobilityPtr = Utility::CopyablePtr<DirectionalMobility<TypeTag>>;
 
 public:
     using FluidState = BlackOilFluidState<Evaluation,
@@ -146,11 +146,11 @@ public:
 
     BlackOilIntensiveQuantitiesGlobalIndex()
     {
-        if (compositionSwitchEnabled) {
+        if constexpr (compositionSwitchEnabled) {
             fluidState_.setRs(0.0);
             fluidState_.setRv(0.0);
         }
-        if (enableVapwat) {
+        if constexpr (enableVapwat) {
             fluidState_.setRvw(0.0);
         }
     }
@@ -301,17 +301,19 @@ public:
             }
         }
 
-        if (priVars.primaryVarsMeaningWater() == PrimaryVariables::WaterMeaning::Rvw) {
-            const auto& Rvw = priVars.makeEvaluation(Indices::waterSwitchIdx, timeIdx);
-            fluidState_.setRvw(Rvw);
-        } else {
-            //NB! should save the indexing for later evaluation
-            if (FluidSystem::enableVaporizedWater()) { // Add Sg > 0? i.e. if only water set rv = 0)
-                OPM_TIMEBLOCK_LOCAL(UpdateSaturatedRv);
-                const Evaluation& RvwSat = FluidSystem::saturatedVaporizationFactor(fluidState_,
-                                                            gasPhaseIdx,
-                                                            pvtRegionIdx);
-                fluidState_.setRvw(RvwSat);
+        if constexpr (enableVapwat) {
+            if (priVars.primaryVarsMeaningWater() == PrimaryVariables::WaterMeaning::Rvw) {
+                const auto& Rvw = priVars.makeEvaluation(Indices::waterSwitchIdx, timeIdx);
+                fluidState_.setRvw(Rvw);
+            } else {
+                //NB! should save the indexing for later evaluation
+                if (FluidSystem::enableVaporizedWater()) { // Add Sg > 0? i.e. if only water set rv = 0)
+                    OPM_TIMEBLOCK_LOCAL(UpdateSaturatedRv);
+                    const Evaluation& RvwSat = FluidSystem::saturatedVaporizationFactor(fluidState_,
+                                                                                        gasPhaseIdx,
+                                                                                        pvtRegionIdx);
+                    fluidState_.setRvw(RvwSat);
+                }
             }
         }
 
@@ -424,13 +426,13 @@ public:
     {
         using Dir = FaceDir::DirEnum;
         if (dirMob_) {
-            switch(facedir) {
+            switch (facedir) {
             case Dir::XPlus:
-                return dirMob_->mobilityX_[phaseIdx];
+                return dirMob_->getArray(0)[phaseIdx];
             case Dir::YPlus:
-                return dirMob_->mobilityY_[phaseIdx];
+                return dirMob_->getArray(1)[phaseIdx];
             case Dir::ZPlus:
-                return dirMob_->mobilityZ_[phaseIdx];
+                return dirMob_->getArray(2)[phaseIdx];
             default:
                 throw std::runtime_error("Unexpected face direction");
             }
@@ -526,13 +528,13 @@ public:
     }
 
 private:
-    friend BlackOilSolventIntensiveQuantities<TypeTag>;
-    friend BlackOilExtboIntensiveQuantities<TypeTag>;
-    friend BlackOilPolymerIntensiveQuantities<TypeTag>;
-    friend BlackOilEnergyIntensiveQuantitiesGlobalIndex<TypeTag>;
-    friend BlackOilFoamIntensiveQuantities<TypeTag>;
-    friend BlackOilBrineIntensiveQuantities<TypeTag>;
-    friend BlackOilMICPIntensiveQuantities<TypeTag>;
+    friend BlackOilSolventIntensiveQuantities<TypeTag, enableSolvent>;
+    friend BlackOilExtboIntensiveQuantities<TypeTag, enableExtbo>;
+    friend BlackOilPolymerIntensiveQuantities<TypeTag, enablePolymer>;
+    friend BlackOilEnergyIntensiveQuantitiesGlobalIndex<TypeTag, enableEnergy>;
+    friend BlackOilFoamIntensiveQuantities<TypeTag, enableFoam>;
+    friend BlackOilBrineIntensiveQuantities<TypeTag, enableBrine>;
+    friend BlackOilMICPIntensiveQuantities<TypeTag, enableMICP>;
 
     Implementation& asImp_()
     { return *static_cast<Implementation*>(this); }

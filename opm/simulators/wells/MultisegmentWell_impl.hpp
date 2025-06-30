@@ -144,7 +144,7 @@ namespace Opm
             // This variable loops over the number_of_local_perforations_ of *this* process, hence it is *local*.
             const int cell_idx = this->well_cells_[local_perf_index];
             // Here we need to access the perf_depth_ at the global perforation index though!
-            this->cell_perforation_depth_diffs_[local_perf_index] = depth_arg[cell_idx] - this->perf_depth_[this->pw_info_.localToActive(local_perf_index)];
+            this->cell_perforation_depth_diffs_[local_perf_index] = depth_arg[cell_idx] - this->perf_depth_[this->pw_info_.localPerfToActivePerf(local_perf_index)];
         }
     }
 
@@ -366,7 +366,7 @@ namespace Opm
         const auto& segment_pressure = segments_copy.pressure;
         for (int seg = 0; seg < nseg; ++seg) {
             for (const int perf : this->segments_.perforations()[seg]) {
-                const int local_perf_index = this->pw_info_.activeToLocal(perf);
+                const int local_perf_index = this->pw_info_.activePerfToLocalPerf(perf);
                 if (local_perf_index < 0) // then the perforation is not on this process
                     continue;
                 const int cell_idx = this->well_cells_[local_perf_index];
@@ -572,8 +572,8 @@ namespace Opm
         const double dt = simulator.timeStepSize();
         // solve equations
         bool converged = false;
-        if (this->well_ecl_.isProducer() && this->wellHasTHPConstraints(summary_state)) {
-            converged = well_copy.solveWellWithTHPConstraint(simulator, dt, inj_controls, prod_controls, well_state_copy, group_state, deferred_logger);
+        if (this->well_ecl_.isProducer()) {
+            converged = well_copy.solveWellWithOperabilityCheck(simulator, dt, inj_controls, prod_controls, well_state_copy, group_state, deferred_logger);
         } else {
             converged = well_copy.iterateWellEqWithSwitching(simulator, dt, inj_controls, prod_controls, well_state_copy, group_state, deferred_logger);
         }
@@ -602,7 +602,6 @@ namespace Opm
         // which is why we do not put the assembleWellEq here.
         try{
             const BVectorWell dx_well = this->linSys_.solve();
-
             updateWellState(simulator, dx_well, well_state, deferred_logger);
         }
         catch(const NumericalProblem& exp) {
@@ -911,7 +910,7 @@ namespace Opm
                     PerforationRates<Scalar>& perf_rates,
                     DeferredLogger& deferred_logger) const
     {
-        const int local_perf_index = this->pw_info_.activeToLocal(perf);
+        const int local_perf_index = this->pw_info_.activePerfToLocalPerf(perf);
         if (local_perf_index < 0) // then the perforation is not on this process
             return;
 
@@ -1275,7 +1274,7 @@ namespace Opm
                                                  seg_dp);
             seg_dp[seg] = dp;
             for (const int perf : this->segments_.perforations()[seg]) {
-                const int local_perf_index = this->pw_info_.activeToLocal(perf);
+                const int local_perf_index = this->pw_info_.activePerfToLocalPerf(perf);
                 if (local_perf_index < 0) // then the perforation is not on this process
                     continue;
                 std::vector<Scalar> mob(this->num_components_, 0.0);
@@ -1509,25 +1508,13 @@ namespace Opm
         this->regularize_ = false;
         for (; it < max_iter_number; ++it, ++debug_cost_counter_) {
 
-            assembleWellEqWithoutIteration(simulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
-
-            BVectorWell dx_well;
-            try{
-                dx_well = this->linSys_.solve();
-            }
-            catch(const NumericalProblem& exp) {
-                // Add information about the well and log to deferred logger
-                // (Logging done inside of solve() method will only be seen if
-                // this is the process with rank zero)
-                deferred_logger.problem("In MultisegmentWell::iterateWellEqWithControl for well "
-                                        + this->name() +": "+exp.what());
-                throw;
-            }
-
             if (it > this->param_.strict_inner_iter_wells_) {
                 relax_convergence = true;
                 this->regularize_ = true;
             }
+
+            assembleWellEqWithoutIteration(simulator, dt, inj_controls, prod_controls,
+                                           well_state, group_state, deferred_logger);
 
             const auto report = getWellConvergence(simulator, well_state, Base::B_avg_, deferred_logger, relax_convergence);
             if (report.converged()) {
@@ -1562,7 +1549,20 @@ namespace Opm
                 }
                 break;
             }
-            updateWellState(simulator, dx_well, well_state, deferred_logger, relaxation_factor);
+
+            BVectorWell dx_well;
+            try{
+                dx_well = this->linSys_.solve();
+                updateWellState(simulator, dx_well, well_state, deferred_logger, relaxation_factor);
+            }
+            catch(const NumericalProblem& exp) {
+                // Add information about the well and log to deferred logger
+                // (Logging done inside of solve() method will only be seen if
+                // this is the process with rank zero)
+                deferred_logger.problem("In MultisegmentWell::iterateWellEqWithControl for well "
+                                        + this->name() +": "+exp.what());
+                throw;
+            }
         }
 
         // TODO: we should decide whether to keep the updated well_state, or recover to use the old well_state
@@ -1571,7 +1571,10 @@ namespace Opm
             sstr << "     Well " << this->name() << " converged in " << it << " inner iterations.";
             if (relax_convergence)
                 sstr << "      (A relaxed tolerance was used after "<< this->param_.strict_inner_iter_wells_ << " iterations)";
-            deferred_logger.debug(sstr.str());
+
+            // Output "converged in 0 inner iterations" messages only at
+            // elevated verbosity levels.
+            deferred_logger.debug(sstr.str(), OpmLog::defaultDebugVerbosityLevel + (it == 0));
         } else {
             std::ostringstream sstr;
             sstr << "     Well " << this->name() << " did not converge in " << it << " inner iterations.";
@@ -1668,20 +1671,20 @@ namespace Opm
                 }
             }
 
-            assembleWellEqWithoutIteration(simulator, dt, inj_controls, prod_controls,
-                                           well_state, group_state, deferred_logger);
-
-            const BVectorWell dx_well = this->linSys_.solve();
-
             if (it > this->param_.strict_inner_iter_wells_) {
                 relax_convergence = true;
                 this->regularize_ = true;
             }
 
+            assembleWellEqWithoutIteration(simulator, dt, inj_controls, prod_controls,
+                                           well_state, group_state, deferred_logger);
+
+
             const auto report = getWellConvergence(simulator, well_state, Base::B_avg_, deferred_logger, relax_convergence);
             converged = report.converged();
-            if (this->parallel_well_info_.communication().size() > 1 && converged != this->parallel_well_info_.communication().min(converged)) {
-                OPM_THROW(std::runtime_error, fmt::format("Misalignment of the parallel simulation run in iterateWellEqWithSwitching - the well calculation succeeded on rank {} but failed on other ranks.", this->parallel_well_info_.communication().rank()));
+            if (this->parallel_well_info_.communication().size() > 1 &&
+                this->parallel_well_info_.communication().max(converged) != this->parallel_well_info_.communication().min(converged)) {
+                OPM_THROW(std::runtime_error, fmt::format("Misalignment of the parallel simulation run in iterateWellEqWithSwitching - the well calculation for well {} succeeded some ranks but failed on other ranks.", this->name()));
             }
             if (converged) {
                 // if equations are sufficiently linear they might converge in less than min_its_after_switch
@@ -1715,7 +1718,18 @@ namespace Opm
                     break;
                 }
             }
-            updateWellState(simulator, dx_well, well_state, deferred_logger, relaxation_factor);
+            try{
+                const BVectorWell dx_well = this->linSys_.solve();
+                updateWellState(simulator, dx_well, well_state, deferred_logger, relaxation_factor);
+            }
+            catch(const NumericalProblem& exp) {
+                // Add information about the well and log to deferred logger
+                // (Logging done inside of solve() method will only be seen if
+                // this is the process with rank zero)
+                deferred_logger.problem("In MultisegmentWell::iterateWellEqWithSwitching for well "
+                                        + this->name() +": "+exp.what());
+                throw;
+            }
         }
 
         if (converged) {
@@ -1795,7 +1809,7 @@ namespace Opm
             auto& perf_rates = perf_data.phase_rates;
             auto& perf_press_state = perf_data.pressure;
             for (const int perf : this->segments_.perforations()[seg]) {
-                const int local_perf_index = this->pw_info_.activeToLocal(perf);
+                const int local_perf_index = this->pw_info_.activePerfToLocalPerf(perf);
                 if (local_perf_index < 0) // then the perforation is not on this process
                     continue;
                 const int cell_idx = this->well_cells_[local_perf_index];
@@ -1950,7 +1964,7 @@ namespace Opm
         for (int seg = 0; seg < nseg; ++seg) {
             const EvalWell segment_pressure = this->primary_variables_.getSegmentPressure(seg);
             for (const int perf : this->segments_.perforations()[seg]) {
-                const int local_perf_index = this->pw_info_.activeToLocal(perf);
+                const int local_perf_index = this->pw_info_.activePerfToLocalPerf(perf);
                 if (local_perf_index < 0) // then the perforation is not on this process
                     continue;
 
@@ -2160,7 +2174,7 @@ namespace Opm
         const int nseg = this->numberOfSegments();
         for (int seg = 0; seg < nseg; ++seg) {
             for (const int perf : this->segments_.perforations()[seg]) {
-                const int local_perf_index = this->pw_info_.activeToLocal(perf);
+                const int local_perf_index = this->pw_info_.activePerfToLocalPerf(perf);
                 if (local_perf_index < 0) // then the perforation is not on this process
                     continue;
 
@@ -2171,6 +2185,7 @@ namespace Opm
                 max_pressure = std::max(max_pressure, pressure_cell);
             }
         }
+        max_pressure = this->parallel_well_info_.communication().max(max_pressure);
         return max_pressure;
     }
 
@@ -2192,7 +2207,7 @@ namespace Opm
             // calculating the perforation rate for each perforation that belongs to this segment
             const Scalar seg_pressure = getValue(this->primary_variables_.getSegmentPressure(seg));
             for (const int perf : this->segments_.perforations()[seg]) {
-                const int local_perf_index = this->pw_info_.activeToLocal(perf);
+                const int local_perf_index = this->pw_info_.activePerfToLocalPerf(perf);
                 if (local_perf_index < 0) // then the perforation is not on this process
                     continue;
 

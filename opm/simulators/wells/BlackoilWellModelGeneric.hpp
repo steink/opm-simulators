@@ -54,6 +54,7 @@
 #include <unordered_set>
 #include <vector>
 
+
 namespace Opm {
     class DeferredLogger;
     class EclipseState;
@@ -100,6 +101,11 @@ public:
                              const Parallel::Communication& comm);
 
     virtual ~BlackoilWellModelGeneric() = default;
+    virtual int compressedIndexForInteriorLGR([[maybe_unused]] const std::string& lgr_tag,
+                                              [[maybe_unused]] const Connection& conn) const
+    {
+        throw std::runtime_error("compressedIndexForInteriorLGR not implemented");
+    }
 
     int numLocalWells() const;
     int numLocalWellsEnd() const;
@@ -178,11 +184,13 @@ public:
     void initFromRestartFile(const RestartValue& restartValues,
                              std::unique_ptr<WellTestState> wtestState,
                              const std::size_t numCells,
-                             bool handle_ms_well);
+                             bool handle_ms_well,
+                             bool enable_distributed_wells);
 
     void prepareDeserialize(int report_step,
                             const std::size_t numCells,
-                            bool handle_ms_well);
+                            bool handle_ms_well,
+                            bool enable_distributed_wells);
 
     /*
       Will assign the internal member last_valid_well_state_ to the
@@ -222,6 +230,7 @@ public:
     const SummaryState& summaryState() const { return summaryState_; }
 
     const GuideRate& guideRate() const { return guideRate_; }
+    GuideRate& guideRate() { return guideRate_; }
 
     const std::map<std::string, double>& wellOpenTimes() const { return well_open_times_; }
     const std::map<std::string, double>& wellCloseTimes() const { return well_close_times_; }
@@ -436,6 +445,7 @@ protected:
     void updateAndCommunicateGroupData(const int reportStepIdx,
                                        const int iterationIdx,
                                        const Scalar tol_nupcol,
+                                       const bool update_wellgrouptarget, // we only want to update the wellgrouptarget after the groups have found their controls
                                        DeferredLogger& deferred_logger);
 
     void inferLocalShutWells();
@@ -498,11 +508,13 @@ protected:
                            const Scalar gasDensity) const;
 
     Schedule& schedule_;
+    
     const SummaryState& summaryState_;
     const EclipseState& eclState_;
     const Parallel::Communication& comm_;
     BlackoilWellModelGasLiftGeneric<Scalar>& gen_gaslift_;
     BlackoilWellModelWBP<Scalar> wbp_;
+
 
     PhaseUsage phase_usage_;
     bool terminal_output_{false};
@@ -523,7 +535,7 @@ protected:
     std::map<std::string, double> well_close_times_;
 
     std::vector<ConnectionIndexMap> conn_idx_map_{};
-    std::function<bool(const Well&)> not_on_process_{};
+    std::function<bool(const std::string&)> not_on_process_{};
 
     // a vector of all the wells.
     std::vector<WellInterfaceGeneric<Scalar>*> well_container_generic_{};

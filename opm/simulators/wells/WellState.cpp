@@ -150,7 +150,6 @@ WellState<Scalar> WellState<Scalar>::
 serializationTestObject(const ParallelWellInfo<Scalar>& pinfo)
 {
     WellState result(PhaseUsage{});
-    result.alq_state = ALQState<Scalar>::serializationTestObject();
     result.well_rates = {{"test2", {true, {1.0}}}, {"test3", {false, {2.0}}}};
     result.wells_.add("test4", SingleWellState<Scalar>::serializationTestObject(pinfo));
 
@@ -413,6 +412,7 @@ void WellState<Scalar>::init(const std::vector<Scalar>& cellPressures,
             new_well.prev_surface_rates = prev_well.prev_surface_rates;
             new_well.reservoir_rates = prev_well.reservoir_rates;
             new_well.well_potentials = prev_well.well_potentials;
+            new_well.group_target = prev_well.group_target;
 
             // perfPhaseRates
             //
@@ -460,8 +460,10 @@ void WellState<Scalar>::resize(const std::vector<Well>& wells_ecl,
                                const bool handle_ms_well,
                                const std::size_t numCells,
                                const std::vector<std::vector<PerforationData<Scalar>>>& well_perf_data,
-                               const SummaryState& summary_state)
+                               const SummaryState& summary_state,
+                               const bool enable_distributed_wells)
 {
+    this->enableDistributedWells_ = enable_distributed_wells;
     const std::vector<Scalar> tmp(numCells, 0.0); // <- UGLY HACK to pass the size
     init(tmp, tmp, schedule, wells_ecl, parallel_well_info, 0, nullptr, well_perf_data, summary_state, this->enableDistributedWells_);
 
@@ -587,7 +589,7 @@ WellState<Scalar>::report(const int* globalCellIdxMap,
         }
 
         if (ws.producer) {
-            well.rates.set(rt::alq, getALQ(wname));
+            well.rates.set(rt::alq, ws.alq_state.get());
         }
         else {
             well.rates.set(rt::alq, 0.0);
@@ -717,15 +719,15 @@ void WellState<Scalar>::initWellStateMSWell(const std::vector<Well>& wells_ecl,
                     }
 
                     segment_perforations[segment_index].push_back(n_activeperf);
-                    if (ws.parallel_info.get().globalToLocal(perf) > -1) {
+                    if (ws.parallel_info.get().globalPerfToLocalPerf(perf) > -1) {
                         active_perf_index_local_to_global.insert({n_activeperf_local, n_activeperf});
-                        active_to_local.insert({n_activeperf, ws.parallel_info.get().globalToLocal(perf)});
+                        active_to_local.insert({n_activeperf, ws.parallel_info.get().globalPerfToLocalPerf(perf)});
                         n_activeperf_local++;
                     }
                     n_activeperf++;
                 }
             }
-            ws.parallel_info.get().setActiveToLocalMap(active_to_local);
+            ws.parallel_info.get().setActivePerfToLocalPerfMap(active_to_local);
 
             // Check if the multi-segment well is distributed across several processes by comparing the local number
             // of active perforations (ws.perf_data.size()) with the total number of active perforations (n_activeperf).
@@ -912,7 +914,7 @@ calculateSegmentRatesBeforeSum(const ParallelWellInfo<Scalar>& pw_info,
     }
     // contributions from the perforations belong to this segment
     for (const int& perf : segment_perforations[segment]) {
-        auto local_perf = pw_info.activeToLocal(perf);
+        auto local_perf = pw_info.activePerfToLocalPerf(perf);
         // If local_perf == -1, then the perforation is not on this process.
         // The perforation of the other processes are added in calculateSegmentRates.
         if (local_perf > -1) {
@@ -976,7 +978,6 @@ void WellState<Scalar>::communicateGroupRates(const Parallel::Communication& com
     std::size_t sz = std::accumulate(this->well_rates.begin(), this->well_rates.end(), std::size_t{0},
                      [](const std::size_t acc, const auto& rates)
                      { return acc + rates.second.second.size(); });
-    sz += this->alq_state.pack_size();
 
     // Make a vector and collect all data into it.
     std::vector<Scalar> data(sz);
@@ -991,9 +992,6 @@ void WellState<Scalar>::communicateGroupRates(const Parallel::Communication& com
                       pos += rates.size();
                   });
 
-    if (pos != data.end()) {
-        pos += this->alq_state.pack_data(&(*pos));
-    }
     assert(pos == data.end());
 
     // Communicate it with a single sum() call.
@@ -1007,9 +1005,6 @@ void WellState<Scalar>::communicateGroupRates(const Parallel::Communication& com
                       std::copy(pos, pos + rates.size(), rates.begin());
                       pos += rates.size();
                   });
-    if (pos != data.end()) {
-        pos += this->alq_state.unpack_data(&(*pos));
-    }
     assert(pos == data.end());
 }
 
@@ -1316,19 +1311,19 @@ void WellState<Scalar>::updateWellsDefaultALQ(const Schedule& schedule,
     const auto wells = schedule.wellNames(report_step);
     for (const auto& wname : wells) {
         const auto& well = schedule.getWell(wname, report_step);
-        if (! well.isProducer()) {
+        const auto& well_index = this->index(wname);
+        if (! well.isProducer() || !well_index) {
             continue;
         }
         const auto alq = well.alq_value(summary_state);
-        this->alq_state.update_default(wname, alq);
+        this->well(wname).alq_state.update_default(alq);
     }
 }
 
 template<class Scalar>
 bool WellState<Scalar>::operator==(const WellState& rhs) const
 {
-    return this->alq_state == rhs.alq_state &&
-           this->well_rates == rhs.well_rates &&
+    return this->well_rates == rhs.well_rates &&
            this->wells_ == rhs.wells_ &&
            this->permanently_inactive_well_names_ == rhs.permanently_inactive_well_names_;
 }

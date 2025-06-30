@@ -47,6 +47,7 @@
 
 #include <array>
 #include <cstddef>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -204,6 +205,13 @@ public:
             return index_pair->second;
         }
     }
+
+    virtual int compressedIndexForInteriorLGR([[maybe_unused]] const std::string& lgr_tag, 
+                                              [[maybe_unused]]  const Connection&    conn) const
+    {
+        throw std::runtime_error("compressedIndexForInteriorLGR not implemented");
+    }
+
     /*!
      * \brief Extract Cartesian index triplet (i,j,k) of an active cell.
      *
@@ -276,10 +284,6 @@ public:
         auto local_cells = std::distance(gridView.template begin<codim, Part>(),
                                          gridView.template end<codim, Part>());
         return grid.comm().sum(local_cells);
-    }
-
-    void setupCartesianToCompressed_() {
-          this->updateCartesianToCompressedMapping_();
     }
 
 protected:
@@ -437,7 +441,10 @@ protected:
      *  It is initialized the first time it is called
      */
     std::unordered_map<int,int> cartesianToCompressed_;
-
+    /*! \brief Mapping between LGR cartesian and compressed cells.
+     *  It is initialized as it is called
+     */
+    mutable std::optional<std::vector<std::unordered_map<std::size_t, std::size_t>>> lgrMappers_;
     /*! \brief Cell center depths
      */
     std::vector<Scalar> cellCenterDepth_;

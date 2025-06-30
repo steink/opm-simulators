@@ -26,7 +26,6 @@
 
 #include <opm/common/ErrorMacros.hpp>
 #include <opm/common/TimingMacros.hpp>
-
 #include <opm/output/data/GuideRateValue.hpp>
 #include <opm/output/data/Groups.hpp>
 #include <opm/output/data/Wells.hpp>
@@ -45,6 +44,7 @@
 #include <opm/input/eclipse/Schedule/Network/ExtNetwork.hpp>
 #include <opm/input/eclipse/Schedule/Schedule.hpp>
 #include <opm/input/eclipse/Schedule/ScheduleTypes.hpp>
+#include <opm/input/eclipse/Schedule/Well/NameOrder.hpp>
 #include <opm/input/eclipse/Schedule/Well/WellConnections.hpp>
 #include <opm/input/eclipse/Schedule/Well/WellTestConfig.hpp>
 
@@ -73,8 +73,9 @@
 #include <algorithm>
 #include <cassert>
 #include <functional>
-#include <stdexcept>
+#include <iterator>
 #include <sstream>
+#include <stdexcept>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -109,18 +110,19 @@ BlackoilWellModelGeneric(Schedule& schedule,
 {
 
     const auto numProcs = comm_.size();
-    this->not_on_process_ = [this, numProcs](const Well& well) {
-        if (numProcs == decltype(numProcs){1})
+    this->not_on_process_ = [this, numProcs](const std::string& well) {
+        if (numProcs == decltype(numProcs){1}) {
             return false;
+        }
 
         // Recall: false indicates NOT active!
-        const auto value = std::make_pair(well.name(), true);
+        const auto value = std::make_pair(well, true);
         auto candidate = std::lower_bound(this->parallel_well_info_.begin(),
                                           this->parallel_well_info_.end(),
                                           value);
 
         return (candidate == this->parallel_well_info_.end())
-                || (*candidate != value);
+            || (*candidate != value);
     };
 
     const auto& node_pressures = eclState.getRestartNetworkPressures();
@@ -217,7 +219,8 @@ void BlackoilWellModelGeneric<Scalar>::
 initFromRestartFile(const RestartValue& restartValues,
                     std::unique_ptr<WellTestState> wtestState,
                     const std::size_t numCells,
-                    bool handle_ms_well)
+                    bool handle_ms_well,
+                    bool enable_distributed_wells)
 {
     // The restart step value is used to identify wells present at the given
     // time step. Wells that are added at the same time step as RESTART is initiated
@@ -238,7 +241,7 @@ initFromRestartFile(const RestartValue& restartValues,
     // Resize for restart step
     this->wellState().resize(this->wells_ecl_, this->local_parallel_well_info_,
                              this->schedule(), handle_ms_well, numCells,
-                             this->well_perf_data_, this->summaryState_);
+                             this->well_perf_data_, this->summaryState_, enable_distributed_wells);
 
     BlackoilWellModelRestart(*this).
         loadRestartData(restartValues.wells,
@@ -270,7 +273,7 @@ initFromRestartFile(const RestartValue& restartValues,
 
 template<class Scalar>
 void BlackoilWellModelGeneric<Scalar>::
-prepareDeserialize(int report_step, const std::size_t numCells, bool handle_ms_well)
+prepareDeserialize(int report_step, const std::size_t numCells, bool handle_ms_well, bool enable_distributed_wells)
 {
     // wells_ecl_ should only contain wells on this processor.
     wells_ecl_ = getLocalWells(report_step);
@@ -283,7 +286,7 @@ prepareDeserialize(int report_step, const std::size_t numCells, bool handle_ms_w
         handle_ms_well &= anyMSWellOpenLocal();
         this->wellState().resize(this->wells_ecl_, this->local_parallel_well_info_,
                                  this->schedule(), handle_ms_well, numCells,
-                                 this->well_perf_data_, this->summaryState_);
+                                 this->well_perf_data_, this->summaryState_, enable_distributed_wells);
 
     }
     this->wellState().clearWellRates();
@@ -295,8 +298,21 @@ template<class Scalar>
 std::vector<Well> BlackoilWellModelGeneric<Scalar>::
 getLocalWells(const int timeStepIdx) const
 {
-    auto w = schedule().getWells(timeStepIdx);
-    w.erase(std::remove_if(w.begin(), w.end(), not_on_process_), w.end());
+    auto w = std::vector<Well>{};
+
+    auto wnames = this->schedule().wellNames(timeStepIdx);
+    wnames.erase(std::remove_if(wnames.begin(), wnames.end(),
+                                this->not_on_process_),
+                 wnames.end());
+
+    w.reserve(wnames.size());
+
+    std::transform(wnames.begin(), wnames.end(),
+                   std::back_inserter(w),
+                   [&st = this->schedule()[timeStepIdx]]
+                   (const std::string& wname)
+                   { return st.wells(wname); });
+
     return w;
 }
 
@@ -341,6 +357,7 @@ initializeWellPerfData()
     this->conn_idx_map_.reserve(wells_ecl_.size());
 
     int well_index = 0;
+
     for (const auto& well : wells_ecl_) {
         int connection_index = 0;
 
@@ -363,10 +380,12 @@ initializeWellPerfData()
         auto& parallelWellInfo = this->local_parallel_well_info_[well_index].get();
         parallelWellInfo.beginReset();
 
-        for (const auto& connection : well.getConnections()) {
-            const auto active_index =
-                this->compressedIndexForInterior(connection.global_index());
 
+        for (const auto& connection : well.getConnections()) {
+    
+            const int active_index = well.is_lgr_well()
+                ? compressedIndexForInteriorLGR(well.get_lgr_well_tag().value(), connection)
+                : this->compressedIndexForInterior(connection.global_index());       
             const auto connIsOpen =
                 connection.state() == Connection::State::OPEN;
 
@@ -691,6 +710,7 @@ checkGroupHigherConstraints(const Group& group,
                                                                        schedule(),
                                                                        summaryState_,
                                                                        resv_coeff_inj,
+                                                                       /*check_guide_rate*/true,
                                                                        deferred_logger);
                 if (is_changed) {
                     switched_inj_groups_[group.name()][static_cast<std::underlying_type_t<Phase>>(phase)].push_back(Group::InjectionCMode::FLD);
@@ -767,6 +787,7 @@ checkGroupHigherConstraints(const Group& group,
                                                                     schedule(),
                                                                     summaryState_,
                                                                     resv_coeff,
+                                                                    /*check_guide_rate*/true,
                                                                     deferred_logger);
             if (is_changed) {
                 const auto group_limit_action = group.productionControls(summaryState_).group_limit_action;
@@ -861,12 +882,8 @@ updateEclWellsConstraints(const int              timeStepIdx,
                          (const auto wellIdx, const auto& well)
     {
         auto& ws = this->wellState().well(wellIdx);
-
         ws.updateStatus(well.getStatus());
-        auto switchToProducer = ws.update_type_and_targets(well, st);
-        if (switchToProducer) {
-            this->wellState().switchToProducer(well.name());
-        }
+        ws.update_type_and_targets(well, st);
     });
 }
 
@@ -1251,6 +1268,7 @@ assignNodeValues(std::map<std::string, data::NodeData>& nodevalues,
                                                                                  this->groupState(),
                                                                                  *(vfp_properties_->getProd()),
                                                                                  schedule(),
+                                                                                 comm_,
                                                                                  reportStepIdx);
     for (const auto& [node, converged_pressure] : converged_pressures) {
         auto it = nodevalues.find(node);
@@ -1288,6 +1306,7 @@ void BlackoilWellModelGeneric<Scalar>::
 updateAndCommunicateGroupData(const int reportStepIdx,
                               const int iterationIdx,
                               const Scalar tol_nupcol,
+                              const bool update_wellgrouptarget,
                               DeferredLogger& deferred_logger)
 {
     OPM_TIMEFUNCTION();
@@ -1423,17 +1442,79 @@ updateAndCommunicateGroupData(const int reportStepIdx,
                                               well_state_nupcol,
                                               well_state);
 
-    // Set ALQ for off-process wells to zero
-    for (const auto& wname : schedule().wellNames(reportStepIdx)) {
-        const bool is_producer = schedule().getWell(wname, reportStepIdx).isProducer();
-        const bool not_on_this_process = !well_state.has(wname);
-        if (is_producer && not_on_this_process) {
-            well_state.setALQ(wname, 0.0);
-        }
-    }
-
     well_state.communicateGroupRates(comm_);
     this->groupState().communicate_rates(comm_);
+
+    if (update_wellgrouptarget) {
+        for (const auto& well : well_container_generic_) {
+            const auto& ws = this->wellState().well(well->indexOfWell());
+            const auto& group = this->schedule().getGroup(well->wellEcl().groupName(), well->currentStep());
+            std::vector<Scalar> resv_coeff(well->phaseUsage().num_phases, 0.0);
+            const int fipnum = 0;
+            int pvtreg = well->pvtRegionIdx();
+            calcResvCoeff(fipnum, pvtreg, this->groupState().production_rates(group.name()), resv_coeff);
+            const Scalar efficiencyFactor = well->wellEcl().getEfficiencyFactor() *
+                                    ws.efficiency_scaling_factor;
+            // Translate injector type from control to Phase.
+            Scalar group_target = std::numeric_limits<Scalar>::max();
+            if (well->isProducer()) {
+                group_target = WellGroupHelpers<Scalar>::getWellGroupTargetProducer(well->name(),
+                                            well->wellEcl().groupName(),
+                                            group,
+                                            this->wellState(),
+                                            this->groupState(),
+                                            well->currentStep(),
+                                            well->guideRate(),
+                                            ws.surface_rates.data(),
+                                            well->phaseUsage(),
+                                            efficiencyFactor,
+                                            this->schedule(),
+                                            summaryState_,
+                                            resv_coeff,
+                                            deferred_logger);
+            } else {
+                const auto& well_controls = well->wellEcl().injectionControls(summaryState_);
+                auto injectorType = well_controls.injector_type;
+                Phase injectionPhase;
+                switch (injectorType) {
+                case InjectorType::WATER:
+                {
+                    injectionPhase = Phase::WATER;
+                    break;
+                }
+                case InjectorType::OIL:
+                {
+                    injectionPhase = Phase::OIL;
+                    break;
+                }
+                case InjectorType::GAS:
+                {
+                    injectionPhase = Phase::GAS;
+                    break;
+                }
+                default:
+                    assert(false); //programming error
+                }
+                group_target = WellGroupHelpers<Scalar>::getWellGroupTargetInjector(well->name(),
+                                            well->wellEcl().groupName(),
+                                            group,
+                                            this->wellState(),
+                                            this->groupState(),
+                                            well->currentStep(),
+                                            well->guideRate(),
+                                            ws.surface_rates.data(),
+                                            injectionPhase,
+                                            well->phaseUsage(),
+                                            efficiencyFactor,
+                                            this->schedule(),
+                                            summaryState_,
+                                            resv_coeff,
+                                            deferred_logger);
+            }
+            auto& ws_update = this->wellState().well(well->indexOfWell());
+            ws_update.group_target = group_target;
+        }
+    }
 }
 
 template<class Scalar>
@@ -1569,6 +1650,7 @@ updateNetworkPressures(const int reportStepIdx, const Scalar damping_factor, con
                                                                         this->groupState(),
                                                                         *(vfp_properties_->getProd()),
                                                                         schedule(),
+                                                                        comm_,
                                                                         reportStepIdx);
 
     // here, the network imbalance is the difference between the previous nodal pressure and the new nodal pressure
@@ -1842,7 +1924,10 @@ getCellsForConnections(const Well& well) const
 
     for (const auto& connection : connectionSet)
     {
-        int compressed_idx = compressedIndexForInterior(connection.global_index());
+        int compressed_idx = well.is_lgr_well()
+            ? compressedIndexForInteriorLGR(well.get_lgr_well_tag().value(), connection)    
+            : this->compressedIndexForInterior(connection.global_index());     
+        
         if (compressed_idx >= 0) { // Ignore connections in inactive/remote cells.
             wellCells.push_back(compressed_idx);
         }
@@ -1933,47 +2018,55 @@ template<class Scalar>
 std::vector<std::vector<int>> BlackoilWellModelGeneric<Scalar>::
 getMaxWellConnections() const
 {
-    std::vector<std::vector<int>> wells;
+    auto wellConnections = std::vector<std::vector<int>>{};
 
-    auto schedule_wells = schedule().getWellsatEnd();
-    schedule_wells.erase(std::remove_if(schedule_wells.begin(), schedule_wells.end(), not_on_process_), schedule_wells.end());
-    wells.reserve(schedule_wells.size());
+    auto schedule_wells = this->schedule().wellNames();
+    schedule_wells.erase(std::remove_if(schedule_wells.begin(),
+                                        schedule_wells.end(),
+                                        this->not_on_process_),
+                         schedule_wells.end());
 
-    auto possibleFutureConnections = schedule().getPossibleFutureConnections();
+    wellConnections.reserve(schedule_wells.size());
+
+    const auto possibleFutureConnections = schedule().getPossibleFutureConnections();
+
 #if HAVE_MPI
     // Communicate Map to other processes, since it is only available on rank 0
     Parallel::MpiSerializer ser(comm_);
     ser.broadcast(Parallel::RootRank{0}, possibleFutureConnections);
 #endif
-    // initialize the additional cell connections introduced by wells.
-    for (const auto& well : schedule_wells)
-    {
-        std::vector<int> compressed_well_perforations = this->getCellsForConnections(well);
 
-        const auto possibleFutureConnectionSetIt = possibleFutureConnections.find(well.name());
+    // initialize the additional cell connections introduced by wells.
+    for (const auto& well : schedule_wells) {
+        auto& compressed_well_perforations = wellConnections.emplace_back
+            (this->getCellsForConnections(this->schedule().back().wells(well)));
+
+        const auto possibleFutureConnectionSetIt = possibleFutureConnections.find(well);
         if (possibleFutureConnectionSetIt != possibleFutureConnections.end()) {
             for (const auto& global_index : possibleFutureConnectionSetIt->second) {
-                int compressed_idx = compressedIndexForInterior(global_index);
+                const int compressed_idx = compressedIndexForInterior(global_index);
                 if (compressed_idx >= 0) { // Ignore connections in inactive/remote cells.
                     compressed_well_perforations.push_back(compressed_idx);
                 }
             }
         }
+
         // also include wells with no perforations in case
         std::sort(compressed_well_perforations.begin(),
                   compressed_well_perforations.end());
-
-        wells.push_back(compressed_well_perforations);
     }
-    return wells;
+
+    return wellConnections;
 }
 
 template<class Scalar>
 int BlackoilWellModelGeneric<Scalar>::numLocalWellsEnd() const
 {
-    auto w = schedule().getWellsatEnd();
-    w.erase(std::remove_if(w.begin(), w.end(), not_on_process_), w.end());
-    return w.size();
+    const auto& wnames = schedule().back().well_order().names();
+
+    return std::count_if(wnames.begin(), wnames.end(),
+                         [this](const std::string& wname)
+                         { return ! this->not_on_process_(wname); });
 }
 
 template<class Scalar>

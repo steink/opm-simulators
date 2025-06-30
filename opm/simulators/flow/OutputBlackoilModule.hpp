@@ -115,6 +115,9 @@ class OutputBlackOilModule : public GenericOutputBlackoilModule<GetPropType<Type
     static constexpr int waterCompIdx = FluidSystem::waterCompIdx;
     enum { enableEnergy = getPropValue<TypeTag, Properties::EnableEnergy>() };
     enum { enableMICP = getPropValue<TypeTag, Properties::EnableMICP>() };
+    enum { enableVapwat = getPropValue<TypeTag, Properties::EnableVapwat>() };
+    enum { enableDisgasInWater = getPropValue<TypeTag, Properties::EnableDisgasInWater>() };
+    enum { enableDissolvedGas = Indices::compositionSwitchIdx >= 0 };
 
     template<int idx, class VectorType>
     static Scalar value_or_zero(const VectorType& v)
@@ -372,6 +375,43 @@ public:
         }
     }
 
+    void outputFipAndResvLogToCSV(const std::size_t reportStepNum,
+                                  const bool substep,
+                                  const Parallel::Communication& comm)
+    {
+        if (comm.rank() != 0) {
+            return;
+        }
+
+        if ((reportStepNum == 0) && (!substep) &&
+            (this->schedule_.initialReportConfiguration().has_value()) &&
+            (this->schedule_.initialReportConfiguration()->contains("CSVFIP"))) {
+
+            std::ostringstream csv_stream;
+
+            this->logOutput_.csv_header(csv_stream);
+
+            const auto& initial_inplace = this->initialInplace().value();
+
+            this->logOutput_.fip_csv(csv_stream, initial_inplace, "FIPNUM");
+
+            for (const auto& reg : this->regions_) {
+                if (reg.first != "FIPNUM") {
+                    this->logOutput_.fip_csv(csv_stream, initial_inplace, reg.first);
+                }
+            }
+
+            const IOConfig& io =  this->eclState_.getIOConfig();
+            auto csv_fname = io.getOutputDir() + "/" + io.getBaseName() + ".CSV";
+
+            std::ofstream outputFile(csv_fname);
+
+            outputFile <<  csv_stream.str();
+
+            outputFile.close();
+        }
+    }
+
     /*!
      * \brief Capture connection fluxes, particularly to account for inter-region flows.
      *
@@ -496,14 +536,20 @@ public:
 
         if (!this->temperature_.empty())
             fs.setTemperature(this->temperature_[elemIdx]);
-        if (!this->rs_.empty())
-            fs.setRs(this->rs_[elemIdx]);
-        if (!this->rsw_.empty())
-            fs.setRsw(this->rsw_[elemIdx]);
-        if (!this->rv_.empty())
-            fs.setRv(this->rv_[elemIdx]);
-        if (!this->rvw_.empty())
-            fs.setRvw(this->rvw_[elemIdx]);
+        if constexpr (enableDissolvedGas) {
+            if (!this->rs_.empty())
+                fs.setRs(this->rs_[elemIdx]);
+            if (!this->rv_.empty())
+                fs.setRv(this->rv_[elemIdx]);
+        }
+        if constexpr (enableDisgasInWater) {
+            if (!this->rsw_.empty())
+                fs.setRsw(this->rsw_[elemIdx]);
+        }
+        if constexpr (enableVapwat) {
+            if (!this->rvw_.empty())
+                fs.setRvw(this->rvw_[elemIdx]);
+        }
     }
 
     void initHysteresisParams(Simulator& simulator, unsigned elemIdx) const
@@ -636,6 +682,11 @@ private:
 
     void createLocalRegion_(std::vector<int>& region)
     {
+        // For CpGrid with LGRs, where level zero grid has been distributed,
+        // resize region is needed, since in this case the total amount of
+        // element - per process - in level zero grid and leaf grid do not
+        // coincide, in general.
+        region.resize(simulator_.gridView().size(0));
         std::size_t elemIdx = 0;
         for (const auto& elem : elements(simulator_.gridView())) {
             if (elem.partitionType() != Dune::InteriorEntity) {

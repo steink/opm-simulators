@@ -57,6 +57,16 @@ add_test_compare_parallel_simulation(CASENAME msw-simple
                                      MPI_PROCS 4
                                      TEST_ARGS --solver-max-time-step-in-days=15 --allow-distributed-wells=true)
 
+# A test for distributed multisegment wells. We load distribute only along the z-axis
+add_test_compare_parallel_simulation(CASENAME msw-simple-9-perfs-1-seg
+                                     FILENAME MSW-SIMPLE-9-PERFS-1-SEG # this file contains one Multisegment well without branches where 9 perforations belong to the same segment
+                                     DIR msw
+                                     SIMULATOR flow_distribute_z
+                                     ABS_TOL 1e4 # the absolute tolerance is pretty high here, yet in this case, we are only interested in the relative tolerance
+                                     REL_TOL 1e-5
+                                     MPI_PROCS 4
+                                     TEST_ARGS --solver-max-time-step-in-days=10 --allow-distributed-wells=true)
+
 # A test for distributed multisegment wells with one shut perforation at the process border. We load distribute only along the z-axis
 add_test_compare_parallel_simulation(CASENAME msw-simple-1-shut-perforation-border
                                      FILENAME MSW-SIMPLE-1-SHUT-PERFORATION-BORDER # this file contains one Multisegment well without branches that is distributed across several processes
@@ -132,21 +142,23 @@ add_test_compare_parallel_simulation(CASENAME spe9group
                                      REL_TOL ${coarse_rel_tol_parallel}
                                      TEST_ARGS --linear-solver-reduction=1e-7 --tolerance-cnv=5e-6 --tolerance-mb=1e-8)
 
-add_test_compare_parallel_simulation(CASENAME spe3
+add_test_compare_parallel_simulation(CASENAME spe3_partition_method_zoltan
                                      FILENAME SPE3CASE1
-                                     SIMULATOR flow
-                                     ABS_TOL ${abs_tol_parallel}
-                                     REL_TOL ${coarse_rel_tol_parallel}
-                                     TEST_ARGS --linear-solver-reduction=1e-7 --tolerance-cnv=5e-6 --tolerance-mb=1e-8 --tolerance-wells=1e-7 --partition-method=1)
-
-add_test_compare_parallel_simulation(CASENAME spe3_partition_method_3
-                                     FILENAME SPE3CASE1
-                                     POSTFIX partition_method_3
+                                     POSTFIX partition_method_zoltan
                                      DIR spe3
                                      SIMULATOR flow
                                      ABS_TOL ${abs_tol_parallel}
                                      REL_TOL ${coarse_rel_tol_parallel}
-                                     TEST_ARGS --linear-solver-reduction=1e-7 --tolerance-cnv=5e-6 --tolerance-mb=1e-8 --tolerance-wells=1e-7 --partition-method=3)
+                                     TEST_ARGS --linear-solver-reduction=1e-7 --tolerance-cnv=5e-6 --tolerance-mb=1e-8 --tolerance-wells=1e-7 --partition-method=zoltan)
+
+add_test_compare_parallel_simulation(CASENAME spe3_partition_method_zoltanwell
+                                     FILENAME SPE3CASE1
+                                     POSTFIX partition_method_zoltanwell
+                                     DIR spe3
+                                     SIMULATOR flow
+                                     ABS_TOL ${abs_tol_parallel}
+                                     REL_TOL ${coarse_rel_tol_parallel}
+                                     TEST_ARGS --linear-solver-reduction=1e-7 --tolerance-cnv=5e-6 --tolerance-mb=1e-8 --tolerance-wells=1e-7 --partition-method=zoltanwell)
 
 add_test_compare_parallel_simulation(CASENAME spe1_solvent
                                      FILENAME SPE1CASE2_SOLVENT
@@ -262,6 +274,15 @@ add_test_compare_parallel_simulation(CASENAME numerical_aquifer_3d_1aqu
                                      REL_TOL 0.05
                                      DIR aquifer-num
                                      TEST_ARGS --enable-tuning=true --tolerance-cnv=0.00003 --time-step-control=pid --linear-solver=cpr_trueimpes --enable-drift-compensation=false --relaxed-max-pv-fraction=0.0)
+
+add_test_compare_parallel_simulation(CASENAME 6_uda_model5_stdw
+  FILENAME 6_UDA_MODEL5_STDW
+  SIMULATOR flow
+  ABS_TOL ${abs_tol_parallel}
+  REL_TOL ${rel_tol_parallel}
+  DIR model5
+  TEST_ARGS --enable-tuning=true
+)
 
 foreach(templ_case RANGE 1 6)
   add_test_compare_parallel_simulation(CASENAME actionx_well_templ_0${templ_case}

@@ -117,6 +117,17 @@ public:
         this->callImplementationInit();
     }
 
+    int compressedIndexForInteriorLGR(const std::string& lgr_tag, const Connection& conn) const override
+    {
+        const std::array<int,3> lgr_ijk = {conn.getI(), conn.getJ(), conn.getK()};
+        const auto& lgr_level = this->grid().getLgrNameToLevel().at(lgr_tag);
+        if (ParentType::lgrMappers_.has_value() == false) {
+            ParentType::lgrMappers_.emplace(this->grid().mapLocalCartesianIndexSetsToLeafIndexSet());
+        }
+        const auto& lgr_dim = this->grid().currentData()[lgr_level]->logicalCartesianSize();
+        const auto lgr_cartesian_index = (lgr_ijk[2]*lgr_dim[0]*lgr_dim[1]) + (lgr_ijk[1]*lgr_dim[0]) + (lgr_ijk[0]);
+        return ParentType::lgrMappers_.value()[lgr_level].at(lgr_cartesian_index);
+    }   
     /*!
      * Checking consistency of simulator
      */
@@ -252,19 +263,26 @@ public:
      */
     void addLgrs()
     {
-        // Check if input file contains Lgrs.
-        //
-        // If there are lgrs, create the grid with them, and update the leaf grid view.
-        if (const auto& lgrs = this->eclState().getLgrs(); (lgrs.size() > 0) && (this->grid_->comm().size() == 1)) {
+        // Check if input file contains Lgrs. Add them, if any.
+        // In a parallel run, this adds the LGRs on the distributed simulation grid.
+        if (const auto& lgrs = this->eclState().getLgrs(); lgrs.size() > 0) {
             OpmLog::info("\nAdding LGRs to the grid and updating its leaf grid view");
             this->addLgrsUpdateLeafView(lgrs, lgrs.size(), *this->grid_);
 
             this->updateGridView_();
             this->updateCellDepths_();
             this->updateCellThickness_();
-        }
-        else if (this->grid_->comm().size() > 1) {
-            OpmLog::warning("Adding LGRs in parallel run is not supported yet.\n");
+
+            if (this->grid_->comm().size()>1) {
+                // Add LGRs and update the leaf grid view in the global (undistributed) simulation grid.
+                // Purpose: To enable synchronization of cell ids in 'serial mode',
+                //          we rely on the "parent-to-children" cell id mapping.
+                OpmLog::info("\nAdding LGRs to the global view and updating its leaf grid view");
+                this->grid_->switchToGlobalView();
+                this->addLgrsUpdateLeafView(lgrs, lgrs.size(), *this->grid_);
+                this->grid_->switchToDistributedView();
+                this->grid_->syncDistributedGlobalCellIds();
+            }
         }
     }
 

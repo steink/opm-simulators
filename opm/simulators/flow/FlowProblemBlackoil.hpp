@@ -62,7 +62,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <functional>
-#include <set>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -132,6 +132,10 @@ private:
     using typename FlowProblemType::MaterialLaw;
     using typename FlowProblemType::DimMatrix;
 
+    enum { enableDissolvedGas = Indices::compositionSwitchIdx >= 0 };
+    enum { enableVapwat = getPropValue<TypeTag, Properties::EnableVapwat>() };
+    enum { enableDisgasInWater = getPropValue<TypeTag, Properties::EnableDisgasInWater>() };
+
     using SolventModule = BlackOilSolventModule<TypeTag>;
     using PolymerModule = BlackOilPolymerModule<TypeTag>;
     using FoamModule = BlackOilFoamModule<TypeTag>;
@@ -182,7 +186,7 @@ public:
                          this->wellModel_,
                          simulator.vanguard().grid().comm())
     {
-        this->model().addOutputModule(new VtkTracerModule<TypeTag>(simulator));
+        this->model().addOutputModule(std::make_unique<VtkTracerModule<TypeTag>>(simulator));
 
         // Tell the black-oil extensions to initialize their internal data structures
         const auto& vanguard = simulator.vanguard();
@@ -782,8 +786,6 @@ public:
                 Valgrind::CheckDefined(pc);
                 for (unsigned activePhaseIdx = 0; activePhaseIdx < FluidSystem::numActivePhases(); ++activePhaseIdx) {
                     const auto phaseIdx = FluidSystem::activeToCanonicalPhaseIdx(activePhaseIdx);
-
-                    fluidState.setPc(phaseIdx, pc[phaseIdx]);
                     if (Indices::oilEnabled)
                         fluidState.setPressure(phaseIdx, pressure + (pc[phaseIdx] - pc[oilPhaseIdx]));
                     else if (Indices::gasEnabled)
@@ -799,15 +801,22 @@ public:
                     temperature = *temperature_input;
                 fluidState.setTemperature(temperature);
 
-                if (FluidSystem::enableDissolvedGas()) {
-                    fluidState.setRs(0.0);
-                    fluidState.setRv(0.0);
+                if constexpr (enableDissolvedGas) {
+                    if (FluidSystem::enableDissolvedGas()) {
+                        fluidState.setRs(0.0);
+                        fluidState.setRv(0.0);
+                    }
                 }
-                if (FluidSystem::enableDissolvedGasInWater()) {
-                    fluidState.setRsw(0.0);
+                if constexpr (enableDisgasInWater) {
+                    if (FluidSystem::enableDissolvedGasInWater()) {
+                        fluidState.setRsw(0.0);
+                    }
                 }
-                if (FluidSystem::enableVaporizedWater())
-                    fluidState.setRvw(0.0);
+                if constexpr (enableVapwat) {
+                    if (FluidSystem::enableVaporizedWater()) {
+                        fluidState.setRvw(0.0);
+                    }
+                }
 
                 for (unsigned activePhaseIdx = 0; activePhaseIdx < FluidSystem::numActivePhases(); ++activePhaseIdx) {
                     const auto phaseIdx = FluidSystem::activeToCanonicalPhaseIdx(activePhaseIdx);
@@ -817,7 +826,7 @@ public:
 
                     const auto& rho = FluidSystem::density(fluidState, phaseIdx, pvtRegionIdx);
                     fluidState.setDensity(phaseIdx, rho);
-                    if (enableEnergy) {
+                    if constexpr (enableEnergy) {
                         const auto& h = FluidSystem::enthalpy(fluidState, phaseIdx, pvtRegionIdx);
                         fluidState.setEnthalpy(phaseIdx, h);
                     }
@@ -1426,21 +1435,26 @@ protected:
                     dofFluidState.setPressure(phaseIdx, pressure);
             }
 
-            if (FluidSystem::enableDissolvedGas())
-                dofFluidState.setRs(rsData[dofIdx]);
-            else if (Indices::gasEnabled && Indices::oilEnabled)
-                dofFluidState.setRs(0.0);
+            if constexpr (enableDissolvedGas) {
+                if (FluidSystem::enableDissolvedGas())
+                    dofFluidState.setRs(rsData[dofIdx]);
+                else if (Indices::gasEnabled && Indices::oilEnabled)
+                    dofFluidState.setRs(0.0);
+                if (FluidSystem::enableVaporizedOil())
+                    dofFluidState.setRv(rvData[dofIdx]);
+                else if (Indices::gasEnabled && Indices::oilEnabled)
+                    dofFluidState.setRv(0.0);
+            }
 
-            if (FluidSystem::enableDissolvedGasInWater() && has_rsw)
-                dofFluidState.setRsw(rswData[dofIdx]);
+            if constexpr (enableDisgasInWater) {
+                if (FluidSystem::enableDissolvedGasInWater() && has_rsw)
+                    dofFluidState.setRsw(rswData[dofIdx]);
+            }
 
-            if (FluidSystem::enableVaporizedOil())
-                dofFluidState.setRv(rvData[dofIdx]);
-            else if (Indices::gasEnabled && Indices::oilEnabled)
-                dofFluidState.setRv(0.0);
-
-            if (FluidSystem::enableVaporizedWater())
-                dofFluidState.setRvw(rvwData[dofIdx]);
+            if constexpr (enableVapwat) {
+                if (FluidSystem::enableVaporizedWater())
+                    dofFluidState.setRvw(rvwData[dofIdx]);
+            }
 
             //////
             // set invB_
@@ -1600,8 +1614,11 @@ protected:
         const auto isIoRank = this->simulator().vanguard()
             .grid().comm().rank() == ioRank;
 
+        // Note: Run saturation function consistency checks on main grid
+        // only (i.e., levelGridView(0)).  These checks are not supported
+        // for LGRs at this time.
         sfuncConsistencyChecks.collectFailuresTo(ioRank)
-            .run(this->simulator().vanguard().grid().leafGridView(),
+            .run(this->simulator().vanguard().grid().levelGridView(0),
                  [&vg   = this->simulator().vanguard(),
                   &emap = this->simulator().model().elementMapper()]
                  (const auto& elem)

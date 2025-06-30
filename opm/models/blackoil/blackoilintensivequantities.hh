@@ -53,12 +53,14 @@
 #include <opm/utility/CopyablePtr.hpp>
 
 #include <array>
+#include <cassert>
 #include <cstring>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
 namespace Opm {
+
 /*!
  * \ingroup BlackOilModel
  * \ingroup IntensiveQuantities
@@ -72,14 +74,14 @@ class BlackOilIntensiveQuantities
     , public GetPropType<TypeTag, Properties::FluxModule>::FluxIntensiveQuantities
     , public BlackOilDiffusionIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableDiffusion>() >
     , public BlackOilDispersionIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableDispersion>() >
-    , public BlackOilSolventIntensiveQuantities<TypeTag>
-    , public BlackOilExtboIntensiveQuantities<TypeTag>
-    , public BlackOilPolymerIntensiveQuantities<TypeTag>
-    , public BlackOilFoamIntensiveQuantities<TypeTag>
-    , public BlackOilBrineIntensiveQuantities<TypeTag>
-    , public BlackOilEnergyIntensiveQuantities<TypeTag>
-    , public BlackOilMICPIntensiveQuantities<TypeTag>
-    , public BlackOilConvectiveMixingIntensiveQuantities<TypeTag>
+    , public BlackOilSolventIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableSolvent>()>
+    , public BlackOilExtboIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableExtbo>()>
+    , public BlackOilPolymerIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnablePolymer>()>
+    , public BlackOilFoamIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableFoam>()>
+    , public BlackOilBrineIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableBrine>()>
+    , public BlackOilEnergyIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableEnergy>()>
+    , public BlackOilMICPIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableMICP>()>
+    , public BlackOilConvectiveMixingIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableConvectiveMixing>()>
 {
     using ParentType = GetPropType<TypeTag, Properties::DiscIntensiveQuantities>;
     using Implementation = GetPropType<TypeTag, Properties::IntensiveQuantities>;
@@ -101,7 +103,7 @@ class BlackOilIntensiveQuantities
     enum { enableFoam = getPropValue<TypeTag, Properties::EnableFoam>() };
     enum { enableBrine = getPropValue<TypeTag, Properties::EnableBrine>() };
     enum { enableVapwat = getPropValue<TypeTag, Properties::EnableVapwat>() };
-    enum { has_disgas_in_water = getPropValue<TypeTag, Properties::EnableDisgasInWater>() };
+    enum { enableDisgasInWater = getPropValue<TypeTag, Properties::EnableDisgasInWater>() };
     enum { enableSaltPrecipitation = getPropValue<TypeTag, Properties::EnableSaltPrecipitation>() };
     enum { enableTemperature = getPropValue<TypeTag, Properties::EnableTemperature>() };
     enum { enableEnergy = getPropValue<TypeTag, Properties::EnableEnergy>() };
@@ -131,11 +133,10 @@ class BlackOilIntensiveQuantities
     using DiffusionIntensiveQuantities = BlackOilDiffusionIntensiveQuantities<TypeTag, enableDiffusion>;
     using DispersionIntensiveQuantities = BlackOilDispersionIntensiveQuantities<TypeTag, enableDispersion>;
 
-    using DirectionalMobilityPtr = Utility::CopyablePtr<DirectionalMobility<TypeTag, Evaluation>>;
+    using DirectionalMobilityPtr = Utility::CopyablePtr<DirectionalMobility<TypeTag>>;
     using BrineModule = BlackOilBrineModule<TypeTag>;
     using BrineIntQua = BlackOilBrineIntensiveQuantities<TypeTag, enableSaltPrecipitation>;
     using MICPIntQua = BlackOilMICPIntensiveQuantities<TypeTag, enableMICP>;
-
 
 public:
     using FluidState = BlackOilFluidState<Evaluation,
@@ -146,7 +147,7 @@ public:
                                           enableVapwat,
                                           enableBrine,
                                           enableSaltPrecipitation,
-                                          has_disgas_in_water,
+                                          enableDisgasInWater,
                                           Indices::numPhases>;
     using ScalarFluidState = BlackOilFluidState<Scalar,
                                                 FluidSystem,
@@ -156,20 +157,20 @@ public:
                                                 enableVapwat,
                                                 enableBrine,
                                                 enableSaltPrecipitation,
-                                                has_disgas_in_water,
+                                                enableDisgasInWater,
                                                 Indices::numPhases>;
     using Problem = GetPropType<TypeTag, Properties::Problem>;
 
     BlackOilIntensiveQuantities()
     {
-        if (compositionSwitchEnabled) {
+        if constexpr (compositionSwitchEnabled) {
             fluidState_.setRs(0.0);
             fluidState_.setRv(0.0);
-        }        
-        if (enableVapwat) { 
+        }
+        if constexpr (enableVapwat) {
             fluidState_.setRvw(0.0);
         }
-        if (has_disgas_in_water) {
+        if constexpr (enableDisgasInWater) {
             fluidState_.setRsw(0.0);
         }
     }
@@ -200,10 +201,12 @@ public:
                 if constexpr (Indices::waterSwitchIdx >= 0) {
                     Sw = priVars.makeEvaluation(Indices::waterSwitchIdx, timeIdx);
                 }
-            } else if(priVars.primaryVarsMeaningWater() == PrimaryVariables::WaterMeaning::Rsw ||
-                      priVars.primaryVarsMeaningWater() == PrimaryVariables::WaterMeaning::Disabled) {
-                      // water is enabled but is not a primary variable i.e. one component/phase case
-                      // or two-phase water + gas with only water present
+            }
+            else if (priVars.primaryVarsMeaningWater() == PrimaryVariables::WaterMeaning::Rsw ||
+                     priVars.primaryVarsMeaningWater() == PrimaryVariables::WaterMeaning::Disabled)
+            {
+                // water is enabled but is not a primary variable i.e. one component/phase case
+                // or two-phase water + gas with only water present
                 Sw = 1.0;
             } // else i.e. for MeaningWater() = Rvw, Sw is still 0.0;
         }
@@ -214,9 +217,11 @@ public:
                 if constexpr (compositionSwitchEnabled) {
                     Sg = priVars.makeEvaluation(Indices::compositionSwitchIdx, timeIdx);
                 }
-            } else if (priVars.primaryVarsMeaningGas() == PrimaryVariables::GasMeaning::Rv) {
+            }
+            else if (priVars.primaryVarsMeaningGas() == PrimaryVariables::GasMeaning::Rv) {
                 Sg = 1.0 - Sw;
-            } else if (priVars.primaryVarsMeaningGas() == PrimaryVariables::GasMeaning::Disabled) {
+            }
+            else if (priVars.primaryVarsMeaningGas() == PrimaryVariables::GasMeaning::Disabled) {
                 if constexpr (waterEnabled) {
                     Sg = 1.0 - Sw; // two phase water + gas
                 } else {
@@ -232,23 +237,27 @@ public:
 
         // deal with solvent
         if constexpr (enableSolvent) {
-            if(priVars.primaryVarsMeaningSolvent() == PrimaryVariables::SolventMeaning::Ss) {
+            if (priVars.primaryVarsMeaningSolvent() == PrimaryVariables::SolventMeaning::Ss) {
                 if (FluidSystem::phaseIsActive(oilPhaseIdx)) {
                     So -= priVars.makeEvaluation(Indices::solventSaturationIdx, timeIdx);
-                } else if (FluidSystem::phaseIsActive(gasPhaseIdx)) {
+                }
+                else if (FluidSystem::phaseIsActive(gasPhaseIdx)) {
                     Sg -= priVars.makeEvaluation(Indices::solventSaturationIdx, timeIdx);
                 }
             }
         }
 
-        if (FluidSystem::phaseIsActive(waterPhaseIdx))
+        if (FluidSystem::phaseIsActive(waterPhaseIdx)) {
             fluidState_.setSaturation(waterPhaseIdx, Sw);
+        }
 
-        if (FluidSystem::phaseIsActive(gasPhaseIdx))
+        if (FluidSystem::phaseIsActive(gasPhaseIdx)) {
             fluidState_.setSaturation(gasPhaseIdx, Sg);
+        }
 
-        if (FluidSystem::phaseIsActive(oilPhaseIdx))
+        if (FluidSystem::phaseIsActive(oilPhaseIdx)) {
             fluidState_.setSaturation(oilPhaseIdx, So);
+        }
     }
 
     void updateRelpermAndPressures(const ElementContext& elemCtx, unsigned dofIdx, unsigned timeIdx)
@@ -275,36 +284,47 @@ public:
 
         // scaling the capillary pressure due to salt precipitation
         if constexpr (enableBrine) {
-            if (BrineModule::hasPcfactTables() && priVars.primaryVarsMeaningBrine() == PrimaryVariables::BrineMeaning::Sp) {
-                unsigned satnumRegionIdx = elemCtx.problem().satnumRegionIndex(elemCtx, dofIdx, timeIdx);
+            if (BrineModule::hasPcfactTables() &&
+                priVars.primaryVarsMeaningBrine() == PrimaryVariables::BrineMeaning::Sp)
+            {
+                const unsigned satnumRegionIdx = elemCtx.problem().satnumRegionIndex(elemCtx, dofIdx, timeIdx);
                 const Evaluation Sp = priVars.makeEvaluation(Indices::saltConcentrationIdx, timeIdx);
                 const Evaluation porosityFactor  = min(1.0 - Sp, 1.0); //phi/phi_0
                 const auto& pcfactTable = BrineModule::pcfactTable(satnumRegionIdx);
                 const Evaluation pcFactor = pcfactTable.eval(porosityFactor, /*extrapolation=*/true);
-                for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx)
+                for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
                     if (FluidSystem::phaseIsActive(phaseIdx)) {
                         pC[phaseIdx] *= pcFactor;
                     }
+                }
             }
         }
 
         // oil is the reference phase for pressure
         if (priVars.primaryVarsMeaningPressure() == PrimaryVariables::PressureMeaning::Pg) {
             const Evaluation& pg = priVars.makeEvaluation(Indices::pressureSwitchIdx, timeIdx);
-            for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx)
-                if (FluidSystem::phaseIsActive(phaseIdx))
+            for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
+                if (FluidSystem::phaseIsActive(phaseIdx)) {
                     fluidState_.setPressure(phaseIdx, pg + (pC[phaseIdx] - pC[gasPhaseIdx]));
-        } else if (priVars.primaryVarsMeaningPressure() == PrimaryVariables::PressureMeaning::Pw) {
+                }
+            }
+        }
+        else if (priVars.primaryVarsMeaningPressure() == PrimaryVariables::PressureMeaning::Pw) {
             const Evaluation& pw = priVars.makeEvaluation(Indices::pressureSwitchIdx, timeIdx);
-            for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx)
-                if (FluidSystem::phaseIsActive(phaseIdx))
+            for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
+                if (FluidSystem::phaseIsActive(phaseIdx)) {
                     fluidState_.setPressure(phaseIdx, pw + (pC[phaseIdx] - pC[waterPhaseIdx]));
-        } else {
+                }
+            }
+        }
+        else {
             assert(FluidSystem::phaseIsActive(oilPhaseIdx));
             const Evaluation& po = priVars.makeEvaluation(Indices::pressureSwitchIdx, timeIdx);
-            for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx)
-                if (FluidSystem::phaseIsActive(phaseIdx))
+            for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
+                if (FluidSystem::phaseIsActive(phaseIdx)) {
                     fluidState_.setPressure(phaseIdx, po + (pC[phaseIdx] - pC[oilPhaseIdx]));
+                }
+            }
         }
 
         // Update the Saturation functions for the blackoil solvent module.
@@ -314,7 +334,6 @@ public:
         if constexpr (enableSolvent) {
             asImp_().solventPostSatFuncUpdate_(elemCtx, dofIdx, timeIdx);
         }
-
     }
 
     Evaluation updateRsRvRsw(const ElementContext& elemCtx, unsigned dofIdx, unsigned timeIdx)
@@ -324,13 +343,13 @@ public:
         const unsigned globalSpaceIdx = elemCtx.globalSpaceIndex(dofIdx, timeIdx);
         const unsigned pvtRegionIdx = priVars.pvtRegionIndex();
 
-        Scalar RvMax = FluidSystem::enableVaporizedOil()
+        const Scalar RvMax = FluidSystem::enableVaporizedOil()
             ? problem.maxOilVaporizationFactor(timeIdx, globalSpaceIdx)
             : 0.0;
-        Scalar RsMax = FluidSystem::enableDissolvedGas()
+        const Scalar RsMax = FluidSystem::enableDissolvedGas()
             ? problem.maxGasDissolutionFactor(timeIdx, globalSpaceIdx)
             : 0.0;
-        Scalar RswMax = FluidSystem::enableDissolvedGasInWater()
+        const Scalar RswMax = FluidSystem::enableDissolvedGasInWater()
             ? problem.maxGasDissolutionFactor(timeIdx, globalSpaceIdx)
             : 0.0;
 
@@ -339,60 +358,75 @@ public:
             SoMax = max(fluidState_.saturation(oilPhaseIdx),
                         problem.maxOilSaturation(globalSpaceIdx));
         }
+
         // take the meaning of the switching primary variable into account for the gas
         // and oil phase compositions
-        if (priVars.primaryVarsMeaningGas() == PrimaryVariables::GasMeaning::Rs) {
-            const auto& Rs = priVars.makeEvaluation(Indices::compositionSwitchIdx, timeIdx);
-            fluidState_.setRs(Rs);
-        } else {
-            if (FluidSystem::enableDissolvedGas()) { // Add So > 0? i.e. if only water set rs = 0)
-                const Evaluation& RsSat = enableExtbo ? asImp_().rs() :
-                FluidSystem::saturatedDissolutionFactor(fluidState_,
-                                                        oilPhaseIdx,
-                                                        pvtRegionIdx,
-                                                        SoMax);
-                fluidState_.setRs(min(RsMax, RsSat));
-            }
-            else if constexpr (compositionSwitchEnabled)
-                fluidState_.setRs(0.0);
-        }
-        if (priVars.primaryVarsMeaningGas() == PrimaryVariables::GasMeaning::Rv) {
-            const auto& Rv = priVars.makeEvaluation(Indices::compositionSwitchIdx, timeIdx);
-            fluidState_.setRv(Rv);
-        } else {
-            if (FluidSystem::enableVaporizedOil() ) { // Add Sg > 0? i.e. if only water set rv = 0)
-                const Evaluation& RvSat = enableExtbo ? asImp_().rv() :
-                    FluidSystem::saturatedDissolutionFactor(fluidState_,
-                                                            gasPhaseIdx,
-                                                            pvtRegionIdx,
-                                                            SoMax);
-                fluidState_.setRv(min(RvMax, RvSat));
-            }
-            else if constexpr (compositionSwitchEnabled)
-                fluidState_.setRv(0.0);
-        }
 
-        if (priVars.primaryVarsMeaningWater() == PrimaryVariables::WaterMeaning::Rvw) {
-            const auto& Rvw = priVars.makeEvaluation(Indices::waterSwitchIdx, timeIdx);
-            fluidState_.setRvw(Rvw);
-        } else {
-            if (FluidSystem::enableVaporizedWater()) { // Add Sg > 0? i.e. if only water set rv = 0)
-                const Evaluation& RvwSat = FluidSystem::saturatedVaporizationFactor(fluidState_,
-                                                            gasPhaseIdx,
-                                                            pvtRegionIdx);
-                fluidState_.setRvw(RvwSat);
+        if constexpr (compositionSwitchEnabled) {
+            if (priVars.primaryVarsMeaningGas() == PrimaryVariables::GasMeaning::Rs) {
+                const auto& Rs = priVars.makeEvaluation(Indices::compositionSwitchIdx, timeIdx);
+                fluidState_.setRs(Rs);
+            }
+            else {
+                if (FluidSystem::enableDissolvedGas()) { // Add So > 0? i.e. if only water set rs = 0)
+                    const Evaluation& RsSat = enableExtbo ? asImp_().rs() :
+                        FluidSystem::saturatedDissolutionFactor(fluidState_,
+                                                                oilPhaseIdx,
+                                                                pvtRegionIdx,
+                                                                SoMax);
+                    fluidState_.setRs(min(RsMax, RsSat));
+                }
+                else {
+                    fluidState_.setRs(0.0);
+                }
+            }
+
+            if (priVars.primaryVarsMeaningGas() == PrimaryVariables::GasMeaning::Rv) {
+                const auto& Rv = priVars.makeEvaluation(Indices::compositionSwitchIdx, timeIdx);
+                fluidState_.setRv(Rv);
+            }
+            else {
+                if (FluidSystem::enableVaporizedOil() ) { // Add Sg > 0? i.e. if only water set rv = 0)
+                    const Evaluation& RvSat = enableExtbo ? asImp_().rv() :
+                        FluidSystem::saturatedDissolutionFactor(fluidState_,
+                                                                gasPhaseIdx,
+                                                                pvtRegionIdx,
+                                                                SoMax);
+                    fluidState_.setRv(min(RvMax, RvSat));
+                }
+                else {
+                    fluidState_.setRv(0.0);
+                }
             }
         }
 
-        if (priVars.primaryVarsMeaningWater() == PrimaryVariables::WaterMeaning::Rsw) {
-            const auto& Rsw = priVars.makeEvaluation(Indices::waterSwitchIdx, timeIdx);
-            fluidState_.setRsw(Rsw);
-        } else {
-            if (FluidSystem::enableDissolvedGasInWater()) {
-                const Evaluation& RswSat = FluidSystem::saturatedDissolutionFactor(fluidState_,
-                                                            waterPhaseIdx,
-                                                            pvtRegionIdx);
-                fluidState_.setRsw(min(RswMax, RswSat));
+        if constexpr (enableVapwat) {
+            if (priVars.primaryVarsMeaningWater() == PrimaryVariables::WaterMeaning::Rvw) {
+                const auto& Rvw = priVars.makeEvaluation(Indices::waterSwitchIdx, timeIdx);
+                fluidState_.setRvw(Rvw);
+            }
+            else {
+                if (FluidSystem::enableVaporizedWater()) { // Add Sg > 0? i.e. if only water set rv = 0)
+                    const Evaluation& RvwSat = FluidSystem::saturatedVaporizationFactor(fluidState_,
+                                                                                        gasPhaseIdx,
+                                                                                        pvtRegionIdx);
+                    fluidState_.setRvw(RvwSat);
+                }
+            }
+        }
+
+        if constexpr (enableDisgasInWater) {
+            if (priVars.primaryVarsMeaningWater() == PrimaryVariables::WaterMeaning::Rsw) {
+                const auto& Rsw = priVars.makeEvaluation(Indices::waterSwitchIdx, timeIdx);
+                fluidState_.setRsw(Rsw);
+            }
+            else {
+                if (FluidSystem::enableDissolvedGasInWater()) {
+                    const Evaluation& RswSat = FluidSystem::saturatedDissolutionFactor(fluidState_,
+                                                                                       waterPhaseIdx,
+                                                                                       pvtRegionIdx);
+                    fluidState_.setRsw(min(RswMax, RswSat));
+                }
             }
         }
 
@@ -407,18 +441,19 @@ public:
         int nmobilities = 1;
         std::vector<std::array<Evaluation,numPhases>*> mobilities = {&mobility_};
         if (dirMob_) {
-            for (int i=0; i<3; i++) {
-                nmobilities += 1;
+            for (int i = 0; i < 3; ++i) {
+                ++nmobilities;
                 mobilities.push_back(&(dirMob_->getArray(i)));
             }
         }
         for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
-            if (!FluidSystem::phaseIsActive(phaseIdx))
+            if (!FluidSystem::phaseIsActive(phaseIdx)) {
                 continue;
+            }
             const auto& b = FluidSystem::inverseFormationVolumeFactor(fluidState_, phaseIdx, pvtRegionIdx);
             fluidState_.setInvB(phaseIdx, b);
             const auto& mu = FluidSystem::viscosity(fluidState_, phaseIdx, pvtRegionIdx);
-            for (int i = 0; i<nmobilities; i++) {
+            for (int i = 0; i < nmobilities; ++i) {
                 if (enableExtbo && phaseIdx == oilPhaseIdx) {
                     (*mobilities[i])[phaseIdx] /= asImp_().oilViscosity();
                 }
@@ -443,10 +478,9 @@ public:
             rho = fluidState_.invB(waterPhaseIdx);
             rho *= FluidSystem::referenceDensity(waterPhaseIdx, pvtRegionIdx);
             if (FluidSystem::enableDissolvedGasInWater()) {
-                rho +=
-                    fluidState_.invB(waterPhaseIdx) *
-                    fluidState_.Rsw() *
-                    FluidSystem::referenceDensity(gasPhaseIdx, pvtRegionIdx);
+                rho += fluidState_.invB(waterPhaseIdx) *
+                       fluidState_.Rsw() *
+                       FluidSystem::referenceDensity(gasPhaseIdx, pvtRegionIdx);
             }
             fluidState_.setDensity(waterPhaseIdx, rho);
         }
@@ -455,16 +489,14 @@ public:
             rho = fluidState_.invB(gasPhaseIdx);
             rho *= FluidSystem::referenceDensity(gasPhaseIdx, pvtRegionIdx);
             if (FluidSystem::enableVaporizedOil()) {
-                rho +=
-                    fluidState_.invB(gasPhaseIdx) *
-                    fluidState_.Rv() *
-                    FluidSystem::referenceDensity(oilPhaseIdx, pvtRegionIdx);
+                rho += fluidState_.invB(gasPhaseIdx) *
+                       fluidState_.Rv() *
+                       FluidSystem::referenceDensity(oilPhaseIdx, pvtRegionIdx);
             }
             if (FluidSystem::enableVaporizedWater()) {
-                rho +=
-                    fluidState_.invB(gasPhaseIdx) *
-                    fluidState_.Rvw() *
-                    FluidSystem::referenceDensity(waterPhaseIdx, pvtRegionIdx);
+                rho += fluidState_.invB(gasPhaseIdx) *
+                       fluidState_.Rvw() *
+                       FluidSystem::referenceDensity(waterPhaseIdx, pvtRegionIdx);
             }
             fluidState_.setDensity(gasPhaseIdx, rho);
         }
@@ -473,10 +505,9 @@ public:
             rho = fluidState_.invB(oilPhaseIdx);
             rho *= FluidSystem::referenceDensity(oilPhaseIdx, pvtRegionIdx);
             if (FluidSystem::enableDissolvedGas()) {
-                rho +=
-                    fluidState_.invB(oilPhaseIdx) *
-                    fluidState_.Rs() *
-                    FluidSystem::referenceDensity(gasPhaseIdx, pvtRegionIdx);
+                rho += fluidState_.invB(oilPhaseIdx) *
+                       fluidState_.Rs() *
+                       FluidSystem::referenceDensity(gasPhaseIdx, pvtRegionIdx);
             }
             fluidState_.setDensity(oilPhaseIdx, rho);
         }
@@ -495,34 +526,38 @@ public:
 
         // the porosity must be modified by the compressibility of the
         // rock...
-        Scalar rockCompressibility = problem.rockCompressibility(globalSpaceIdx);
+        const Scalar rockCompressibility = problem.rockCompressibility(globalSpaceIdx);
         if (rockCompressibility > 0.0) {
-            Scalar rockRefPressure = problem.rockReferencePressure(globalSpaceIdx);
+            const Scalar rockRefPressure = problem.rockReferencePressure(globalSpaceIdx);
             Evaluation x;
             if (FluidSystem::phaseIsActive(oilPhaseIdx)) {
-                x = rockCompressibility*(fluidState_.pressure(oilPhaseIdx) - rockRefPressure);
-            } else if (FluidSystem::phaseIsActive(waterPhaseIdx)){
-                x = rockCompressibility*(fluidState_.pressure(waterPhaseIdx) - rockRefPressure);
-            } else {
-                x = rockCompressibility*(fluidState_.pressure(gasPhaseIdx) - rockRefPressure);
+                x = rockCompressibility * (fluidState_.pressure(oilPhaseIdx) - rockRefPressure);
             }
-            porosity_ *= 1.0 + x + 0.5*x*x;
+            else if (FluidSystem::phaseIsActive(waterPhaseIdx)) {
+                x = rockCompressibility * (fluidState_.pressure(waterPhaseIdx) - rockRefPressure);
+            }
+            else {
+                x = rockCompressibility * (fluidState_.pressure(gasPhaseIdx) - rockRefPressure);
+            }
+            porosity_ *= 1.0 + x + 0.5 * x * x;
         }
 
         // deal with water induced rock compaction
         porosity_ *= problem.template rockCompPoroMultiplier<Evaluation>(*this, globalSpaceIdx);
 
         // deal with MICP
-        if constexpr (enableMICP){
-            Evaluation biofilm_ = priVars.makeEvaluation(Indices::biofilmConcentrationIdx, timeIdx, linearizationType);
-            Evaluation calcite_ = priVars.makeEvaluation(Indices::calciteConcentrationIdx, timeIdx, linearizationType);
+        if constexpr (enableMICP) {
+            const Evaluation biofilm_ = priVars.makeEvaluation(Indices::biofilmConcentrationIdx,
+                                                               timeIdx, linearizationType);
+            const Evaluation calcite_ = priVars.makeEvaluation(Indices::calciteConcentrationIdx,
+                                                               timeIdx, linearizationType);
             // minimum porosity of 1e-8 to prevent numerical issues 
             porosity_ -= min(biofilm_ + calcite_, referencePorosity_ - 1e-8);
         }
 
         // deal with salt-precipitation
         if (enableSaltPrecipitation && priVars.primaryVarsMeaningBrine() == PrimaryVariables::BrineMeaning::Sp) {
-            Evaluation Sp = priVars.makeEvaluation(Indices::saltConcentrationIdx, timeIdx);
+            const Evaluation Sp = priVars.makeEvaluation(Indices::saltConcentrationIdx, timeIdx);
             porosity_ *= (1.0 - Sp);
         }
     }
@@ -530,9 +565,10 @@ public:
     void assertFiniteMembers()
     {
         // some safety checks in debug mode
-        for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++ phaseIdx) {
-            if (!FluidSystem::phaseIsActive(phaseIdx))
+        for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
+            if (!FluidSystem::phaseIsActive(phaseIdx)) {
                 continue;
+            }
 
             assert(isfinite(fluidState_.density(phaseIdx)));
             assert(isfinite(fluidState_.saturation(phaseIdx)));
@@ -569,7 +605,7 @@ public:
             asImp_().zFractionUpdate_(elemCtx, dofIdx, timeIdx);
         }
 
-        Evaluation SoMax = updateRsRvRsw(elemCtx, dofIdx, timeIdx);
+        const Evaluation SoMax = updateRsRvRsw(elemCtx, dofIdx, timeIdx);
 
         updateMobilityAndInvB();
         updatePhaseDensities();
@@ -608,10 +644,12 @@ public:
         }
         if constexpr (enableConvectiveMixing) {
             // The ifs are here is to avoid extra calculations for
-            // cases without CO2STORE and DRSDTCON.
-            if (problem.simulator().vanguard().eclState().runspec().co2Storage()) {
-                if (problem.drsdtconIsActive(globalSpaceIdx, problem.simulator().episodeIndex())) {
-                    asImp_().updateSaturatedDissolutionFactor_();
+            // cases with dry runs and without CO2STORE and DRSDTCON.
+            if (!problem.simulator().vanguard().eclState().getIOConfig().initOnly()) {
+                if (problem.simulator().vanguard().eclState().runspec().co2Storage()) {
+                    if (problem.drsdtconIsActive(globalSpaceIdx, problem.simulator().episodeIndex())) {
+                        asImp_().updateSaturatedDissolutionFactor_();
+                    }
                 }
             }
         }
@@ -647,16 +685,16 @@ public:
     {
         using Dir = FaceDir::DirEnum;
         if (dirMob_) {
-            switch(facedir) {
+            switch (facedir) {
                 case Dir::XMinus:
                 case Dir::XPlus:
-                    return dirMob_->mobilityX_[phaseIdx];
+                    return dirMob_->getArray(0)[phaseIdx];
                 case Dir::YMinus:
                 case Dir::YPlus:
-                    return dirMob_->mobilityY_[phaseIdx];
+                    return dirMob_->getArray(1)[phaseIdx];
                 case Dir::ZMinus:
                 case Dir::ZPlus:
-                    return dirMob_->mobilityZ_[phaseIdx];
+                    return dirMob_->getArray(2)[phaseIdx];
                 default:
                     throw std::runtime_error("Unexpected face direction");
             }
@@ -664,7 +702,6 @@ public:
         else {
             return mobility_[phaseIdx];
         }
-
     }
 
     /*!
@@ -686,8 +723,7 @@ public:
      * This allows to specify different Pressure-Volume-Temperature (PVT) relations in
      * different parts of the spatial domain.
      */
-    auto pvtRegionIndex() const
-        -> decltype(std::declval<FluidState>().pvtRegionIndex())
+    auto pvtRegionIndex() const -> decltype(std::declval<FluidState>().pvtRegionIndex())
     { return fluidState_.pvtRegionIndex(); }
 
     /*!
@@ -696,7 +732,7 @@ public:
     Evaluation relativePermeability(unsigned phaseIdx) const
     {
         // warning: slow
-        return fluidState_.viscosity(phaseIdx)*mobility(phaseIdx);
+        return fluidState_.viscosity(phaseIdx) * mobility(phaseIdx);
     }
 
     /*!
@@ -722,13 +758,13 @@ public:
     }
 
 private:
-    friend BlackOilSolventIntensiveQuantities<TypeTag>;
-    friend BlackOilExtboIntensiveQuantities<TypeTag>;
-    friend BlackOilPolymerIntensiveQuantities<TypeTag>;
-    friend BlackOilEnergyIntensiveQuantities<TypeTag>;
-    friend BlackOilFoamIntensiveQuantities<TypeTag>;
-    friend BlackOilBrineIntensiveQuantities<TypeTag>;
-    friend BlackOilMICPIntensiveQuantities<TypeTag>;
+    friend BlackOilSolventIntensiveQuantities<TypeTag, enableSolvent>;
+    friend BlackOilExtboIntensiveQuantities<TypeTag, enableExtbo>;
+    friend BlackOilPolymerIntensiveQuantities<TypeTag, enablePolymer>;
+    friend BlackOilEnergyIntensiveQuantities<TypeTag, enableEnergy>;
+    friend BlackOilFoamIntensiveQuantities<TypeTag, enableFoam>;
+    friend BlackOilBrineIntensiveQuantities<TypeTag, enableBrine>;
+    friend BlackOilMICPIntensiveQuantities<TypeTag, enableMICP>;
 
     Implementation& asImp_()
     { return *static_cast<Implementation*>(this); }
@@ -737,7 +773,7 @@ private:
     Scalar referencePorosity_;
     Evaluation porosity_;
     Evaluation rockCompTransMultiplier_;
-    std::array<Evaluation,numPhases> mobility_;
+    std::array<Evaluation, numPhases> mobility_;
 
     // Instead of writing a custom copy constructor and a custom assignment operator just to handle
     // the dirMob_ unique ptr member variable when copying BlackOilIntensiveQuantites (see for example

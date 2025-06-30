@@ -53,7 +53,6 @@
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
-
 namespace Opm {
 /*********************************************
  * Public methods of AdaptiveTimeStepping
@@ -111,7 +110,7 @@ AdaptiveTimeStepping(double max_next_tstep,
     , growth_factor_{tuning.TFDIFF}
     , max_growth_{tuning.TSFMAX}
     , max_time_step_{tuning.TSMAXZ} // 365.25
-    , min_time_step_{tuning.TSFMIN} // 0.1;
+    , min_time_step_{tuning.TSMINZ} // 0.1;
     , ignore_convergence_failure_{true}
     , solver_restart_max_{Parameters::Get<Parameters::SolverMaxRestarts>()} // 10
     , solver_verbose_{Parameters::Get<Parameters::SolverVerbosity>() > 0 && terminal_output} // 2
@@ -183,24 +182,6 @@ registerParameters()
     registerEclTimeSteppingParameters<Scalar>();
     detail::registerAdaptiveParameters();
 }
-
-#ifdef RESERVOIR_COUPLING_ENABLED
-template<class TypeTag>
-void
-AdaptiveTimeStepping<TypeTag>::
-setReservoirCouplingMaster(ReservoirCouplingMaster *reservoir_coupling_master)
-{
-    this->reservoir_coupling_master_ = reservoir_coupling_master;
-}
-
-template<class TypeTag>
-void
-AdaptiveTimeStepping<TypeTag>::
-setReservoirCouplingSlave(ReservoirCouplingSlave *reservoir_coupling_slave)
-{
-    this->reservoir_coupling_slave_ = reservoir_coupling_slave;
-}
-#endif
 
 /** \brief  step method that acts like the solver::step method
             in a sub cycle of time steps
@@ -325,6 +306,14 @@ AdaptiveTimeStepping<TypeTag>::
 suggestedNextStep() const
 {
     return this->suggested_next_timestep_;
+}
+
+template<class TypeTag>
+const TimeStepControlInterface&
+AdaptiveTimeStepping<TypeTag>::
+timeStepControl() const
+{
+    return *this->time_step_control_;
 }
 
 
@@ -510,7 +499,7 @@ bool
 AdaptiveTimeStepping<TypeTag>::SubStepper<Solver>::
 isReservoirCouplingMaster_() const
 {
-    return this->adaptive_time_stepping_.reservoir_coupling_master_ != nullptr;
+    return this->solver_.model().simulator().reservoirCouplingMaster() != nullptr;
 }
 
 template<class TypeTag>
@@ -519,7 +508,7 @@ bool
 AdaptiveTimeStepping<TypeTag>::SubStepper<Solver>::
 isReservoirCouplingSlave_() const
 {
-    return this->adaptive_time_stepping_.reservoir_coupling_slave_ != nullptr;
+    return this->solver_.model().simulator().reservoirCouplingSlave() != nullptr;
 }
 #endif
 
@@ -586,7 +575,7 @@ ReservoirCouplingMaster&
 AdaptiveTimeStepping<TypeTag>::SubStepper<Solver>::
 reservoirCouplingMaster_()
 {
-    return *adaptive_time_stepping_.reservoir_coupling_master_;
+    return *(this->solver_.model().simulator().reservoirCouplingMaster());
 }
 #endif
 
@@ -597,7 +586,7 @@ ReservoirCouplingSlave&
 AdaptiveTimeStepping<TypeTag>::SubStepper<Solver>::
 reservoirCouplingSlave_()
 {
-    return *this->adaptive_time_stepping_.reservoir_coupling_slave_;
+    return *(this->solver_.model().simulator().reservoirCouplingSlave());
 }
 #endif
 
@@ -768,7 +757,7 @@ run()
     // sub step time loop
     while (!this->substep_timer_.done()) {
         // if we just chopped the timestep due to convergence i.e. restarts>0
-        // we dont what to update the next timestep based on Tuning
+        // we dont want to update the next timestep based on Tuning
         if (restarts == 0) {
             maybeUpdateTuningAndTimeStep_();
         }
@@ -813,11 +802,19 @@ run()
             report.success.converged = this->substep_timer_.done();
             this->substep_timer_.setLastStepFailed(false);
         }
-        else { // in case of no convergence
+        else { // in case of no convergence or time step tolerance test failure
             this->substep_timer_.setLastStepFailed(true);
             checkTimeStepMaxRestartLimit_(restarts);
 
-            const double new_time_step = restartFactor_() * dt;
+            double new_time_step = restartFactor_() * dt;
+            if (substep_report.time_step_rejected) {
+                const double tol = Parameters::Get<Parameters::TimeStepControlTolerance>();
+                const double safetyFactor = Parameters::Get<Parameters::TimeStepControlSafetyFactor>();
+                const double temp_time_step = std::sqrt(safetyFactor * tol / solver_().model().relativeChange()) * dt;
+                if (temp_time_step < dt) { // added in case suggested time step is not a reduction
+                    new_time_step = temp_time_step;
+                }
+            }
             checkTimeStepMinLimit_(new_time_step);
             bool wells_shut = false;
             if (new_time_step > minTimeStepBeforeClosingWells_()) {
@@ -889,14 +886,25 @@ void
 AdaptiveTimeStepping<TypeTag>::SubStepIteration<Solver>::
 checkTimeStepMinLimit_(const double new_time_step) const
 {
+    using Meas = UnitSystem::measure;
     // If we have restarted (i.e. cut the timestep) too
     // much, we have failed and throw an exception.
     if (new_time_step < minTimeStep_()) {
-        const auto msg = fmt::format(
-            "Solver failed to converge after cutting timestep to {}\n"
-            "which is the minimum threshold given by option --solver-min-time-step\n",
-            minTimeStep_()
-        );
+        auto msg = fmt::format("Solver failed to converge after cutting timestep to ");
+        if (Parameters::Get<Parameters::EnableTuning>()) {
+            const UnitSystem& unit_system = solver_().model().simulator().vanguard().eclState().getDeckUnitSystem();
+            msg += fmt::format(
+                "{:.3E} {}\nwhich is the minimum threshold given by the TUNING keyword\n",
+                unit_system.from_si(Meas::time, minTimeStep_()),
+                unit_system.name(Meas::time)
+            );
+        }
+        else {
+            msg += fmt::format(
+                "{:.3E} DAYS\nwhich is the minimum threshold given by option --solver-min-time-step\n",
+                minTimeStep_() / 86400.0
+            );
+        }
         if (solverVerbose_()) {
             OpmLog::error(msg);
         }
@@ -1138,7 +1146,7 @@ runSubStep_()
     };
 
     try {
-        substep_report = solver_().step(this->substep_timer_);
+        substep_report = solver_().step(this->substep_timer_, &this->adaptive_time_stepping_.timeStepControl());
         if (solverVerbose_()) {
             // report number of linear iterations
             OpmLog::debug("Overall linear iterations used: "
@@ -1147,6 +1155,9 @@ runSubStep_()
     }
     catch (const TooManyIterations& e) {
         handleFailure("Solver convergence failure - Iteration limit reached", e);
+    }
+    catch (const TimeSteppingBreakdown& e) {
+        handleFailure(e.what(), e);
     }
     catch (const ConvergenceMonitorFailure& e) {
         handleFailure("Convergence monitor failure", e, /*log_exception=*/false);

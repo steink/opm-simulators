@@ -140,12 +140,15 @@ struct NonlinearSolver { static constexpr auto value = "newton"; };
 struct LocalSolveApproach { static constexpr auto value = "gauss-seidel"; };
 struct MaxLocalSolveIterations { static constexpr int value = 20; };
 
+struct WellGroupConstraintsMaxIterations { static constexpr int value = 1; };
 template<class Scalar>
 struct LocalToleranceScalingMb { static constexpr Scalar value = 1.0; };
 
 template<class Scalar>
 struct LocalToleranceScalingCnv { static constexpr Scalar value = 0.1; };
 struct NlddNumInitialNewtonIter { static constexpr int value = 1; };
+template<class Scalar>
+struct NlddRelativeMobilityChangeTol { static constexpr Scalar value = 0.1; };
 struct NumLocalDomains { static constexpr int value = 0; };
 
 template<class Scalar>
@@ -317,6 +320,9 @@ public:
     /// Maximum pressure update in the inner network pressure update iterations
     Scalar network_max_pressure_update_in_bars_;
 
+    /// Maximum number of iterations in the well/group switch algorithm
+    int well_group_constraints_max_iterations_;
+
     /// Nonlinear solver type: newton or nldd.
     std::string nonlinear_solver_;
     /// 'jacobi' and 'gauss-seidel' supported.
@@ -328,6 +334,8 @@ public:
     Scalar local_tolerance_scaling_cnv_;
 
     int nldd_num_initial_newton_iter_{1};
+    /// Threshold for single cell relative mobility change in NLDD
+    Scalar nldd_relative_mobility_change_tol_;
     int num_local_domains_{0};
     Scalar local_domains_partition_imbalance_{1.03};
     std::string local_domains_partition_method_;

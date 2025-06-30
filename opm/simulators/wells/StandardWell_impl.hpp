@@ -158,7 +158,7 @@ namespace Opm
         Value skin_pressure = zeroElem();
         if (has_polymermw) {
             if (this->isInjector()) {
-                const int pskin_index = Bhp + 1 + this->numPerfs() + perf;
+                const int pskin_index = Bhp + 1 + this->numLocalPerfs() + perf;
                 skin_pressure = obtainN(this->primary_variables_.eval(pskin_index));
             }
         }
@@ -1640,8 +1640,8 @@ namespace Opm
         const double dt = simulator.timeStepSize();
         // iterate to get a solution at the given bhp.
         bool converged = false;
-        if (this->well_ecl_.isProducer() && this->wellHasTHPConstraints(summary_state)) {
-            converged = well_copy.solveWellWithTHPConstraint(simulator, dt, inj_controls, prod_controls, well_state_copy, group_state, deferred_logger);
+        if (this->well_ecl_.isProducer()) {
+            converged = well_copy.solveWellWithOperabilityCheck(simulator, dt, inj_controls, prod_controls, well_state_copy, group_state, deferred_logger);
         } else {
             converged = well_copy.iterateWellEqWithSwitching(simulator, dt, inj_controls, prod_controls, well_state_copy, group_state, deferred_logger);
         }

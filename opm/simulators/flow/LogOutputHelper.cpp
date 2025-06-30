@@ -27,6 +27,7 @@
 
 #include <opm/input/eclipse/Schedule/Schedule.hpp>
 #include <opm/input/eclipse/Schedule/SummaryState.hpp>
+#include <opm/input/eclipse/Schedule/Well/NameOrder.hpp>
 #include <opm/input/eclipse/Schedule/Well/Well.hpp>
 #include <opm/input/eclipse/Schedule/Well/WellConnections.hpp>
 #include <opm/input/eclipse/Schedule/Well/WellEnums.hpp>
@@ -41,6 +42,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <iomanip>
 #include <numeric>
 #include <sstream>
@@ -118,6 +120,7 @@ template<class Array>
 std::string formatBorder(const Array& widths)
 {
     std::string ss;
+    ss = " ";
     std::for_each(widths.begin(), widths.end(),
                   [&ss](const auto w)
                   { ss += fmt::format(":{:->{}}", "", w); });
@@ -130,7 +133,7 @@ template<std::size_t size>
 std::string formatTextRow(const std::array<int, size>& widths,
                           const std::array<std::string_view, size>& entries)
 {
-    std::string ss;
+    std::string ss = " ";
     std::for_each(widths.begin(), widths.end(),
                   [&entries, &ss, i = 0](const auto w) mutable
                   { ss += fmt::format(":{:^{}}", entries[i++], w); });
@@ -201,8 +204,8 @@ cumulative(const std::size_t reportStepNum,
         this->outputCumulativeReportRecord_(values, names, {});
     }
 
-    for (const auto& wname : this->schedule_.wellNames(reportStepNum)) {
-        const auto& well = this->schedule_.getWell(wname, reportStepNum);
+    for (const auto& wname : this->schedule_[reportStepNum].well_order()) {
+        const auto& well = this->schedule_[reportStepNum].wells.get(wname);
 
         std::vector<Scalar> values(WellCumDataType::numWCValues);
         std::vector<std::string> names(WellCumDataType::numWCNames);
@@ -386,7 +389,43 @@ fipResv(const Inplace& inplace, const std::string& name) const
         this->outputResvFluidInPlace_(current_values, reg);
     }
 
-    OpmLog::note(fmt::format("{:=^91}", ""));
+    OpmLog::note(fmt::format(" {:=^91}", ""));
+}
+
+
+template<class Scalar>
+void LogOutputHelper<Scalar>::
+csv_header(std::ostringstream& ss) const
+{
+    ss << "RegName,RegNum"
+       << ",OilLiquid,OilVapour,Oil,GasFree,GasDissolved,Gas,Water"
+       << ",TotalPoreVolume,PoreVolumeOil,PoreVolumeWater,PoreVolumeGas,PoreVolumeHC"
+       << "\n";
+}
+
+template<class Scalar>
+void LogOutputHelper<Scalar>::
+fip_csv(std::ostringstream& ss, const Inplace& initial_inplace, const std::string& name) const
+{
+    for (size_t n = 0; n < initial_inplace.max_region(name); n++) {
+        ss << name << "," << n+1
+           << fmt::format(",{:4.2f}", initial_inplace.get(name, Inplace::Phase::OilInLiquidPhase, n+1))
+           << fmt::format(",{:4.2f}", initial_inplace.get(name, Inplace::Phase::OilInGasPhase, n+1))
+           << fmt::format(",{:4.2f}", initial_inplace.get(name, Inplace::Phase::OIL, n+1))
+           << fmt::format(",{:4.2f}", initial_inplace.get(name, Inplace::Phase::GasInGasPhase, n+1))
+           << fmt::format(",{:4.2f}", initial_inplace.get(name, Inplace::Phase::GasInLiquidPhase, n+1))
+           << fmt::format(",{:4.2f}", initial_inplace.get(name, Inplace::Phase::GAS, n+1))
+           << fmt::format(",{:4.2f}", initial_inplace.get(name, Inplace::Phase::WATER, n+1))
+           << fmt::format(",{:4.2f}", initial_inplace.get(name, Inplace::Phase::DynamicPoreVolume, n+1))
+           << fmt::format(",{:4.2f}", initial_inplace.get(name, Inplace::Phase::OilResVolume, n+1))
+           << fmt::format(",{:4.2f}", initial_inplace.get(name, Inplace::Phase::WaterResVolume, n+1))
+           << fmt::format(",{:4.2f}", initial_inplace.get(name, Inplace::Phase::GasResVolume, n+1));
+
+        auto hvpv = initial_inplace.get(name, Inplace::Phase::OilResVolume, n+1) +
+                    initial_inplace.get(name, Inplace::Phase::GasResVolume, n+1);
+
+        ss << fmt::format(",{:4.2f}", hvpv) << "\n";
+    }
 }
 
 template<class Scalar>
@@ -434,8 +473,8 @@ injection(const std::size_t reportStepNum,
         this->outputInjectionReportRecord_(values, names, {});
     }
 
-    for (const auto& wname : this->schedule_.wellNames(reportStepNum)) {
-        const auto& well = this->schedule_.getWell(wname, reportStepNum);
+    for (const auto& wname : this->schedule_[reportStepNum].well_order()) {
+        const auto& well = this->schedule_[reportStepNum].wells.get(wname);
 
         // Ignore production wells for the injection report.
         if (well.isProducer()) {
@@ -512,20 +551,26 @@ template<class Scalar>
 void LogOutputHelper<Scalar>::
 msw(const std::size_t reportStepNum) const
 {
-    const auto& wells = this->schedule_.getWells(reportStepNum);
-    if (std::any_of(wells.begin(), wells.end(),
-                    [](const auto& well) { return well.isMultiSegment(); }))
-    {
-        this->beginMSWReport_();
-        std::for_each(wells.begin(), wells.end(),
-                      [this](const auto& well)
-                      {
-                          if (well.isMultiSegment()) {
-                              this->outputMSWReportRecord_(well);
-                          }
-                      });
-        this->endMSWReport_();
+    const auto& sched = this->schedule_[reportStepNum];
+
+    auto msWells = std::vector<std::reference_wrapper<const Well>>{};
+    for (const auto& wname : sched.well_order()) {
+        if (const auto& well = sched.wells.get(wname); well.isMultiSegment()) {
+            msWells.push_back(std::cref(well));
+        }
     }
+
+    if (msWells.empty()) {
+        return;
+    }
+
+    this->beginMSWReport_();
+
+    std::for_each(msWells.begin(), msWells.end(),
+                  [this](const Well& well)
+                  { this->outputMSWReportRecord_(well); });
+
+    this->endMSWReport_();
 }
 
 
@@ -566,8 +611,8 @@ production(const std::size_t reportStepNum,
         this->outputProductionReportRecord_(values, names, {});
     }
 
-    for (const auto& wname : this->schedule_.wellNames(reportStepNum)) {
-        const auto& well = this->schedule_.getWell(wname, reportStepNum);
+    for (const auto& wname : this->schedule_[reportStepNum].well_order()) {
+        const auto& well = this->schedule_[reportStepNum].wells.get(wname);
 
         // Ignore injection wells for the production report.
         if (well.isInjector()) {
@@ -1355,18 +1400,18 @@ outputRegionFluidInPlace_(std::unordered_map<Inplace::Phase, Scalar> oip,
                              const Scalar value,
                              const UnitSystem::measure m)
     {
-        return fmt::format("{0: >52}:{0: >8}{1:<5}={2:>14.0f}  {3:<18}:\n",
+        return fmt::format(" {0: >52}:{0: >8}{1:<5}={2:>14.0f}  {3:<18}:\n",
                            "", text, value, units.name(m));
     };
 
     auto topLabel = [](const char* text)
     {
-        return fmt::format("{: >52}: {:^47}:\n", "", text);
+        return fmt::format(" {: >52}: {:^47}:\n", "", text);
     };
 
     auto formatEntry = [](auto& fip, std::string_view label)
     {
-        return fmt::format(":{:<25}:{:^15.0f}{:^14.0f}{:^14.0f}:{:^16.0f}:"
+        return fmt::format(" :{:<25}:{:^15.0f}{:^14.0f}{:^14.0f}:{:^16.0f}:"
                            "{:^15.0f}{:^14.0f}{:^14.0f}:\n",
                            label,
                            fip[Inplace::Phase::OilInLiquidPhase],
@@ -1379,12 +1424,12 @@ outputRegionFluidInPlace_(std::unordered_map<Inplace::Phase, Scalar> oip,
     };
 
     std::ostringstream ss;
-    ss << fmt::format("\n{0: >52}{0:=>50}\n", "");
+    ss << fmt::format("\n {0: >52}{0:=>50}\n", "");
     if (reg == 0) {
-        ss << fmt::format("{0: >52}:{1:^48}:\n", "", "FIELD TOTALS");
+        ss << fmt::format(" {0: >52}:{1:^48}:\n", "", "FIELD TOTALS");
     }
     else {
-        ss << fmt::format("{0: >52}:{1:>20} REPORT REGION {2:>{3}}{0: ^11}:\n",
+        ss << fmt::format(" {0: >52}:{1:>20} REPORT REGION {2:>{3}}{0: ^11}:\n",
                           "", name, reg, 8 - name.size());
     }
     ss << topEntry("PAV", pav, UnitSystem::measure::pressure)
@@ -1394,12 +1439,12 @@ outputRegionFluidInPlace_(std::unordered_map<Inplace::Phase, Scalar> oip,
            << topLabel("Pore volumes are taken at reference conditions");
     }
 
-    ss << fmt::format("{0: >26}:{0:->15} OIL {1:>4} {0:->18}:"
+    ss << fmt::format(" {0: >26}:{0:->15} OIL {1:>4} {0:->18}:"
                       "-- WAT{0: >2} {1:>4} --:{0:->14}  GAS{0: >3} {2:>4} {0:-^15}:\n",
                       "",
                       units.name(UnitSystem::measure::liquid_surface_volume),
                       units.name(UnitSystem::measure::gas_surface_volume))
-       << fmt::format("{0: >26}:{1:^15}{2:^14}{3:^14}:{3:^16}:{4:^15}{5:^14}{3:^14}:\n",
+       << fmt::format(" {0: >26}:{1:^15}{2:^14}{3:^14}:{3:^16}:{4:^15}{5:^14}{3:^14}:\n",
                       "",
                       "LIQUID",
                       "VAPOUR",
@@ -1414,7 +1459,7 @@ outputRegionFluidInPlace_(std::unordered_map<Inplace::Phase, Scalar> oip,
     if (reg != 0) {
         ss << formatBorder(widths) << '\n';
     }
-    ss << fmt::format("{:=^132}\n\n", "");
+    ss << fmt::format(" {:=^132}\n\n", "");
 
     OpmLog::note(ss.str());
 }
@@ -1430,8 +1475,8 @@ outputResvFluidInPlace_(std::unordered_map<Inplace::Phase, Scalar> cipr,
     std::ostringstream ss;
     if (reg == 0) {
         const auto widths = std::array{9, 15, 15, 15, 15, 15};
-        ss << fmt::format("\n{0: >52}{0:=>35}", "")
-           << fmt::format("\n{0: >52}:  RESERVOIR VOLUMES {1:^13}:\n",
+        ss << fmt::format("\n {0: >52}{0:=>35}", "")
+           << fmt::format("\n {0: >52}:  RESERVOIR VOLUMES {1:^13}:\n",
                           "",  units.name(UnitSystem::measure::volume))
            << formatBorder(widths) << '\n'
            << formatTextRow(widths,
@@ -1462,9 +1507,9 @@ outputResvFluidInPlace_(std::unordered_map<Inplace::Phase, Scalar> cipr,
                                 "HYDRO-CARBON"sv,
                             })
            << formatBorder(widths) << '\n'
-           << fmt::format(":{:<9}:", "FIELD");
+           << fmt::format(" :{:<9}:", "FIELD");
     } else {
-        ss << fmt::format(":{:<9}:", reg);
+        ss << fmt::format(" :{:<9}:", reg);
     }
 
     ss << fmt::format("{0:>15.0f}:{1:>15.0f}:{2:>15.0f}:{3:>15.0f}:{4:>15.0f}:",

@@ -165,8 +165,8 @@ template<class FluidSystem, class Indices>
 StandardWellConnections<FluidSystem,Indices>::
 StandardWellConnections(const WellInterfaceIndices<FluidSystem,Indices>& well)
     : well_(well)
-    , perf_densities_(well.numPerfs())
-    , perf_pressure_diffs_(well.numPerfs())
+    , perf_densities_(well.numLocalPerfs())
+    , perf_pressure_diffs_(well.numLocalPerfs())
 {
 }
 
@@ -188,7 +188,7 @@ computePressureDelta()
     //    perforation for each well, for which it will be the
     //    difference to the reference (bhp) depth.
 
-    const int nperf = well_.numPerfs();
+    const int nperf = well_.numLocalPerfs();
     perf_pressure_diffs_.resize(nperf, 0.0);
     auto z_above = well_.parallelWellInfo().communicateAboveValues(well_.refDepth(), well_.perfDepth());
 
@@ -233,7 +233,7 @@ computeDensities(const std::vector<Scalar>& perfComponentRates,
         ? static_cast<Ix>(Indices::canonicalToActiveComponentIndex(FluidSystem::waterCompIdx))
         : static_cast<Ix>(-1);
 
-    const int nperf    = this->well_.numPerfs();
+    const int nperf    = this->well_.numLocalPerfs();
     const int num_comp = this->well_.numComponents();
 
     // 1. Compute the flow (in surface volume units for each component)
@@ -296,7 +296,7 @@ std::vector<typename StandardWellConnections<FluidSystem, Indices>::Scalar>
 StandardWellConnections<FluidSystem, Indices>::
 calculatePerforationOutflow(const std::vector<Scalar>& perfComponentRates) const
 {
-    const int nperf    = this->well_.numPerfs();
+    const int nperf    = this->well_.numLocalPerfs();
     const int num_comp = this->well_.numComponents();
 
     auto q_out_perf = std::vector<Scalar>(nperf * num_comp, Scalar{0});
@@ -440,7 +440,7 @@ computeDensitiesForStoppedProducer(const DensityPropertyFunctions& prop_func)
     auto mob = std::vector<Scalar>(np);
     auto rho = std::vector<Scalar>(np);
 
-    const auto nperf = this->well_.numPerfs();
+    const auto nperf = this->well_.numLocalPerfs();
     for (auto perf = 0*nperf; perf < nperf; ++perf) {
         const auto cell_idx = this->well_.cells()[perf];
 
@@ -467,7 +467,7 @@ computePropertiesForPressures(const WellState<Scalar>&         well_state,
 {
     auto props = Properties{};
 
-    const int nperf = well_.numPerfs();
+    const int nperf = well_.numLocalPerfs();
     const PhaseUsage& pu = well_.phaseUsage();
 
     props.b_perf        .resize(nperf * this->well_.numComponents());
@@ -629,7 +629,7 @@ copyInPerforationRates(const Properties&       props,
 {
     auto perfRates = std::vector<Scalar>(props.b_perf.size(), Scalar{0});
 
-    const int nperf = this->well_.numPerfs();
+    const int nperf = this->well_.numLocalPerfs();
     const int np    = this->well_.numPhases();
     const int nc    = this->well_.numComponents();
 
@@ -849,43 +849,12 @@ connectionRatezFraction(Scalar& rate,
     return {well_.restrictEval(cq_s_zfrac_effective), cq_s_zfrac_effective};
 }
 
-template<class Scalar>
-using FS = BlackOilFluidSystem<Scalar, BlackOilDefaultFluidSystemIndices>;
+#include <opm/simulators/utils/InstantiationIndicesMacros.hpp>
 
-#define INSTANTIATE(T,...) \
-    template class StandardWellConnections<FS<T>, __VA_ARGS__>;
-
-#define INSTANTIATE_TYPE(T)                                                  \
-    INSTANTIATE(T,BlackOilOnePhaseIndices<0u,0u,0u,0u,false,false,0u,1u,0u>) \
-    INSTANTIATE(T,BlackOilOnePhaseIndices<0u,0u,0u,1u,false,false,0u,1u,0u>) \
-    INSTANTIATE(T,BlackOilOnePhaseIndices<0u,0u,0u,0u,false,false,0u,1u,5u>) \
-    INSTANTIATE(T,BlackOilTwoPhaseIndices<0u,0u,0u,0u,false,false,0u,0u,0u>) \
-    INSTANTIATE(T,BlackOilTwoPhaseIndices<0u,0u,0u,0u,false,false,0u,1u,0u>) \
-    INSTANTIATE(T,BlackOilTwoPhaseIndices<0u,0u,0u,0u,false,false,0u,2u,0u>) \
-    INSTANTIATE(T,BlackOilTwoPhaseIndices<0u,0u,1u,0u,false,false,0u,2u,0u>) \
-    INSTANTIATE(T,BlackOilTwoPhaseIndices<0u,0u,1u,0u,false,true,0u,2u,0u>)  \
-    INSTANTIATE(T,BlackOilTwoPhaseIndices<0u,0u,0u,1u,false,false,0u,1u,0u>) \
-    INSTANTIATE(T,BlackOilTwoPhaseIndices<0u,0u,0u,0u,false,true,0u,0u,0u>)  \
-    INSTANTIATE(T,BlackOilTwoPhaseIndices<0u,0u,0u,0u,false,true,0u,2u,0u>)  \
-    INSTANTIATE(T,BlackOilTwoPhaseIndices<0u,0u,2u,0u,false,false,0u,2u,0u>) \
-    INSTANTIATE(T,BlackOilTwoPhaseIndices<0u,0u,0u,1u,false,false,0u,0u,0u>) \
-    INSTANTIATE(T,BlackOilTwoPhaseIndices<0u,0u,0u,1u,false,true,0u,0u,0u>)  \
-    INSTANTIATE(T,BlackOilTwoPhaseIndices<1u,0u,0u,0u,false,false,0u,0u,0u>) \
-    INSTANTIATE(T,BlackOilVariableAndEquationIndices<0u,0u,0u,0u,false,false,0u,0u>)            \
-    INSTANTIATE(T,BlackOilVariableAndEquationIndices<1u,0u,0u,0u,false,false,0u,0u>)            \
-    INSTANTIATE(T,BlackOilVariableAndEquationIndices<0u,1u,0u,0u,false,false,0u,0u>)            \
-    INSTANTIATE(T,BlackOilVariableAndEquationIndices<0u,0u,1u,0u,false,false,0u,0u>)            \
-    INSTANTIATE(T,BlackOilVariableAndEquationIndices<0u,0u,0u,1u,false,false,0u,0u>)            \
-    INSTANTIATE(T,BlackOilVariableAndEquationIndices<0u,0u,0u,0u,true,false,0u,0u>)             \
-    INSTANTIATE(T,BlackOilVariableAndEquationIndices<0u,0u,0u,0u,false,true,0u,0u>)             \
-    INSTANTIATE(T,BlackOilVariableAndEquationIndices<0u,0u,0u,1u,false,true,0u,0u>)             \
-    INSTANTIATE(T,BlackOilVariableAndEquationIndices<0u,0u,0u,1u,false,false,1u,0u>)            \
-    INSTANTIATE(T,BlackOilVariableAndEquationIndices<1u,0u,0u,0u,true,false,0u,0u>)
-
-INSTANTIATE_TYPE(double)
+INSTANTIATE_TYPE_INDICES(StandardWellConnections, double)
 
 #if FLOW_INSTANTIATE_FLOAT
-INSTANTIATE_TYPE(float)
+INSTANTIATE_TYPE_INDICES(StandardWellConnections, float)
 #endif
 
 } // namespace Opm
