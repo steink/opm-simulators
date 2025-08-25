@@ -1491,7 +1491,16 @@ namespace Opm
 
                 // we don't want to scale with zero and get zero rates.
                 if (scale > 0) {
+                    deferred_logger.debug(
+                    "UpdateTarget (group control): " + this->name() + 
+                    " scaled by: " + std::to_string(scale) +
+                    " rate was: [" +
+                    std::to_string(ws.surface_rates[0]) + ", " +
+                    std::to_string(ws.surface_rates[1]) + ", " +
+                    std::to_string(ws.surface_rates[2]) + "]"
+                        );
                     for (int p = 0; p<np; ++p) {
+                        //deferred_logger.debug("UpdateTarget (group control): " + this->name() + " scaled by: " + std::to_string(scale));
                         ws.surface_rates[p] *= scale;
                     }
                     ws.trivial_group_target = false;
@@ -1499,6 +1508,7 @@ namespace Opm
                     // If group target is trivial we dont want to flip to other controls. To avoid oscillation we store
                     // this information in the well state and explicitly check for this condition when evaluating well controls.
                     ws.trivial_group_target = true;
+                    deferred_logger.debug("UpdateTarget (group control): " + this->name() + " gets zero target ");
                 }
                 break;
             }

@@ -31,6 +31,7 @@
 
 #include <opm/simulators/utils/BlackoilPhases.hpp>
 
+#include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
 namespace Opm
 {
 
@@ -168,6 +169,14 @@ checkGroupConstraints(WellState<Scalar>& well_state,
             // be GRUP.
             if (group_constraint.first) {
                 ws.injection_cmode = Well::InjectorCMode::GRUP;
+                deferred_logger.debug(
+                    "checkGroupConstraints: " + well.name() +
+                    " changed to group, scaled by: " + std::to_string(group_constraint.second) +
+                    " rate was: [" +
+                    std::to_string(ws.surface_rates[0]) + ", " +
+                    std::to_string(ws.surface_rates[1]) + ", " +
+                    std::to_string(ws.surface_rates[2]) + "]"
+                );
                 const int np = well_state.numPhases();
                 for (int p = 0; p<np; ++p) {
                     ws.surface_rates[p] *= group_constraint.second;
@@ -199,6 +208,15 @@ checkGroupConstraints(WellState<Scalar>& well_state,
             // be GRUP.
             if (group_constraint.first) {
                 ws.production_cmode = Well::ProducerCMode::GRUP;
+                //deferred_logger.debug("checkGroupConstraints: " + well.name() + " changed to group, scaled by: " + std::to_string(group_constraint.second));
+                deferred_logger.debug(
+                    "checkGroupConstraints: " + well.name() +
+                    " changed to group, scaled by: " + std::to_string(group_constraint.second) +
+                    " rate was: [" +
+                    std::to_string(ws.surface_rates[0]) + ", " +
+                    std::to_string(ws.surface_rates[1]) + ", " +
+                    std::to_string(ws.surface_rates[2]) + "]"
+                );
                 const int np = well_state.numPhases();
                 for (int p = 0; p<np; ++p) {
                     ws.surface_rates[p] *= group_constraint.second;

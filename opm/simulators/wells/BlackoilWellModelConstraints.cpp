@@ -623,7 +623,8 @@ updateGroupIndividualControl(const Group& group,
                                                                               reportStepIdx,
                                                                               /* isInjector */ false,
                                                                               wellModel_.groupState(),
-                                                                              well_state);
+                                                                              well_state,
+                                                                              deferred_logger);
                 changed = true;
             }
         }
@@ -673,7 +674,8 @@ updateGroupIndividualControl(const Group& group,
                                                                               reportStepIdx,
                                                                               /* isInjector */ false,
                                                                               wellModel_.groupState(),
-                                                                              well_state);
+                                                                              well_state,
+                                                                              deferred_logger);
             } else if (worst_offending_well) {
                 closed_offending_wells.insert_or_assign(group.name(), 
                             std::make_pair(Group::ProductionCMode2String(changed_this.first), *worst_offending_well));

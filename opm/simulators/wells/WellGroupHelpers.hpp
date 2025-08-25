@@ -170,7 +170,8 @@ public:
                                                     const int reportStepIdx,
                                                     bool isInjector,
                                                     const GroupState<Scalar>& group_state,
-                                                    WellState<Scalar>& wellState);
+                                                    WellState<Scalar>& wellState,
+                                                    DeferredLogger& deferred_logger);
 
     static void updateREINForGroups(const Group& group,
                                     const Schedule& schedule,

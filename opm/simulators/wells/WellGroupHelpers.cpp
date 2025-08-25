@@ -497,7 +497,8 @@ updateWellRatesFromGroupTargetScale(const Scalar scale,
                                     const int reportStepIdx,
                                     bool isInjector,
                                     const GroupState<Scalar>& group_state,
-                                    WellState<Scalar>& wellState)
+                                    WellState<Scalar>& wellState,
+                                    DeferredLogger& deferred_logger)
 {
     OPM_TIMEFUNCTION();
     for (const std::string& groupName : group.groups()) {
@@ -517,7 +518,7 @@ updateWellRatesFromGroupTargetScale(const Scalar scale,
         }
         if (!individual_control) {
             const Group& groupTmp = schedule.getGroup(groupName, reportStepIdx);
-            updateWellRatesFromGroupTargetScale(scale, groupTmp, schedule, reportStepIdx, isInjector, group_state, wellState);
+            updateWellRatesFromGroupTargetScale(scale, groupTmp, schedule, reportStepIdx, isInjector, group_state, wellState, deferred_logger);
         }
     }
 
@@ -557,6 +558,7 @@ updateWellRatesFromGroupTargetScale(const Scalar scale,
                 }
             }
         }
+        deferred_logger.debug("updateWellRatesFromGroupTargetScale: " + wellName + " scaled by: " + std::to_string(scale));
     }
 
 
