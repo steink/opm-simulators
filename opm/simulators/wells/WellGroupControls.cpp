@@ -278,8 +278,10 @@ getGroupProductionControl(const Group& group,
     const auto target_rate = well_state.well(well_.indexOfWell()).group_target;
     if (target_rate) {
         const auto current_rate = -tcalc.calcModeRateFromRates(rates); // Switch sign since 'rates' are negative for producers.
+        deferred_logger.debug("getGroupProductionControl (control eq) " + well.name() + " current rate: " + std::to_string(current_rate.value()) + " target rate: " + std::to_string(*target_rate));
         control_eq = current_rate - *target_rate;
     } else {
+        deferred_logger.debug("getGroupProductionControl (control eq) " + well.name() + " gets no target rate !!!!");
         const auto& controls = well.productionControls(summaryState);
         control_eq = bhp - controls.bhp_limit;
     }
@@ -343,9 +345,11 @@ getGroupProductionTargetRate(const Group& group,
 
     const auto target_rate = well_state.well(well_.indexOfWell()).group_target;
     if (!target_rate) {
+        deferred_logger.debug("getGroupProductionTargetRate: " + well_.name() + " has no target rate (returning scale = 1)");
         return 1.0;
     }
     if (*target_rate == 0.0) {
+        deferred_logger.debug("getGroupProductionTargetRate returns zero target rate for " + well_.name() + " from group " + group.name());
         return 0.0;
     }
     const auto& ws = well_state.well(well_.indexOfWell());
@@ -356,6 +360,7 @@ getGroupProductionTargetRate(const Group& group,
         scale = *target_rate / current_rate;
     } else {
         deferred_logger.debug("getGroupProductionTargetRate " + well_.name() + " has approx zero current_rate: " + std::to_string(current_rate));
+        deferred_logger.debug("Target rate is " + std::to_string(*target_rate) + " from group " + group.name());
         deferred_logger.debug("Rates are: [" +
                     std::to_string(ws.surface_rates[0]) + ", " +
                     std::to_string(ws.surface_rates[1]) + ", " +
