@@ -301,6 +301,7 @@ namespace Opm
         if (!this->wellIsStopped()){
             if (wqTotal*sgn <= 0.0 && !fixed_status){
                 this->stopWell();
+                deferred_logger.debug("Well " + this->name() + " stopped during local solve. Control was " + from);
                 return true;
             } else {
                 bool changed = false;
@@ -329,6 +330,8 @@ namespace Opm
                             updateWellStateWithTarget(simulator, group_state, well_state, deferred_logger);
                         }
                         updatePrimaryVariables(simulator, well_state, deferred_logger);
+                        std::string to = this->isInjector() ? WellInjectorCMode2String(ws.injection_cmode) : WellProducerCMode2String(ws.production_cmode);
+                        deferred_logger.debug("Well " + this->name() + " changed control during local solve. Control was " + from + ", now is " + to);
                     }
                 }
                 return changed;
@@ -367,6 +370,7 @@ namespace Opm
                 if (has_thp) {
                     well_state.well(this->index_of_well_).thp = this->getTHPConstraint(summary_state);
                 }
+                deferred_logger.debug("Well " + this->name() + " re-opened during local solve. Control is " + from);
                 return true;
             } else {
                 return false;
