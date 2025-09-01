@@ -402,6 +402,8 @@ bool SingleWellState<Scalar>::operator==(const SingleWellState& rhs) const
            this->alq_state == rhs.alq_state &&
            this->primaryvar == rhs.primaryvar &&
            this->group_target == rhs.group_target;
+           this->injection_cmode_group_translated == rhs.injection_cmode_group_translated;
+           this->production_cmode_group_translated == rhs.production_cmode_group_translated;
 }
 
 template class SingleWellState<double>;
