@@ -1648,6 +1648,9 @@ namespace Opm
         this->operability_status_.resetOperability();
         this->operability_status_.solvable = true;
 
+        if (allow_switching) {
+            this->checkControlFeasibility(summary_state, well_state, inj_controls, prod_controls, Base::B_avg_, deferred_logger);
+        }
         for (; it < max_iter_number; ++it, ++debug_cost_counter_) {
             ++its_since_last_switch;
             if (allow_switching && its_since_last_switch >= min_its_after_switch){

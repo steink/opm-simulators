@@ -237,6 +237,13 @@ protected:
                                          Well::InjectionControls& inj_controls,
                                          Well::ProductionControls& prod_controls) const;
 
+    void checkControlFeasibility(const SummaryState &summary_state, 
+                                 WellState<Scalar> &well_state, 
+                                 const Well::InjectionControls &inj_controls, 
+                                 const Well::ProductionControls &prod_controls,
+                                 const std::vector<Scalar>& scaling,
+                                 DeferredLogger& deferred_logger) const;
+
     void resetDampening() {
         std::fill(this->inj_multiplier_damp_factor_.begin(), this->inj_multiplier_damp_factor_.end(), 1.0);
     }
