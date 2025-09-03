@@ -241,7 +241,7 @@ protected:
                                          Well::ProductionControls& prod_controls) const;
 
     void checkControlFeasibility(const SummaryState &summary_state, 
-                                 WellState<Scalar> &well_state, 
+                                 WellStateType& well_state, 
                                  const Well::InjectionControls &inj_controls, 
                                  const Well::ProductionControls &prod_controls,
                                  const std::vector<Scalar>& scaling,

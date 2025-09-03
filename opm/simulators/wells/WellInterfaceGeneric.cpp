@@ -954,13 +954,12 @@ prepareForPotentialCalculations(const SummaryState& summary_state,
     }    
 }
 
-template<class Scalar>
-void WellInterfaceGeneric<Scalar>::
-checkControlFeasibility(const SummaryState& summary_state,
-                        WellState<Scalar>& well_state,
-                        const Well::InjectionControls& inj_controls,
-                        const Well::ProductionControls& prod_controls,
-                        const std::vector<Scalar>& scaling,
+template<typename Scalar, typename IndexTraits>
+void WellInterfaceGeneric<Scalar, IndexTraits>::checkControlFeasibility(const SummaryState& summary_state,
+                                                                        WellState<Scalar, IndexTraits>& well_state,
+                                                                        const Well::InjectionControls& inj_controls,
+                                                                        const Well::ProductionControls& prod_controls,
+                                                                        const std::vector<Scalar>& scaling,
                         DeferredLogger& deferred_logger) const
 {
     auto& ws = well_state.well(this->index_of_well_);
@@ -978,13 +977,16 @@ checkControlFeasibility(const SummaryState& summary_state,
     // scaling
     Scalar cmode_rate = 0.0;
     if (gcmode == Well::ProducerCMode::ORAT || gcmode == Well::ProducerCMode::LRAT) {
-        cmode_rate += weighted_rates[pu.phase_pos[BlackoilPhases::Liquid]];
+        const int oil_pos = pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx);
+        cmode_rate += weighted_rates[oil_pos];
     }
     if (gcmode == Well::ProducerCMode::WRAT || gcmode == Well::ProducerCMode::LRAT) {
-        cmode_rate += weighted_rates[pu.phase_pos[BlackoilPhases::Aqua]];
+        const int water_pos = pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx);
+        cmode_rate += weighted_rates[water_pos];
     }
     if (gcmode == Well::ProducerCMode::GRAT) {
-        cmode_rate += weighted_rates[pu.phase_pos[BlackoilPhases::Vapour]];
+        const int gas_pos = pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx);
+        cmode_rate += weighted_rates[gas_pos];
     }
 
     const Scalar tol = 1e-4;
