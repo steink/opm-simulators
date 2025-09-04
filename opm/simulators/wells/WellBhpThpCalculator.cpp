@@ -976,6 +976,55 @@ estimateStableBhp(const WellState<Scalar, IndexTraits>& well_state,
 }
 
 template<typename Scalar, typename IndexTraits>
+std::optional<Scalar> WellBhpThpCalculator<Scalar, IndexTraits>::
+estimateCriticalPoints(const WellState<Scalar, IndexTraits>& well_state,
+                       const Well& well,
+                       const std::vector<Scalar>& rates,
+                       const Scalar rho,
+                       const SummaryState& summaryState) const
+{   
+    // Given a *converged* well_state with ipr, estimate
+    // 1. (bhp, rate) for minimal flowing rate (unstable)
+    // 2. (bhp, rate) for minimal rates (stable)
+    // 3. (bhp, rate) for maximal rate (stable solution at thp)
+    const auto& controls = well.productionControls(summaryState);
+    const Scalar thp = well_.getTHPConstraint(summaryState);
+    const auto& table = well_.vfpProperties()->getProd()->getTable(controls.vfp_table_number);
+
+    const Scalar aqua = rates[IndexTraits::waterPhaseIdx];
+    const Scalar liquid = rates[IndexTraits::oilPhaseIdx];
+    const Scalar vapour = rates[IndexTraits::gasPhaseIdx];
+    Scalar flo = detail::getFlo(table, aqua, liquid, vapour);
+    Scalar wfr, gfr;
+    if (well_.useVfpExplicit() || -flo < table.getFloAxis().front()) {
+        wfr =  well_.vfpProperties()->getExplicitWFR(controls.vfp_table_number, well_.indexOfWell());
+        gfr = well_.vfpProperties()->getExplicitGFR(controls.vfp_table_number, well_.indexOfWell());
+    } else {
+        wfr = detail::getWFR(table, aqua, liquid, vapour);  
+        gfr = detail::getGFR(table, aqua, liquid, vapour);   
+    }
+
+    auto ipr = getFloIPR(well_state, well, summaryState);
+    
+    const Scalar vfp_ref_depth = well_.vfpProperties()->getProd()->getTable(controls.vfp_table_number).getDatumDepth();
+
+    const Scalar dp_hydro = wellhelpers::computeHydrostaticCorrection(well_.refDepth(), vfp_ref_depth,
+                                                                      rho, well_.gravity());
+    auto bhp_adjusted = [this, &thp, &dp_hydro](const Scalar bhp) {
+           return bhp - dp_hydro + getVfpBhpAdjustment(bhp, thp);
+       };
+    const auto retval = VFPHelpers<double>::intersectWithIPR(table, thp, wfr, gfr,
+                                                             well_.getALQ(well_state),
+                                                             ipr.first, ipr.second,
+                                                             bhp_adjusted);
+    if (retval.has_value()) {
+        // returned pair is (flo, bhp)
+        return retval.value().second;
+    } else {
+        return std::nullopt;
+    }
+}
+template<typename Scalar, typename IndexTraits>
 std::pair<Scalar, Scalar> WellBhpThpCalculator<Scalar, IndexTraits>::
 getFloIPR(const WellState<Scalar, IndexTraits>& well_state,
           const Well& well, 
