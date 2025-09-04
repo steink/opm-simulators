@@ -86,6 +86,7 @@ public:
         serializer(group_target);
         serializer(injection_cmode_group_translated);
         serializer(production_cmode_group_translated);
+        serializer(prevent_group_control);
     }
 
     bool operator==(const SingleWellState&) const;
@@ -128,6 +129,7 @@ public:
     WellProducerCMode production_cmode{WellProducerCMode::CMODE_UNDEFINED};
     std::optional<WellInjectorCMode> injection_cmode_group_translated{WellInjectorCMode::CMODE_UNDEFINED};
     std::optional<WellProducerCMode> production_cmode_group_translated{WellProducerCMode::CMODE_UNDEFINED};
+    std::optional<bool> prevent_group_control;
     std::vector<Scalar> primaryvar;
     ALQState<Scalar> alq_state;
 
