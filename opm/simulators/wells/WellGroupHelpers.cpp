@@ -25,6 +25,7 @@
 #include <opm/input/eclipse/Schedule/Group/GConSump.hpp>
 #include <opm/input/eclipse/Schedule/Group/GConSale.hpp>
 #include <opm/input/eclipse/Schedule/Group/GSatProd.hpp>
+#include <opm/input/eclipse/Schedule/Group/GroupSatelliteInjection.hpp>
 #include <opm/input/eclipse/Schedule/Group/GPMaint.hpp>
 #include <opm/input/eclipse/Schedule/Group/Group.hpp>
 #include <opm/input/eclipse/Schedule/Group/GuideRateConfig.hpp>
@@ -93,23 +94,25 @@ namespace Opm {
                       const bool injector,
                       const bool network)
     {
-
+        // Only obtain satellite rates once (on rank 0)
         Scalar rate = 0.0;
+        if (wellState.isRank0() && (group.hasSatelliteProduction() || group.hasSatelliteInjection())) {
+            if (injector) {
+                rate = satelliteInjectionRate(schedule[reportStepIdx], group, wellState.phaseUsageInfo(), phasePos, res_rates);
+            } else {
+                const auto rateComp = selectRateComponent(wellState.phaseUsageInfo(), phasePos);
+                if (rateComp.has_value()) {
+                    rate = satelliteProductionRate(schedule[reportStepIdx], group, *rateComp, res_rates);
+                }
+            }
+            // Satellite groups have no sub groups/wells so we're done
+            return rate;
+        }
+
         for (const std::string& groupName : group.groups()) {
             const auto& groupTmp = schedule.getGroup(groupName, reportStepIdx);
             const auto& gefac = groupTmp.getGroupEfficiencyFactor(network);
             rate += gefac * sumWellPhaseRates(res_rates, groupTmp, schedule, wellState, reportStepIdx, phasePos, injector, network);
-        }
-
-        // only sum satellite production once
-        // With the current treatment, satellite production must also explicitly be accounted for in
-        // updateGroupTargetReduction. A cleaner solution would perhaps be to let sumWellPhaseRates return
-        // the satellite production directly (it currently returns zero for satellite groups).
-        if (wellState.isRank0() && !injector) {
-            const auto rateComp = selectRateComponent(wellState.phaseUsageInfo(), phasePos);
-            if (rateComp.has_value()) {
-                rate += satelliteProduction(schedule[reportStepIdx], group.groups(), *rateComp);
-            }
         }
 
         for (const std::string& wellName : group.wells()) {
@@ -151,19 +154,61 @@ namespace Opm {
 
 template<typename Scalar, typename IndexTraits>
 Scalar WellGroupHelpers<Scalar, IndexTraits>::
-satelliteProduction(const ScheduleState& sched,
-                    const std::vector<std::string>& groups,
-                    const GSatProd::GSatProdGroup::Rate rateComp)
+satelliteInjectionRate(const ScheduleState& sched,
+                       const Group& group, 
+                       const PhaseUsageInfo<IndexTraits>& pu,
+                       const int phase_pos, 
+                       bool res_rates)
 {
-    auto gsatProdRate = Scalar{};
-    const auto& gsatProd = sched.gsatprod();
-    for (const auto& group : groups) {
-        if (! gsatProd.has(group)) {
-            continue;
+    Scalar rate = 0.0;
+    if (group.hasSatelliteInjection()) {
+        std::optional<Phase> ph;
+        for (const auto& [bo_phase, phase] : std::array {
+            std::pair( IndexTraits::waterPhaseIdx, Phase::WATER),
+            std::pair( IndexTraits::oilPhaseIdx, Phase::OIL),
+            std::pair( IndexTraits::gasPhaseIdx, Phase::GAS) })
+        {
+            if (pu.phaseIsActive(bo_phase) && (pu.canonicalToActivePhaseIdx(bo_phase) == phase_pos)) {
+                ph = phase;
+            }
         }
-        gsatProdRate += gsatProd.get(group).rate[rateComp];
+        if (ph.has_value()) {
+            const auto& satellite_inj = sched.satelliteInjection(group.name());
+            const auto& rate_ix = satellite_inj.rateIndex(ph.value());
+            if (rate_ix.has_value()) {
+                const auto& satrates = satellite_inj[*rate_ix];
+                if (!res_rates) { // surface rates
+                    if (const auto& qs = satrates.surface(); qs.has_value()) {
+                        rate = *qs;
+                    }
+                } else {// reservoir rates - not officially supported (not tested)
+                    if (const auto& qr = satrates.reservoir(); qr.has_value()) {
+                        rate = *qr;
+                    }
+                }
+            }
+        }
     }
-    return gsatProdRate;
+    return rate;
+}
+
+template <typename Scalar, typename IndexTraits>
+Scalar WellGroupHelpers<Scalar, IndexTraits>::
+satelliteProductionRate(const ScheduleState& sched,
+                        const Group& group, 
+                        const GSatProd::GSatProdGroup::Rate rateComp, 
+                        bool res_rates)
+{
+    Scalar rate = 0.0;
+    if (group.hasSatelliteProduction()) {
+        const auto& gsatProd = sched.gsatprod();
+        if (!res_rates) {
+            rate = gsatProd.get(group.name()).rate[rateComp];
+        } 
+        // Satellite reservoir rates currently not supported. Cannot be included 
+        // directly here since GSATPROD contains total reservoir rates
+    }
+    return rate;
 }
 
 template<typename Scalar, typename IndexTraits>
@@ -431,18 +476,6 @@ updateGroupTargetReduction(const Group& group,
                         groupTargetReduction[phase] += subGroupEfficiency * subGroupTargetReduction[phase];
                     }
                 }
-            }
-        }
-    }
-
-    // only sum satellite production once
-    // With the current treatment, satellite rates here must be added to target reduction excactly the same 
-    // way as in sumWellPhaseRates (see comment there)
-    if (wellState.isRank0()) {
-        for (int phase = 0; phase < np; phase++) {
-            const auto rateComp = selectRateComponent(wellState.phaseUsageInfo(), phase);
-            if (rateComp.has_value()) {
-                groupTargetReduction[phase] += satelliteProduction(schedule[reportStepIdx], group.groups(), *rateComp);
             }
         }
     }
