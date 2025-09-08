@@ -155,9 +155,9 @@ namespace Opm {
 template<typename Scalar, typename IndexTraits>
 Scalar WellGroupHelpers<Scalar, IndexTraits>::
 satelliteInjectionRate(const ScheduleState& sched,
-                       const Group& group, 
+                       const Group& group,
                        const PhaseUsageInfo<IndexTraits>& pu,
-                       const int phase_pos, 
+                       const int phase_pos,
                        bool res_rates)
 {
     Scalar rate = 0.0;
@@ -192,8 +192,8 @@ satelliteInjectionRate(const ScheduleState& sched,
 template <typename Scalar, typename IndexTraits>
 Scalar WellGroupHelpers<Scalar, IndexTraits>::
 satelliteProductionRate(const ScheduleState& sched,
-                        const Group& group, 
-                        const GSatProd::GSatProdGroup::Rate rateComp, 
+                        const Group& group,
+                        const GSatProd::GSatProdGroup::Rate rateComp,
                         bool res_rates)
 {
     Scalar rate = 0.0;
@@ -201,7 +201,7 @@ satelliteProductionRate(const ScheduleState& sched,
         const auto& gsatProd = sched.gsatprod();
         if (!res_rates) {
             rate = gsatProd.get(group.name()).rate[rateComp];
-        } 
+        }
         // We don't support reservoir rates for satellite production groups
     }
     return rate;

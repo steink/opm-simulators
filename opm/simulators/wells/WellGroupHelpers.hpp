@@ -69,8 +69,8 @@ public:
                                          bool res_rates);
 
     static Scalar satelliteProductionRate(const ScheduleState& sched,
-                                          const Group& group, 
-                                          const GSatProd::GSatProdGroup::Rate rateComp, 
+                                          const Group& group,
+                                          const GSatProd::GSatProdGroup::Rate rateComp,
                                           bool res_rates);
 
     static std::optional<GSatProd::GSatProdGroup::Rate>
