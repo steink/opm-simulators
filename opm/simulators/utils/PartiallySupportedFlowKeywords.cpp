@@ -590,7 +590,7 @@ partiallySupported()
             {
                {4,{true, allow_values<double> {.0}, "GSATINJE(RESV): reservoir volume rate is not supported and should be defaulted (1*)"}}, // RESERVOIR_VOLUME_RATE
             },
-         },         
+         },
          {
             "GUIDERAT",
             {
