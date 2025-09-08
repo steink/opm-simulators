@@ -181,10 +181,7 @@ satelliteInjectionRate(const ScheduleState& sched,
                     if (const auto& qs = satrates.surface(); qs.has_value()) {
                         rate = *qs;
                     }
-                } else {// reservoir rates - not officially supported (not tested)
-                    if (const auto& qr = satrates.reservoir(); qr.has_value()) {
-                        rate = *qr;
-                    }
+                // We don't support reservoir rates for satellite injection groups
                 }
             }
         }
@@ -205,8 +202,7 @@ satelliteProductionRate(const ScheduleState& sched,
         if (!res_rates) {
             rate = gsatProd.get(group.name()).rate[rateComp];
         } 
-        // Satellite reservoir rates currently not supported. Cannot be included 
-        // directly here since GSATPROD contains total reservoir rates
+        // We don't support reservoir rates for satellite production groups
     }
     return rate;
 }

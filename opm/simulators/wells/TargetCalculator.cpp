@@ -29,7 +29,6 @@
 #include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
 #include <opm/simulators/wells/GroupState.hpp>
 
-#include <numeric>
 #include <cassert>
 #include <stdexcept>
 
@@ -221,27 +220,21 @@ groupTarget(const std::optional<Group::InjectionControls>& ctrl,
                          deferred_logger);
     }
     switch (cmode_) {
-    case Group::InjectionCMode::RATE: 
-    {
+    case Group::InjectionCMode::RATE:
         if (use_gpmaint_ && this->group_state_.has_gpmaint_target(this->group_name_))
             return this->group_state_.gpmaint_target(this->group_name_);
 
         return ctrl->surface_max_rate;
-    }
     case Group::InjectionCMode::RESV: 
-    {
-        if (use_gpmaint_ && this->group_state_.has_gpmaint_target(this->group_name_)) {
+        if (use_gpmaint_ && this->group_state_.has_gpmaint_target(this->group_name_))
             return this->group_state_.gpmaint_target(this->group_name_) / resv_coeff_[pos_];
-        }
+
         return ctrl->resv_max_rate / resv_coeff_[pos_];
-    }
-    case Group::InjectionCMode::REIN: 
-    {
+    case Group::InjectionCMode::REIN: {
         Scalar production_rate = this->group_state_.injection_rein_rates(ctrl->reinj_group)[pos_];
         return ctrl->target_reinj_fraction * production_rate;
     }
-    case Group::InjectionCMode::VREP: 
-    {
+    case Group::InjectionCMode::VREP: {
         // We use the injection_reservoir_rates directly instead of the reduction rates here to account for the
         // possibility that the group in question has both a VREP control and another injection control for a different phase.
         const std::vector<Scalar>& group_injection_reservoir_rates = this->group_state_.injection_reservoir_rates(this->group_name_);
@@ -260,8 +253,7 @@ groupTarget(const std::optional<Group::InjectionControls>& ctrl,
         }
         return voidage_rate / resv_coeff_[pos_];
     }
-    case Group::InjectionCMode::SALE: 
-    {
+    case Group::InjectionCMode::SALE: {
         assert(pos_ == pu_.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx) );
         // Gas injection rate = Total gas production rate + gas import rate - gas consumption rate - sales rate;
         // Gas import and consumption is already included in the REIN rates
