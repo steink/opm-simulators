@@ -225,7 +225,7 @@ groupTarget(const std::optional<Group::InjectionControls>& ctrl,
             return this->group_state_.gpmaint_target(this->group_name_);
 
         return ctrl->surface_max_rate;
-    case Group::InjectionCMode::RESV: 
+    case Group::InjectionCMode::RESV:
         if (use_gpmaint_ && this->group_state_.has_gpmaint_target(this->group_name_))
             return this->group_state_.gpmaint_target(this->group_name_) / resv_coeff_[pos_];
 
