@@ -215,6 +215,16 @@ public:
                      const Scalar ipr_a,
                      const Scalar ipr_b,
                      const std::function<Scalar(const Scalar)>& adjust_bhp);
+
+    static std::optional<std::pair<std::vector<Scalar>, std::vector<Scalar>>> VFPHelpers<Scalar>::
+    intersectWithIPRCriticalPoints(const VFPProdTable& table,
+                                const Scalar thp,
+                                const Scalar wfr,
+                                const Scalar gfr,
+                                const Scalar alq,
+                                const Scalar ipr_a,
+                                const Scalar ipr_b,
+                                const std::function<Scalar(const Scalar)>& adjust_bhp)
 };
 
 } // namespace
