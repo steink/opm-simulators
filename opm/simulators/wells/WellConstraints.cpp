@@ -315,6 +315,98 @@ activeProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
     return currentControl;
 }
 
+template<typename Scalar, typename IndexTraits>
+std::pair<Well::ProducerCMode, Scalar>
+WellConstraints<Scalar, IndexTraits>::
+getMostStrictProductionControl(const SingleWellState<Scalar, IndexTraits>& ws,
+                           const SummaryState& summaryState,
+                           const RateConvFunc& calcReservoirVoidageRates,
+                           const Well::ProductionControls& controls,
+                           DeferredLogger& deferred_logger, 
+                           std::optional<Scalar&> bhp_at_thp_limit) const
+{
+    // Assumes non-zero well-rates and updated ipr
+    const auto& pu = well_.phaseUsage();
+    const auto mostStrictControl = Well::ProducerCMode::BHP;
+    Scalar mostStrictBHP = ws.bhp;
+    if (bhp_at_thp_limit.has_value() && *bhp_at_thp_limit > ws.bhp) {
+        mostStrictControl = Well::ProducerCMode::THP;
+        mostStrictBHP = *bhp_at_thp_limit;
+    }
+    const auto rates = ws.surface_rates;
+    const Scalar tot_ipr_b = std::accumulate(ws.implicit_ipr_b.begin(), ws.implicit_ipr_b.end(), 0.0);
+    const Scalar tot_ipr_a = std::accumulate(ws.implicit_ipr_a.begin(), ws.implicit_ipr_a.end(), 0.0);
+    const Scalar tot_rate_at_bhp = -tot_ipr_b*mostStrictBHP + tot_ipr_a;
+    Scalar mostStrictScale = tot_rate_at_bhp/std::accumulate(rates.begin(), rates.end(), 0.0);
+
+    const std::vector<Well::ProducerCMode> rateModes = {Well::ProducerCMode::ORAT,
+                                                        Well::ProducerCMode::WRAT,
+                                                        Well::ProducerCMode::GRAT,
+                                                        Well::ProducerCMode::LRAT,
+                                                        Well::ProducerCMode::RESV};
+    for (const auto& mode : rateModes) {
+        if (!controls.hasControl(mode))
+            continue;
+        const Scalar scale = getControlModeScale(ws, controls, mode);
+        if (scale < mostStrictScale) {
+            mostStrictScale = scale;
+            mostStrictControl = mode;
+        }
+    }
+
+    if (ws.group_target.has_value()) {
+        const Scalar scale = getControlModeScale(ws, controls, ws.production_cmode_group_translated.value(), ws.group_target.value());
+        if (scale < mostStrictScale) {
+            mostStrictScale = scale;
+            mostStrictControl = Well::ProducerCMode::GRUP;
+        }
+    }
+}
+
+template<typename Scalar, typename IndexTraits>
+Scalar
+WellConstraints<Scalar, IndexTraits>::
+getProductionControlModeScale(const SingleWellState<Scalar, IndexTraits>& ws,
+                    const Well::ProducerCMode& cmode,
+                    const RateConvFunc& calcReservoirVoidageRates,
+                    const Well::ProductionControls& control, 
+                    const std::optional<Scalar> target) const
+{
+    Scalar current_rate;
+    Scalar target_rate;
+    switch (cmode) {
+        case Well::ProducerCMode::ORAT:
+            current_rate = -ws.surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx)];
+            target_rate = target.has_value() ? *target : control.oil_rate;
+            break;
+        case Well::ProducerCMode::WRAT:
+            current_rate = -ws.surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx)];
+            target_rate = target.has_value() ? *target : control.water_rate;
+            break;
+        case Well::ProducerCMode::GRAT:
+            current_rate = -ws.surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx)];
+            target_rate = target.has_value() ? *target : control.gas_rate;
+            break;
+        case Well::ProducerCMode::LRAT:
+            current_rate = -ws.surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx)];
+            current_rate += -ws.surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx)];
+            target_rate = target.has_value() ? *target : control.liquid_rate;
+            break;
+        case Well::ProducerCMode::RESV:
+            // deal with non-prediction mode
+            for (int p = 0; p < well_.numPhases(); ++p) {
+                cmode_rate += -ws.reservoir_rates[p];
+            }
+            target_rate = target.has_value() ? *target : control.resv_rate;
+            break;
+        default:
+            break;
+    }
+    return current_rate == 0.0 ? std::numeric_limits<Scalar>::max() : target_rate/current_rate;
+}
+
+{
+
 template class WellConstraints<double, BlackOilDefaultFluidSystemIndices>;
 
 #if FLOW_INSTANTIATE_FLOAT
