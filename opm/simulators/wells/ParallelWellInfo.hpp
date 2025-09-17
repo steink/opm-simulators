@@ -63,7 +63,8 @@ public:
     ///          no perforation above.
     /// \param above The ECL index of the next open perforation above.
     /// \param current The ECL index of the current open perforation.
-    void pushBackEclIndex(int above, int current, bool owner=true);
+    /// \param owner True if process is owner
+    void pushBackEclIndex(int above, int current, bool owner = true);
 
     /// \brief Clear all the parallel information
     void clear();
@@ -102,7 +103,7 @@ public:
     /// For distributed wells this may include perforations stored elsewhere.
     /// The result is stored in ther range given as the parameters
     /// \param begin The start of the range
-    /// \param ebd The end of the range
+    /// \param end The end of the range
     /// \tparam RAIterator The type og random access iterator
     template<class RAIterator>
     void partialSumPerfValues(RAIterator begin, RAIterator end) const;
@@ -142,24 +143,26 @@ public:
 
     /// \brief Constructor
     /// \param local_indices completely set up index set for map ecl index to local index
+    /// \param comm Parallle communicator
+    /// \param num_local_perfs Number of local perforations
     GlobalPerfContainerFactory(const IndexSet& local_indices,
                                const Parallel::Communication comm,
                                int num_local_perfs);
 
     /// \brief Creates a container that holds values for all perforations
     /// \param local_perf_container Container with values attached to the local perforations.
-    /// \param num_components the number of components per perforation.
+    /// \param num_quantities the number of quantities per perforation.
     /// \return A container with values attached to all perforations of a well.
     ///         Values are ordered by the index of the perforation in the ECL schedule.
     std::vector<Scalar> createGlobal(const std::vector<Scalar>& local_perf_container,
-                                     std::size_t num_components) const;
+                                     std::size_t num_quantities) const;
 
     /// \brief Copies the values of the global perforation to the local representation
     /// \param global values attached to all peforations of a well (as if the well would live on one process)
-    /// \param num_components the number of components per perforation.
+    /// \param num_quantities the number of quantities per perforation.
     /// \param[out] local The values attached to the local perforations only.
     void copyGlobalToLocal(const std::vector<Scalar>& global, std::vector<Scalar>& local,
-                           std::size_t num_components) const;
+                           std::size_t num_quantities) const;
 
     int numGlobalPerfs() const;
     int globalToLocal(const int globalIndex) const;
@@ -306,7 +309,7 @@ public:
     /// For distributed wells this may include perforations stored elsewhere.
     /// The result is stored in ther range given as the parameters
     /// \param begin The start of the range
-    /// \param ebd The end of the range
+    /// \param end The end of the range
     /// \tparam RAIterator The type og random access iterator
     template<class RAIterator>
     void partialSumPerfValues(RAIterator begin, RAIterator end) const

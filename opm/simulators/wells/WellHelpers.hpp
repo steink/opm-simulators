@@ -26,13 +26,15 @@
 #include <dune/istl/bcrsmatrix.hh>
 #include <dune/common/dynmatrix.hh>
 
+#include <cstdint>
+
 namespace Opm {
 
 template<class Scalar> class ParallelWellInfo;
 struct WellProductionControls;
 struct WellInjectionControls;
-enum class WellProducerCMode;
-enum class WellInjectorCMode;
+enum class WellProducerCMode : std::uint16_t;
+enum class WellInjectorCMode : std::uint16_t;
 
 namespace wellhelpers {
 

@@ -130,7 +130,7 @@ prepareStep(const SimulatorTimerInterface& timer)
     {
         if (FluidSystem::phaseIsActive(phaseIdx)) {
             const unsigned sIdx = FluidSystem::solventComponentIndex(phaseIdx);
-            return Indices::canonicalToActiveComponentIndex(sIdx);
+            return FluidSystem::canonicalToActiveCompIdx(sIdx);
         }
 
         return -1;
@@ -259,8 +259,8 @@ nonlinearIterationNewton(const int iteration,
 
     this->initialLinearization(report,
                                iteration,
-                               nonlinear_solver.minIter(),
-                               nonlinear_solver.maxIter(),
+                               this->param_.newton_min_iter_,
+                               this->param_.newton_max_iter_,
                                timer);
 
     // -----------   If not converged, solve linear system and do Newton update  -----------
@@ -730,13 +730,8 @@ updateTUNING(const Tuning& tuning)
     this->param_.tolerance_cnv_relaxed_ = tuning.XXXCNV;
     this->param_.tolerance_mb_ = tuning.TRGMBE;
     this->param_.tolerance_mb_relaxed_ = tuning.XXXMBE;
-
-    if (terminal_output_) {
-        const auto msg = fmt::format("Tuning BlackoilModel tolerances: "
-                                     "MB: {:.2e}, CNV: {:.2e}",
-                                     tuning.TRGMBE, tuning.TRGCNV);
-        OpmLog::debug(msg);
-    }
+    this->param_.newton_max_iter_ = tuning.NEWTMX;
+    this->param_.newton_min_iter_ = tuning.NEWTMN;
 }
 
 template <class TypeTag>
@@ -1102,7 +1097,7 @@ getMaxCoeff(const unsigned cell_idx,
         }
 
         const unsigned sIdx = FluidSystem::solventComponentIndex(phaseIdx);
-        const unsigned compIdx = Indices::canonicalToActiveComponentIndex(sIdx);
+        const unsigned compIdx = FluidSystem::canonicalToActiveCompIdx(sIdx);
 
         B_avg[compIdx] += 1.0 / fs.invB(phaseIdx).value();
         const auto R2 = modelResid[cell_idx][compIdx];

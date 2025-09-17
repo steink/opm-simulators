@@ -97,6 +97,9 @@ public:
 
     /*!
      * \copydoc ImmiscibleRateVector::setMassRate
+     *
+     * \param value Value to use
+     * \param pvtRegionIdx PVT region index to use
      */
     void setMassRate(const ParentType& value, unsigned pvtRegionIdx = 0)
     {
@@ -105,15 +108,15 @@ public:
         // convert to "surface volume" if requested
         if constexpr (getPropValue<TypeTag, Properties::BlackoilConserveSurfaceVolume>()) {
             if (FluidSystem::phaseIsActive(FluidSystem::gasPhaseIdx)) {
-                (*this)[Indices::canonicalToActiveComponentIndex(FluidSystem::gasCompIdx)] /=
+                (*this)[FluidSystem::canonicalToActiveCompIdx(FluidSystem::gasCompIdx)] /=
                         FluidSystem::referenceDensity(FluidSystem::gasPhaseIdx, pvtRegionIdx);
             }
             if (FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx)) {
-                (*this)[Indices::canonicalToActiveComponentIndex(FluidSystem::oilCompIdx)] /=
+                (*this)[FluidSystem::canonicalToActiveCompIdx(FluidSystem::oilCompIdx)] /=
                         FluidSystem::referenceDensity(FluidSystem::oilPhaseIdx, pvtRegionIdx);
             }
             if (FluidSystem::phaseIsActive(FluidSystem::waterPhaseIdx)) {
-                (*this)[Indices::canonicalToActiveComponentIndex(FluidSystem::waterCompIdx)] /=
+                (*this)[FluidSystem::canonicalToActiveCompIdx(FluidSystem::waterCompIdx)] /=
                         FluidSystem::referenceDensity(FluidSystem::waterPhaseIdx, pvtRegionIdx);
             }
             if constexpr (enableSolvent) {
@@ -126,6 +129,9 @@ public:
 
     /*!
      * \copydoc ImmiscibleRateVector::setMolarRate
+     *
+     * \param value Value to set to
+     * \param pvtRegionIdx PVT region index to use
      */
     void setMolarRate(const ParentType& value, unsigned pvtRegionIdx = 0)
     {
@@ -163,15 +169,15 @@ public:
         // convert to "surface volume" if requested
         if constexpr (getPropValue<TypeTag, Properties::BlackoilConserveSurfaceVolume>()) {
             if (FluidSystem::phaseIsActive(FluidSystem::gasPhaseIdx)) {
-                (*this)[Indices::canonicalToActiveComponentIndex(FluidSystem::gasCompIdx)] /=
+                (*this)[FluidSystem::canonicalToActiveCompIdx(FluidSystem::gasCompIdx)] /=
                         FluidSystem::referenceDensity(FluidSystem::gasPhaseIdx, pvtRegionIdx);
             }
             if (FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx)) {
-                (*this)[Indices::canonicalToActiveComponentIndex(FluidSystem::oilCompIdx)] /=
+                (*this)[FluidSystem::canonicalToActiveCompIdx(FluidSystem::oilCompIdx)] /=
                         FluidSystem::referenceDensity(FluidSystem::oilPhaseIdx, pvtRegionIdx);
             }
             if (FluidSystem::phaseIsActive(FluidSystem::waterPhaseIdx)) {
-                (*this)[Indices::canonicalToActiveComponentIndex(FluidSystem::waterCompIdx)] /=
+                (*this)[FluidSystem::canonicalToActiveCompIdx(FluidSystem::waterCompIdx)] /=
                         FluidSystem::referenceDensity(FluidSystem::waterPhaseIdx, pvtRegionIdx);
             }
             if constexpr (enableSolvent) {

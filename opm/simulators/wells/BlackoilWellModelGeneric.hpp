@@ -282,13 +282,14 @@ public:
 
     bool isOwner(const std::string& wname) const
     {
-        auto pwInfoPos = std::find_if(this->parallel_well_info_.begin(),
-                                      this->parallel_well_info_.end(),
-                                      [&wname](const auto& pwInfo)
-                                      { return pwInfo.name() == wname; });
+        return this->parallelWellSatisfies
+            (wname, [](const auto& pwInfo) { return pwInfo.isOwner(); });
+    }
 
-        return (pwInfoPos != this->parallel_well_info_.end())
-            && pwInfoPos->isOwner();
+    bool hasLocalCells(const std::string& wname) const
+    {
+        return this->parallelWellSatisfies
+            (wname, [](const auto& pwInfo) { return pwInfo.hasLocalCells(); });
     }
 
     const ConnectionIndexMap& connectionIndexMap(const std::size_t idx)
@@ -366,7 +367,7 @@ protected:
     void reportGroupSwitching(DeferredLogger& local_deferredLogger) const;
 
     /// \brief Create the parallel well information
-    /// \param localWells The local wells from ECL schedule
+    /// \param wells The local wells from ECL schedule
     std::vector<std::reference_wrapper<ParallelWellInfo<Scalar>>>
     createLocalParallelWellInfo(const std::vector<Well>& wells);
 
@@ -409,7 +410,7 @@ protected:
     /// few quantities, like the D factor, the Kh product and the CTF, for
     /// shut connections.
     ///
-    /// \param[in] reportStepIdx Zero-based index of current report step.
+    /// \param[in] reportStepIndex Zero-based index of current report step.
     void assignShutConnections(data::Wells& wsrpt,
                                const int reportStepIndex) const;
 
@@ -596,6 +597,31 @@ private:
 
     void updateEclWellsCTFFromAction(const int timeStepIdx,
                                      const SimulatorUpdate& sim_update);
+
+    /// Check if a well satisfies a particular MPI condition
+    ///
+    /// Common conditions in this context are whether or not a named well is
+    /// owned by the current rank or has connections on the current rank.
+    ///
+    /// \tparam Predicate Condition predicate function type.
+    ///
+    /// \param[in] wname Well name.
+    ///
+    /// \param[in] p Predicate function implementing the specific condition.
+    ///
+    /// \return Whether or not \p wname is a parallel well and, if so, if it
+    /// satisfies the condition \p p.
+    template <typename Predicate>
+    bool parallelWellSatisfies(const std::string& wname, Predicate&& p) const
+    {
+        auto pwInfoPos = std::find_if(this->parallel_well_info_.begin(),
+                                      this->parallel_well_info_.end(),
+                                      [&wname](const auto& pwInfo)
+                                      { return pwInfo.name() == wname; });
+
+        return (pwInfoPos != this->parallel_well_info_.end())
+            && p(*pwInfoPos);
+    }
 
     /// Run caller-defined code for each well owned by current rank
     ///

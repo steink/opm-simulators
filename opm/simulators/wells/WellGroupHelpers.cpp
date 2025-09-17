@@ -25,6 +25,7 @@
 #include <opm/input/eclipse/Schedule/Group/GConSump.hpp>
 #include <opm/input/eclipse/Schedule/Group/GConSale.hpp>
 #include <opm/input/eclipse/Schedule/Group/GSatProd.hpp>
+#include <opm/input/eclipse/Schedule/Group/GroupSatelliteInjection.hpp>
 #include <opm/input/eclipse/Schedule/Group/GPMaint.hpp>
 #include <opm/input/eclipse/Schedule/Group/Group.hpp>
 #include <opm/input/eclipse/Schedule/Group/GuideRateConfig.hpp>
@@ -88,28 +89,31 @@ namespace Opm {
                       const Opm::Group& group,
                       const Opm::Schedule& schedule,
                       const Opm::WellState<Scalar, IndexTraits>& wellState,
+                      const SummaryState& summaryState,
                       const int reportStepIdx,
                       const int phasePos,
                       const bool injector,
                       const bool network)
     {
-
+        // Only obtain satellite rates once (on rank 0)
         Scalar rate = 0.0;
+        if (wellState.isRank0() && (group.hasSatelliteProduction() || group.hasSatelliteInjection())) {
+            if (injector) {
+                rate = satelliteInjectionRate(schedule[reportStepIdx], group, wellState.phaseUsageInfo(), phasePos, res_rates);
+            } else {
+                const auto rateComp = selectRateComponent(wellState.phaseUsageInfo(), phasePos);
+                if (rateComp.has_value()) {
+                    rate = satelliteProductionRate(summaryState, schedule[reportStepIdx], group, *rateComp, res_rates);
+                }
+            }
+            // Satellite groups have no sub groups/wells so we're done
+            return rate;
+        }
+
         for (const std::string& groupName : group.groups()) {
             const auto& groupTmp = schedule.getGroup(groupName, reportStepIdx);
             const auto& gefac = groupTmp.getGroupEfficiencyFactor(network);
-            rate += gefac * sumWellPhaseRates(res_rates, groupTmp, schedule, wellState, reportStepIdx, phasePos, injector, network);
-        }
-
-        // only sum satellite production once
-        // With the current treatment, satellite production must also explicitly be accounted for in
-        // updateGroupTargetReduction. A cleaner solution would perhaps be to let sumWellPhaseRates return
-        // the satellite production directly (it currently returns zero for satellite groups).
-        if (wellState.isRank0() && !injector) {
-            const auto rateComp = selectRateComponent(wellState.phaseUsageInfo(), phasePos);
-            if (rateComp.has_value()) {
-                rate += satelliteProduction(schedule[reportStepIdx], group.groups(), *rateComp);
-            }
+            rate += gefac * sumWellPhaseRates(res_rates, groupTmp, schedule, wellState, summaryState, reportStepIdx, phasePos, injector, network);
         }
 
         for (const std::string& wellName : group.wells()) {
@@ -151,28 +155,67 @@ namespace Opm {
 
 template<typename Scalar, typename IndexTraits>
 Scalar WellGroupHelpers<Scalar, IndexTraits>::
-satelliteProduction(const ScheduleState& sched,
-                    const std::vector<std::string>& groups,
-                    const GSatProd::GSatProdGroup::Rate rateComp)
+satelliteInjectionRate(const ScheduleState& sched,
+                       const Group& group,
+                       const PhaseUsageInfo<IndexTraits>& pu,
+                       const int phase_pos,
+                       bool res_rates)
 {
-    auto gsatProdRate = Scalar{};
-    const auto& gsatProd = sched.gsatprod();
-    for (const auto& group : groups) {
-        if (! gsatProd.has(group)) {
-            continue;
+    Scalar rate = 0.0;
+    if (group.hasSatelliteInjection()) {
+        std::optional<Phase> ph;
+        for (const auto& [bo_phase, phase] : std::array {
+            std::pair( IndexTraits::waterPhaseIdx, Phase::WATER),
+            std::pair( IndexTraits::oilPhaseIdx, Phase::OIL),
+            std::pair( IndexTraits::gasPhaseIdx, Phase::GAS) })
+        {
+            if (pu.phaseIsActive(bo_phase) && (pu.canonicalToActivePhaseIdx(bo_phase) == phase_pos)) {
+                ph = phase;
+            }
         }
-        gsatProdRate += gsatProd.get(group).rate[rateComp];
+        if (ph.has_value()) {
+            const auto& satellite_inj = sched.satelliteInjection(group.name());
+            const auto& rate_ix = satellite_inj.rateIndex(ph.value());
+            if (rate_ix.has_value()) {
+                const auto& satrates = satellite_inj[*rate_ix];
+                if (!res_rates) { // surface rates
+                    if (const auto& qs = satrates.surface(); qs.has_value()) {
+                        rate = *qs;
+                    }
+                // We don't support reservoir rates for satellite injection groups
+                }
+            }
+        }
     }
-    return gsatProdRate;
+    return rate;
+}
+
+template <typename Scalar, typename IndexTraits>
+Scalar WellGroupHelpers<Scalar, IndexTraits>::
+satelliteProductionRate(const SummaryState& summaryState,
+                        const ScheduleState& sched,
+                        const Group& group,
+                        const GSatProd::GSatProdGroupProp::Rate rateComp,
+                        bool res_rates)
+{
+    Scalar rate = 0.0;
+    if (group.hasSatelliteProduction()) {
+        const auto& gsatProd = sched.gsatprod();
+        if (!res_rates) {
+            rate = gsatProd.get(group.name(), summaryState).rate[rateComp];
+        }
+        // We don't support reservoir rates for satellite production groups
+    }
+    return rate;
 }
 
 template<typename Scalar, typename IndexTraits>
-std::optional<GSatProd::GSatProdGroup::Rate>
+std::optional<GSatProd::GSatProdGroupProp::Rate>
 WellGroupHelpers<Scalar, IndexTraits>::
 selectRateComponent(const PhaseUsageInfo<IndexTraits>& pu, const int phasePos)
 {
     // TODO: this function can be wrong, phasePos is not used anymore, this function requries checking and refactoring.
-    using Rate = GSatProd::GSatProdGroup::Rate;
+    using Rate = GSatProd::GSatProdGroupProp::Rate;
 
     for (const auto& [phase, rateComp] : std::array {
         std::pair { IndexTraits::waterPhaseIdx, Rate::Water },
@@ -271,9 +314,10 @@ sumWellSurfaceRates(const Group& group,
                     const WellState<Scalar, IndexTraits>& wellState,
                     const int reportStepIdx,
                     const int phasePos,
-                    const bool injector)
+                    const bool injector,
+                    const SummaryState& summaryState)
 {
-    return sumWellPhaseRates(false, group, schedule, wellState, reportStepIdx, phasePos, injector);
+    return sumWellPhaseRates(false, group, schedule, wellState, summaryState, reportStepIdx, phasePos, injector);
 }
 
 template<typename Scalar, typename IndexTraits>
@@ -284,9 +328,10 @@ sumWellResRates(const Group& group,
                 const WellState<Scalar, IndexTraits>& wellState,
                 const int reportStepIdx,
                 const int phasePos,
-                const bool injector)
+                const bool injector,
+                const SummaryState& summaryState)
 {
-    return sumWellPhaseRates(true, group, schedule, wellState, reportStepIdx, phasePos, injector);
+    return sumWellPhaseRates(true, group, schedule, wellState, summaryState, reportStepIdx, phasePos, injector);
 }
 
 template<typename Scalar, typename IndexTraits>
@@ -404,7 +449,7 @@ updateGroupTargetReduction(const Group& group,
                         = groupControlledWells(schedule, wellState, group_state, reportStepIdx, subGroupName, "", !isInjector, phase);
                 if (individual_control || num_group_controlled_wells == 0) {
                     groupTargetReduction[phase_pos]
-                        += subGroupEfficiency * sumWellSurfaceRates(subGroup, schedule, wellState, reportStepIdx, phase_pos, isInjector);
+                        += subGroupEfficiency * sumWellSurfaceRates(subGroup, schedule, wellState, reportStepIdx, phase_pos, isInjector, summaryState);
                 } else {
                     // Accumulate from this subgroup only if no group guide rate is set for it.
                     if (!guide_rate.has(subGroupName, phase)) {
@@ -421,7 +466,7 @@ updateGroupTargetReduction(const Group& group,
             if (individual_control || num_group_controlled_wells == 0) {
                 for (int phase = 0; phase < np; phase++) {
                     groupTargetReduction[phase]
-                        += subGroupEfficiency * sumWellSurfaceRates(subGroup, schedule, wellState, reportStepIdx, phase, isInjector);
+                        += subGroupEfficiency * sumWellSurfaceRates(subGroup, schedule, wellState, reportStepIdx, phase, isInjector, summaryState);
                 }
             } else {
                 // The subgroup may participate in group control.
@@ -431,18 +476,6 @@ updateGroupTargetReduction(const Group& group,
                         groupTargetReduction[phase] += subGroupEfficiency * subGroupTargetReduction[phase];
                     }
                 }
-            }
-        }
-    }
-
-    // only sum satellite production once
-    // With the current treatment, satellite rates here must be added to target reduction excactly the same 
-    // way as in sumWellPhaseRates (see comment there)
-    if (wellState.isRank0()) {
-        for (int phase = 0; phase < np; phase++) {
-            const auto rateComp = selectRateComponent(wellState.phaseUsageInfo(), phase);
-            if (rateComp.has_value()) {
-                groupTargetReduction[phase] += satelliteProduction(schedule[reportStepIdx], group.groups(), *rateComp);
             }
         }
     }
@@ -573,12 +606,13 @@ updateVREPForGroups(const Group& group,
                     const Schedule& schedule,
                     const int reportStepIdx,
                     const WellState<Scalar, IndexTraits>& wellState,
-                    GroupState<Scalar>& group_state)
+                    GroupState<Scalar>& group_state,
+                    const SummaryState& summaryState)
 {
     OPM_TIMEFUNCTION();
     for (const std::string& groupName : group.groups()) {
         const Group& groupTmp = schedule.getGroup(groupName, reportStepIdx);
-        updateVREPForGroups(groupTmp, schedule, reportStepIdx, wellState, group_state);
+        updateVREPForGroups(groupTmp, schedule, reportStepIdx, wellState, group_state, summaryState);
     }
     const int np = wellState.numPhases();
     Scalar resv = 0.0;
@@ -587,6 +621,7 @@ updateVREPForGroups(const Group& group,
                                   group,
                                   schedule,
                                   wellState,
+                                  summaryState,
                                   reportStepIdx,
                                   phase,
                                   /*isInjector*/ false);
@@ -600,12 +635,13 @@ updateReservoirRatesInjectionGroups(const Group& group,
                                     const Schedule& schedule,
                                     const int reportStepIdx,
                                     const WellState<Scalar, IndexTraits>& wellState,
-                                    GroupState<Scalar>& group_state)
+                                    GroupState<Scalar>& group_state,
+                                    const SummaryState& summaryState)
 {
     OPM_TIMEFUNCTION();
     for (const std::string& groupName : group.groups()) {
         const Group& groupTmp = schedule.getGroup(groupName, reportStepIdx);
-        updateReservoirRatesInjectionGroups(groupTmp, schedule, reportStepIdx, wellState, group_state);
+        updateReservoirRatesInjectionGroups(groupTmp, schedule, reportStepIdx, wellState, group_state, summaryState);
     }
     const int np = wellState.numPhases();
     std::vector<Scalar> resv(np, 0.0);
@@ -614,6 +650,7 @@ updateReservoirRatesInjectionGroups(const Group& group,
                                         group,
                                         schedule,
                                         wellState,
+                                        summaryState,
                                         reportStepIdx,
                                         phase,
                                         /*isInjector*/ true);
@@ -627,12 +664,13 @@ updateSurfaceRatesInjectionGroups(const Group& group,
                                   const Schedule& schedule,
                                   const int reportStepIdx,
                                   const WellState<Scalar, IndexTraits>& wellState,
-                                  GroupState<Scalar>& group_state)
+                                  GroupState<Scalar>& group_state,
+                                  const SummaryState& summaryState)
 {
     OPM_TIMEFUNCTION();
     for (const std::string& groupName : group.groups()) {
         const Group& groupTmp = schedule.getGroup(groupName, reportStepIdx);
-        updateSurfaceRatesInjectionGroups(groupTmp, schedule, reportStepIdx, wellState, group_state);
+        updateSurfaceRatesInjectionGroups(groupTmp, schedule, reportStepIdx, wellState, group_state, summaryState);
     }
     const int np = wellState.numPhases();
     std::vector<Scalar> rates(np, 0.0);
@@ -641,6 +679,7 @@ updateSurfaceRatesInjectionGroups(const Group& group,
                                         group,
                                         schedule,
                                         wellState,
+                                        summaryState,
                                         reportStepIdx,
                                         phase,
                                         /*isInjector*/ true);
@@ -687,17 +726,18 @@ updateGroupProductionRates(const Group& group,
                            const Schedule& schedule,
                            const int reportStepIdx,
                            const WellState<Scalar, IndexTraits>& wellState,
-                           GroupState<Scalar>& group_state)
+                           GroupState<Scalar>& group_state,
+                           const SummaryState& summaryState)
 {
     OPM_TIMEFUNCTION();
     for (const std::string& groupName : group.groups()) {
         const Group& groupTmp = schedule.getGroup(groupName, reportStepIdx);
-        updateGroupProductionRates(groupTmp, schedule, reportStepIdx, wellState, group_state);
+        updateGroupProductionRates(groupTmp, schedule, reportStepIdx, wellState, group_state, summaryState);
     }
     const int np = wellState.numPhases();
     std::vector<Scalar> rates(np, 0.0);
     for (int phase = 0; phase < np; ++phase) {
-        rates[phase] = sumWellPhaseRates(false, group, schedule, wellState, reportStepIdx, phase, /*isInjector*/ false);
+        rates[phase] = sumWellPhaseRates(false, group, schedule, wellState, summaryState, reportStepIdx, phase, /*isInjector*/ false);
     }
     group_state.update_production_rates(group.name(), rates);
 }
@@ -707,7 +747,8 @@ void WellGroupHelpers<Scalar, IndexTraits>::
 updateNetworkLeafNodeProductionRates(const Schedule& schedule,
                                      const int reportStepIdx,
                                      const WellState<Scalar, IndexTraits>& wellState,
-                                     GroupState<Scalar>& group_state)
+                                     GroupState<Scalar>& group_state,
+                                     const SummaryState& summaryState)
 {
     const auto& network = schedule[reportStepIdx].network();
     if (network.active()) {
@@ -718,7 +759,7 @@ updateNetworkLeafNodeProductionRates(const Schedule& schedule,
                 const auto& group = schedule[reportStepIdx].groups.get(group_name);
                 if (group.numWells() > 0) {
                     for (int phase = 0; phase < np; ++phase) {
-                        network_rates[phase] = sumWellPhaseRates(false, group, schedule, wellState, reportStepIdx, phase, /*isInjector*/ false, /*network*/ true);
+                        network_rates[phase] = sumWellPhaseRates(false, group, schedule, wellState, summaryState, reportStepIdx, phase, /*isInjector*/ false, /*network*/ true);
                     }
                 }
             }
@@ -746,7 +787,7 @@ updateREINForGroups(const Group& group,
 
     std::vector<Scalar> rein(np, 0.0);
     for (int phase = 0; phase < np; ++phase) {
-        rein[phase] = sumWellPhaseRates(false, group, schedule, wellState, reportStepIdx, phase, /*isInjector*/ false);
+        rein[phase] = sumWellPhaseRates(false, group, schedule, wellState, st, reportStepIdx, phase, /*isInjector*/ false);
     }
 
     // add import rate and subtract consumption rate for group for gas
@@ -1227,11 +1268,12 @@ updateGroupControlledWells(const Schedule& schedule,
             std::vector<Scalar> rates(num_phases, 0.0);
             for (int phase_pos = 0; phase_pos < num_phases; ++phase_pos) {
                  rates[phase_pos] = WellGroupHelpers<Scalar, IndexTraits>::sumWellSurfaceRates(group,
-                                                                                  schedule,
-                                                                                  well_state,
-                                                                                  report_step,
-                                                                                  phase_pos,
-                                                                                  false);
+                                                                                               schedule,
+                                                                                               well_state,
+                                                                                               report_step,
+                                                                                               phase_pos,
+                                                                                               false,
+                                                                                               summary_state);
             }
 
             // Get the ancestor of the auto choke group that has group control (cmode != FLD, NONE)

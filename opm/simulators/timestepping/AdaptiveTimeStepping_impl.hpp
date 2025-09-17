@@ -96,7 +96,11 @@ AdaptiveTimeStepping(const UnitSystem& unit_system,
 }
 
 //! \brief contructor
+//! \param max_next_tstep Maximum next time step allowed
 //! \param tuning Pointer to ecl TUNING keyword
+//! \param unit_system Unit system to use
+//! \param report Simulator report to use
+//! \param terminal_output True to print to terminal
 template<class TypeTag>
 AdaptiveTimeStepping<TypeTag>::
 AdaptiveTimeStepping(double max_next_tstep,
@@ -185,7 +189,10 @@ registerParameters()
 
 /** \brief  step method that acts like the solver::step method
             in a sub cycle of time steps
-    \param tuningUpdater Function used to update TUNING parameters before each
+    \param simulator_timer Simulator timer
+    \param solver Solver to use
+    \param is_event True if this is an event
+    \param tuning_updater Function used to update TUNING parameters before each
                          time step. ACTIONX might change tuning.
 */
 template<class TypeTag>
@@ -633,6 +640,8 @@ runStepReservoirCouplingMaster_()
     double step_end_time = current_time + original_time_step;
     auto current_step_length = original_time_step;
     SimulatorReport report;
+    // The master needs to know which slaves have activated before it can start the substep loop
+    reservoirCouplingMaster_().maybeReceiveActivationHandshakeFromSlaves(current_time);
     while (true) {
         reservoirCouplingMaster_().receiveNextReportDateFromSlaves();
         if (iteration == 0) {

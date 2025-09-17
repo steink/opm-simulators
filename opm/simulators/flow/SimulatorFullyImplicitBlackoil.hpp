@@ -117,26 +117,7 @@ public:
     using WellModel = BlackoilWellModel<TypeTag>;
 
     /// Initialise from parameters and objects to observe.
-    /// \param[in] param       parameters, this class accepts the following:
-    ///     parameter (default)            effect
-    ///     -----------------------------------------------------------
-    ///     output (true)                  write output to files?
-    ///     output_dir ("output")          output directoty
-    ///     output_interval (1)            output every nth step
-    ///     nl_pressure_residual_tolerance (0.0) pressure solver residual tolerance (in Pascal)
-    ///     nl_pressure_change_tolerance (1.0)   pressure solver change tolerance (in Pascal)
-    ///     nl_pressure_maxiter (10)       max nonlinear iterations in pressure
-    ///     nl_maxiter (30)                max nonlinear iterations in transport
-    ///     nl_tolerance (1e-9)            transport solver absolute residual tolerance
-    ///     num_transport_substeps (1)     number of transport steps per pressure step
-    ///     use_segregation_split (false)  solve for gravity segregation (if false,
-    ///                                    segregation is ignored).
-    ///
-    /// \param[in] props         fluid and rock properties
-    /// \param[in] linsolver     linear solver
-    /// \param[in] eclipse_state the object which represents an internalized ECL deck
-    /// \param[in] output_writer
-    /// \param[in] threshold_pressures_by_face   if nonempty, threshold pressures that inhibit flow
+    /// \param simulator Reference to main simulator
     explicit SimulatorFullyImplicitBlackoil(Simulator& simulator)
         : simulator_(simulator)
         , serializer_(*this,
@@ -312,11 +293,67 @@ public:
         modelParam_.tolerance_cnv_relaxed_ = tuning.XXXCNV;
         modelParam_.tolerance_mb_ = tuning.TRGMBE;
         modelParam_.tolerance_mb_relaxed_ = tuning.XXXMBE;
+        modelParam_.newton_max_iter_ = tuning.NEWTMX;
+        modelParam_.newton_min_iter_ = tuning.NEWTMN;
         if (terminalOutput_) {
-            const auto msg = fmt::format("Tuning SimulatorFullyImplicitBlackoil tolerances: "
-                                         "MB: {:.2e}, CNV: {:.2e}",
-                                         tuning.TRGMBE, tuning.TRGCNV);
+            const auto msg = fmt::format("Tuning values: "
+                                         "MB: {:.2e}, CNV: {:.2e}, NEWTMN: {}, NEWTMX: {}",
+                                         tuning.TRGMBE, tuning.TRGCNV, tuning.NEWTMN, tuning.NEWTMX);
             OpmLog::debug(msg);
+            if (tuning.TRGTTE_has_value) {
+                OpmLog::warning("Tuning item 2-1 (TRGTTE) is not supported.");
+            }
+            if (tuning.TRGLCV_has_value) {
+                OpmLog::warning("Tuning item 2-4 (TRGLCV) is not supported.");
+            }
+            if (tuning.XXXTTE_has_value) {
+                OpmLog::warning("Tuning item 2-5 (XXXTTE) is not supported.");
+            }
+            if (tuning.XXXLCV_has_value) {
+                OpmLog::warning("Tuning item 2-8 (XXXLCV) is not supported.");
+            }
+            if (tuning.XXXWFL_has_value) {
+                OpmLog::warning("Tuning item 2-9 (XXXWFL) is not supported.");
+            }
+            if (tuning.TRGFIP_has_value) {
+                OpmLog::warning("Tuning item 2-10 (TRGFIP) is not supported.");
+            }
+            if (tuning.TRGSFT_has_value) {
+                OpmLog::warning("Tuning item 2-11 (TRGSFT) is not supported.");
+            }
+            if (tuning.THIONX_has_value) {
+                OpmLog::warning("Tuning item 2-12 (THIONX) is not supported.");
+            }
+            if (tuning.TRWGHT_has_value) {
+                OpmLog::warning("Tuning item 2-13 (TRWGHT) is not supported.");
+            }
+            if (tuning.LITMAX_has_value) {
+                OpmLog::warning("Tuning item 3-3 (LITMAX) is not supported.");
+            }
+            if (tuning.LITMIN_has_value) {
+                OpmLog::warning("Tuning item 3-4 (LITMIN) is not supported.");
+            }
+            if (tuning.MXWSIT_has_value) {
+                OpmLog::warning("Tuning item 3-5 (MXWSIT) is not supported.");
+            }
+            if (tuning.MXWPIT_has_value) {
+                OpmLog::warning("Tuning item 3-6 (MXWPIT) is not supported.");
+            }
+            if (tuning.DDPLIM_has_value) {
+                OpmLog::warning("Tuning item 3-7 (DDPLIM) is not supported.");
+            }
+            if (tuning.DDSLIM_has_value) {
+                OpmLog::warning("Tuning item 3-8 (DDSLIM) is not supported.");
+            }
+            if (tuning.TRGDPR_has_value) {
+                OpmLog::warning("Tuning item 3-9 (TRGDPR) is not supported.");
+            }
+            if (tuning.XXXDPR_has_value) {
+                OpmLog::warning("Tuning item 3-10 (XXXDPR) is not supported.");
+            }
+            if (tuning.MNWRFP_has_value) {
+                OpmLog::warning("Tuning item 3-11 (MNWRFP) is not supported.");
+            }
         }
     }
 
@@ -451,6 +488,7 @@ public:
 #ifdef RESERVOIR_COUPLING_ENABLED
             if (this->reservoirCouplingMaster_) {
                 this->reservoirCouplingMaster_->maybeSpawnSlaveProcesses(timer.currentStepNum());
+                this->reservoirCouplingMaster_->maybeActivate(timer.currentStepNum());
             }
             else if (this->reservoirCouplingSlave_) {
                 this->reservoirCouplingSlave_->maybeActivate(timer.currentStepNum());

@@ -382,10 +382,6 @@ init(const std::vector<Scalar>& cellPressures,
     // order may change so the mapping is based on the well name
     if ((prevState != nullptr) && (prevState->size() > 0)) {
         for (int w = 0; w < nw; ++w) {
-            if (wells_ecl[w].getStatus() == Well::Status::SHUT) {
-                continue;
-            }
-
             const auto old_index = prevState->index(wells_ecl[w].name());
             if (! old_index.has_value()) {
                 continue;
@@ -400,6 +396,8 @@ init(const std::vector<Scalar>& cellPressures,
                 // Well was shut in previous state, do not use its values.
                 continue;
             }
+
+            new_well.status = prev_well.status;
 
             if (new_well.producer != prev_well.producer) {
                 // Well changed to/from injector from/to producer, do not
@@ -1021,16 +1019,19 @@ void WellState<Scalar, IndexTraits>::communicateGroupRates(const Parallel::Commu
 }
 
 template<typename Scalar, typename IndexTraits>
-void WellState<Scalar, IndexTraits>::updateGlobalIsGrup(const Parallel::Communication& comm)
+void WellState<Scalar, IndexTraits>::updateGlobalIsGrup(const Parallel::Communication& comm,  const std::vector<WellStatus>& well_status)
 {
     this->global_well_info.value().clear();
     for (std::size_t well_index = 0; well_index < this->size(); well_index++) {
         const auto& ws = this->well(well_index);
+        // We cannot use the well status directly from the well state here as well, may
+        // be temporarily stopped due to convergence or operability issues
+        const auto& this_well_status = well_status[well_index];
         this->global_well_info.value().update_efficiency_scaling_factor(well_index, ws.efficiency_scaling_factor);
         if (ws.producer)
-            this->global_well_info.value().update_producer(well_index, ws.status, ws.production_cmode);
+            this->global_well_info.value().update_producer(well_index, this_well_status, ws.production_cmode);
         else
-            this->global_well_info.value().update_injector(well_index, ws.status, ws.injection_cmode);
+            this->global_well_info.value().update_injector(well_index, this_well_status, ws.injection_cmode);
     }
     this->global_well_info.value().communicate(comm);
 }

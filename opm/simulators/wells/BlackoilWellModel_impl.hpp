@@ -37,6 +37,7 @@
 #include <opm/input/eclipse/Schedule/Well/PAvgDynamicSourceData.hpp>
 #include <opm/input/eclipse/Schedule/Well/WellMatcher.hpp>
 #include <opm/input/eclipse/Schedule/Well/WellTestConfig.hpp>
+#include <opm/input/eclipse/Schedule/Well/WellEconProductionLimits.hpp>
 
 #include <opm/input/eclipse/Units/UnitSystem.hpp>
 
@@ -365,10 +366,7 @@ namespace Opm {
         this->resetWGState();
 
         const int reportStepIdx = simulator_.episodeIndex();
-        this->updateAndCommunicateGroupData(reportStepIdx,
-                                            simulator_.model().newtonMethod().numIterations(),
-                                            param_.nupcol_group_rate_tolerance_, /*update_wellgrouptarget*/ false,
-                                            local_deferredLogger);
+
 
         this->wellState().updateWellsDefaultALQ(this->schedule(), reportStepIdx, this->summaryState());
         this->wellState().gliftTimeStepInit();
@@ -381,6 +379,13 @@ namespace Opm {
 
             // create the well container
             createWellContainer(reportStepIdx);
+
+            // we need to update the group data after the well is created
+            // to make sure we get the correct mapping.
+            this->updateAndCommunicateGroupData(reportStepIdx,
+                                    simulator_.model().newtonMethod().numIterations(),
+                                    param_.nupcol_group_rate_tolerance_, /*update_wellgrouptarget*/ false,
+                                    local_deferredLogger);
 
             // Wells are active if they are active wells on at least one process.
             const Grid& grid = simulator_.vanguard().grid();
@@ -815,11 +820,19 @@ namespace Opm {
                               }
 
                               constexpr auto events_mask = ScheduleEvents::WELL_STATUS_CHANGE |
-                                                           ScheduleEvents::REQUEST_OPEN_WELL;
-                              const bool well_status_change =
+                                                           ScheduleEvents::REQUEST_OPEN_WELL |
+                                                           ScheduleEvents::REQUEST_SHUT_WELL;
+                              const bool well_event =
                                   this->report_step_starts_ &&
                                   wg_events.hasEvent(well_ecl.name(), events_mask);
-                              if (well_status_change) {
+                              // WCYCLE is suspendended by explicit SHUT events by the user.
+                              // and restarted after explicit OPEN events.
+                              // Note: OPEN or SHUT event does not necessary mean the well
+                              // actually opened or shut at this point as the simulator could
+                              // have done this by operabilty checks and well testing. This
+                              // may need further testing and imply code changes to cope with
+                              // these corner cases.
+                              if (well_event) {
                                   if (well_ecl.getStatus() == WellStatus::OPEN) {
                                       this->well_open_times_.insert_or_assign(well_ecl.name(),
                                                                               this->simulator_.time());
@@ -850,18 +863,15 @@ namespace Opm {
                 const auto well_status = this->schedule()
                     .getWell(well_name, report_step).getStatus();
 
-                if ((well_ecl.getStatus() == Well::Status::SHUT) ||
-                    (well_status          == Well::Status::SHUT))
-                {
-                    // Due to ACTIONX the well might have been closed behind our back.
-                    if (well_ecl.getStatus() != Well::Status::SHUT) {
-                        this->closed_this_step_.insert(well_name);
-                        this->wellState().shutWell(w);
-                    }
+                const bool shut_event = this->wellState().well(w).events.hasEvent(ScheduleEvents::REQUEST_SHUT_WELL);
+                const bool open_event = this->wellState().well(w).events.hasEvent(ScheduleEvents::REQUEST_OPEN_WELL);
+                const auto& ws = this->wellState().well(well_name);
 
-                    this->well_open_times_.erase(well_name);
-                    this->well_close_times_.erase(well_name);
-                    continue;
+                if (shut_event && ws.status != Well::Status::SHUT) {
+                    this->closed_this_step_.insert(well_name);
+                    this->wellState().shutWell(w);
+                } else if (open_event && ws.status != Well::Status::OPEN) {
+                    this->wellState().openWell(w);
                 }
 
                 // A new WCON keywords can re-open a well that was closed/shut due to Physical limit
@@ -888,7 +898,6 @@ namespace Opm {
 
                 // TODO: should we do this for all kinds of closing reasons?
                 // something like wellTestState().hasWell(well_name)?
-                bool wellIsStopped = false;
                 if (this->wellTestState().well_is_closed(well_name))
                 {
                     if (well_ecl.getAutomaticShutIn()) {
@@ -908,7 +917,6 @@ namespace Opm {
                         }
                         // stopped wells are added to the container but marked as stopped
                         this->wellState().stopWell(w);
-                        wellIsStopped = true;
                     }
                 }
 
@@ -927,17 +935,15 @@ namespace Opm {
                     }
                 }
 
-                if (well_status == Well::Status::STOP) {
-                    this->wellState().stopWell(w);
-                    this->well_close_times_.erase(well_name);
-                    this->well_open_times_.erase(well_name);
-                    wellIsStopped = true;
-                }
-
                 if (!wcycle.empty()) {
                     const auto it = cycle_states.find(well_name);
                     if (it != cycle_states.end()) {
-                        if (!it->second) {
+                        if (!it->second || well_status == Well::Status::SHUT) {
+                            // If well is shut in schedule we keep it shut
+                            if (well_status == Well::Status::SHUT) {
+                                this->well_open_times_.erase(well_name);
+                                this->well_close_times_.erase(well_name);
+                            }
                             this->wellState().shutWell(w);
                             continue;
                         } else {
@@ -946,9 +952,14 @@ namespace Opm {
                     }
                 }
 
+                // We dont add SHUT wells to the container
+                if (ws.status == Well::Status::SHUT) {
+                    continue;
+                }
+
                 well_container_.emplace_back(this->createWellPointer(w, report_step));
 
-                if (wellIsStopped) {
+                if (ws.status == Well::Status::STOP) {
                     well_container_.back()->stopWell();
                     this->well_close_times_.erase(well_name);
                     this->well_open_times_.erase(well_name);
@@ -1051,7 +1062,7 @@ namespace Opm {
                                           this->param_,
                                           *this->rateConverter_,
                                           global_pvtreg,
-                                          this->numComponents(),
+                                          this->numConservationQuantities(),
                                           this->numPhases(),
                                           wellID,
                                           perf_data);
@@ -1972,7 +1983,7 @@ namespace Opm {
     template<typename TypeTag>
     void
     BlackoilWellModel<TypeTag>::
-    updateWellTestState(const double& simulationTime, WellTestState& wellTestState) const
+    updateWellTestState(const double simulationTime, WellTestState& wellTestState)
     {
         OPM_TIMEFUNCTION();
         DeferredLogger local_deferredLogger;
@@ -1995,6 +2006,29 @@ namespace Opm {
 
             if (!wasClosed && wellTestState.well_is_closed(wname)) {
                 this->closed_this_step_.insert(wname);
+
+                // maybe open a new well
+                const WellEconProductionLimits& econ_production_limits = well->wellEcl().getEconLimits();
+                if (econ_production_limits.validFollowonWell()) {
+                    const auto episode_idx = simulator_.episodeIndex();
+                    const auto follow_on_well = econ_production_limits.followonWell();
+                    if (!this->schedule().hasWell(follow_on_well, episode_idx)) {
+                        const auto msg = fmt::format("Well {} was closed. But the given follow on well {} does not exist." 
+                                                     "The simulator continues without opening a follow on well.",
+                                                     wname, follow_on_well);
+                        local_deferredLogger.warning(msg);
+                    }
+                    auto& ws = this->wellState().well(follow_on_well);
+                    const bool success = ws.updateStatus(WellStatus::OPEN);
+                    if (success) {
+                        const auto msg = fmt::format("Well {} was closed. The follow on well {} opens instead.", wname, follow_on_well);
+                        local_deferredLogger.info(msg);
+                    } else {
+                        const auto msg = fmt::format("Well {} was closed. The follow on well {} is already open.", wname, follow_on_well);
+                        local_deferredLogger.warning(msg);
+                    }
+                }
+
             }
         }
 
@@ -2170,7 +2204,7 @@ namespace Opm {
     BlackoilWellModel<TypeTag>::
     updateAverageFormationFactor()
     {
-        std::vector< Scalar > B_avg(numComponents(), Scalar() );
+        std::vector< Scalar > B_avg(numConservationQuantities(), Scalar() );
         const auto& grid = simulator_.vanguard().grid();
         const auto& gridView = grid.leafGridView();
         ElementContext elemCtx(simulator_);
@@ -2189,7 +2223,7 @@ namespace Opm {
                     continue;
                 }
 
-                const unsigned compIdx = Indices::canonicalToActiveComponentIndex(FluidSystem::solventComponentIndex(phaseIdx));
+                const unsigned compIdx = FluidSystem::canonicalToActiveCompIdx(FluidSystem::solventComponentIndex(phaseIdx));
                 auto& B  = B_avg[ compIdx ];
 
                 B += 1 / fs.invB(phaseIdx).value();
@@ -2241,19 +2275,18 @@ namespace Opm {
     // The number of components in the model.
     template<typename TypeTag>
     int
-    BlackoilWellModel<TypeTag>::numComponents() const
+    BlackoilWellModel<TypeTag>::numConservationQuantities() const
     {
-        // The numComponents here does not reflect the actual number of the components in the system.
-        // It more or less reflects the number of mass conservation equations for the well equations.
-        // For example, in the current formulation, we do not have the polymer conservation equation
-        // in the well equations. As a result, for an oil-water-polymer system, this function will return 2.
-        // In some way, it makes this function appear to be confusing from its name, and we need
-        // to revisit/revise this function again when extending the variants of system that flow can simulate.
-        int numComp = this->numPhases() < 3 ? this->numPhases() : FluidSystem::numComponents;
-        if constexpr (has_solvent_) {
-            numComp++;
-        }
-        return numComp;
+        // The numPhases() functions returns 1-3, depending on which
+        // of the (oil, water, gas) phases are active. For each of those phases,
+        // if the phase is active the corresponding component is present and
+        // conserved.
+        // Apart from (oil, water, gas), in the current well model only solvent
+        // is explicitly modelled as a conserved quantity (polymer, energy, salt
+        // etc. are not), unlike the reservoir part where all such quantities are
+        // conserved. This function must therefore be updated when/if we add
+        // more conserved quantities in the well model.
+        return this->numPhases() + has_solvent_;
     }
 
     template<typename TypeTag>
