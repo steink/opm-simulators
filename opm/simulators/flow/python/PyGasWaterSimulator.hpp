@@ -17,32 +17,31 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef OPM_PY_BLACKOIL_SIMULATOR_HEADER_INCLUDED
-#define OPM_PY_BLACKOIL_SIMULATOR_HEADER_INCLUDED
+#ifndef OPM_PY_GAS_WATER_SIMULATOR_HEADER_INCLUDED
+#define OPM_PY_GAS_WATER_SIMULATOR_HEADER_INCLUDED
 
 #include <opm/simulators/flow/python/PyBaseSimulator.hpp>
-#include <opm/simulators/flow/TTagFlowProblemTPFA.hpp>
-
+#include <opm/simulators/flow/TTagFlowProblemGasWater.hpp>
 #include <memory>
 
 namespace Opm::Pybind {
 
-class PyBlackOilSimulator : public PyBaseSimulator<Opm::Properties::TTag::FlowProblemTPFA>
+class PyGasWaterSimulator : public PyBaseSimulator<Properties::TTag::FlowGasWaterProblem>
 {
 private:
-    using BaseType = PyBaseSimulator<Opm::Properties::TTag::FlowProblemTPFA>;
-    using TypeTag = Opm::Properties::TTag::FlowProblemTPFA;
+    using BaseType = PyBaseSimulator<Properties::TTag::FlowGasWaterProblem>;
+    using TypeTag = Properties::TTag::FlowGasWaterProblem;
 
 public:
-    PyBlackOilSimulator(const std::string& deck_filename,
+    PyGasWaterSimulator(const std::string& deck_filename,
                         const std::vector<std::string>& args)
         : BaseType(deck_filename, args)
     {}
 
-    PyBlackOilSimulator(std::shared_ptr<Opm::Deck> deck,
-                        std::shared_ptr<Opm::EclipseState> state,
-                        std::shared_ptr<Opm::Schedule> schedule,
-                        std::shared_ptr<Opm::SummaryConfig> summary_config,
+    PyGasWaterSimulator(std::shared_ptr<Deck> deck,
+                        std::shared_ptr<EclipseState> state,
+                        std::shared_ptr<Schedule> schedule,
+                        std::shared_ptr<SummaryConfig> summary_config,
                         const std::vector<std::string>& args)
         : BaseType(deck, state, schedule, summary_config, args)
     {}
@@ -50,4 +49,4 @@ public:
 
 } // namespace Opm::Pybind
 
-#endif // OPM_PY_BLACKOIL_SIMULATOR_HEADER_INCLUDED
+#endif // OPM_PY_GASWATER_SIMULATOR_HEADER_INCLUDED

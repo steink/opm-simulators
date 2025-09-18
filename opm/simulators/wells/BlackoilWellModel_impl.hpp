@@ -863,8 +863,10 @@ namespace Opm {
                 const auto well_status = this->schedule()
                     .getWell(well_name, report_step).getStatus();
 
-                const bool shut_event = this->wellState().well(w).events.hasEvent(ScheduleEvents::REQUEST_SHUT_WELL);
-                const bool open_event = this->wellState().well(w).events.hasEvent(ScheduleEvents::REQUEST_OPEN_WELL);
+                const bool shut_event = this->wellState().well(w).events.hasEvent(ScheduleEvents::WELL_STATUS_CHANGE)
+                                    && well_status == Well::Status::SHUT;
+                const bool open_event = this->wellState().well(w).events.hasEvent(ScheduleEvents::WELL_STATUS_CHANGE)
+                                    && well_status == Well::Status::OPEN;
                 const auto& ws = this->wellState().well(well_name);
 
                 if (shut_event && ws.status != Well::Status::SHUT) {
@@ -1209,16 +1211,22 @@ namespace Opm {
         // after certain number of the iterations, we terminate
         const std::size_t max_iteration = param_.network_max_outer_iterations_;
         std::size_t network_update_iteration = 0;
+        network_needs_more_balancing_force_another_newton_iteration_ = false;
         while (do_network_update) {
             if (network_update_iteration >= max_iteration ) {
                 // only output to terminal if we at the last newton iterations where we try to balance the network.
                 const int episodeIdx = simulator_.episodeIndex();
                 const int iterationIdx = simulator_.model().newtonMethod().numIterations();
                 if (this->shouldBalanceNetwork(episodeIdx, iterationIdx + 1)) {
-                    const std::string msg = fmt::format("Maximum of {:d} network iterations has been used and we stop the update, \n"
-                        "and try again after the next Newton iteration (imbalance = {:.2e} bar, ctrl_change = {})",
-                        max_iteration, network_imbalance*1.0e-5, well_group_control_changed);
-                    local_deferredLogger.debug(msg);
+                    if (this->terminal_output_) {
+                        const std::string msg = fmt::format("Maximum of {:d} network iterations has been used and we stop the update, \n"
+                            "and try again after the next Newton iteration (imbalance = {:.2e} bar, ctrl_change = {})",
+                            max_iteration, network_imbalance*1.0e-5, well_group_control_changed);
+                        local_deferredLogger.debug(msg);
+                    }
+                    // To avoid stopping the newton iterations too early, before the network is converged,
+                    // we need to report it
+                    network_needs_more_balancing_force_another_newton_iteration_ = true;
                 } else {
                     if (this->terminal_output_) {
                         const std::string msg = fmt::format("Maximum of {:d} network iterations has been used and we stop the update. \n"
@@ -1698,7 +1706,7 @@ namespace Opm {
     template<typename TypeTag>
     ConvergenceReport
     BlackoilWellModel<TypeTag>::
-    getWellConvergence(const std::vector<Scalar>& B_avg, bool checkWellGroupControls) const
+    getWellConvergence(const std::vector<Scalar>& B_avg, bool checkWellGroupControlsAndNetwork) const
     {
 
         DeferredLogger local_deferredLogger;
@@ -1722,9 +1730,10 @@ namespace Opm {
         DeferredLogger global_deferredLogger = gatherDeferredLogger(local_deferredLogger, comm);
         ConvergenceReport report = gatherConvergenceReport(local_report, comm);
 
-        // the well_group_control_changed info is already communicated
-        if (checkWellGroupControls) {
+        if (checkWellGroupControlsAndNetwork) {
+            // the well_group_control_changed info is already communicated
             report.setWellGroupTargetsViolated(this->lastReport().well_group_control_changed);
+            report.setNetworkNotYetBalancedForceAnotherNewtonIteration(network_needs_more_balancing_force_another_newton_iteration_);
         }
 
         if (this->terminal_output_) {
