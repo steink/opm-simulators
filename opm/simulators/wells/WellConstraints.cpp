@@ -323,11 +323,11 @@ getMostStrictProductionControl(const SingleWellState<Scalar, IndexTraits>& ws,
                            const RateConvFunc& calcReservoirVoidageRates,
                            const Well::ProductionControls& controls,
                            DeferredLogger& deferred_logger, 
-                           std::optional<Scalar&> bhp_at_thp_limit) const
+                           std::optional<Scalar> bhp_at_thp_limit) const
 {
     // Assumes non-zero well-rates and updated ipr
     const auto& pu = well_.phaseUsage();
-    const auto mostStrictControl = Well::ProducerCMode::BHP;
+    auto mostStrictControl = Well::ProducerCMode::BHP;
     Scalar mostStrictBHP = ws.bhp;
     if (bhp_at_thp_limit.has_value() && *bhp_at_thp_limit > ws.bhp) {
         mostStrictControl = Well::ProducerCMode::THP;
@@ -339,7 +339,7 @@ getMostStrictProductionControl(const SingleWellState<Scalar, IndexTraits>& ws,
     const Scalar tot_rate_at_bhp = -tot_ipr_b*mostStrictBHP + tot_ipr_a;
     Scalar mostStrictScale = tot_rate_at_bhp/std::accumulate(rates.begin(), rates.end(), 0.0);
 
-    const std::vector<Well::ProducerCMode> rateModes = {Well::ProducerCMode::ORAT,
+    const std::array<Well::ProducerCMode, 5> rateModes = {Well::ProducerCMode::ORAT,
                                                         Well::ProducerCMode::WRAT,
                                                         Well::ProducerCMode::GRAT,
                                                         Well::ProducerCMode::LRAT,
@@ -347,20 +347,22 @@ getMostStrictProductionControl(const SingleWellState<Scalar, IndexTraits>& ws,
     for (const auto& mode : rateModes) {
         if (!controls.hasControl(mode))
             continue;
-        const Scalar scale = getControlModeScale(ws, controls, mode);
+        const Scalar scale = getProductionControlModeScale(ws, mode, controls);
         if (scale < mostStrictScale) {
             mostStrictScale = scale;
             mostStrictControl = mode;
         }
     }
-
+    
     if (ws.group_target.has_value()) {
-        const Scalar scale = getControlModeScale(ws, controls, ws.production_cmode_group_translated.value(), ws.group_target.value());
+        //const Scalar scale = getProductionControlModeScale(ws, ws.production_cmode_group_translated.value(), controls, ws.group_target.value());
+        const Scalar scale = 1.0;
         if (scale < mostStrictScale) {
             mostStrictScale = scale;
             mostStrictControl = Well::ProducerCMode::GRUP;
         }
     }
+    return std::make_pair(mostStrictControl, mostStrictScale);
 }
 
 template<typename Scalar, typename IndexTraits>
@@ -368,12 +370,12 @@ Scalar
 WellConstraints<Scalar, IndexTraits>::
 getProductionControlModeScale(const SingleWellState<Scalar, IndexTraits>& ws,
                     const Well::ProducerCMode& cmode,
-                    const RateConvFunc& calcReservoirVoidageRates,
                     const Well::ProductionControls& control, 
                     const std::optional<Scalar> target) const
 {
-    Scalar current_rate;
-    Scalar target_rate;
+    const auto& pu = well_.phaseUsage();
+    Scalar current_rate = 0.0;
+    Scalar target_rate = 0.0;
     switch (cmode) {
         case Well::ProducerCMode::ORAT:
             current_rate = -ws.surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx)];
@@ -395,17 +397,15 @@ getProductionControlModeScale(const SingleWellState<Scalar, IndexTraits>& ws,
         case Well::ProducerCMode::RESV:
             // deal with non-prediction mode
             for (int p = 0; p < well_.numPhases(); ++p) {
-                cmode_rate += -ws.reservoir_rates[p];
+                current_rate += -ws.reservoir_rates[p];
             }
             target_rate = target.has_value() ? *target : control.resv_rate;
             break;
         default:
-            break;
+            assert(false);
     }
     return current_rate == 0.0 ? std::numeric_limits<Scalar>::max() : target_rate/current_rate;
 }
-
-{
 
 template class WellConstraints<double, BlackOilDefaultFluidSystemIndices>;
 

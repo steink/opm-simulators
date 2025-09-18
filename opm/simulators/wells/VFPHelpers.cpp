@@ -686,7 +686,7 @@ intersectWithIPRCriticalPoints(const VFPProdTable& table,
         if (y1 < y_min) {
             // minimum stable
             rates[1] = flo1;
-            bhps[1] = bhpo_i.value;
+            bhps[1] = bhp_i.value;
             y_min = y1;
         }
         if (y0 < 0 && y1 >= 0){

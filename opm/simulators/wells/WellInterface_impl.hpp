@@ -687,7 +687,29 @@ namespace Opm
         this->updateIPRImplicit(simulator, well_state, deferred_logger);
         auto rates = well_state.well(this->index_of_well_).surface_rates;
         this->adaptRatesForVFP(rates);
-        return WellBhpThpCalculator(*this).estimateStableBhp(well_state, this->well_ecl_, rates, this->getRefDensity(), summary_state);
+        //return WellBhpThpCalculator(*this).estimateStableBhp(well_state, this->well_ecl_, rates, this->getRefDensity(), summary_state);
+        const auto critical_values = WellBhpThpCalculator(*this).estimateCriticalValues(well_state, this->well_ecl_, rates, this->getRefDensity(), summary_state, true);
+        if (!critical_values.has_value()) {
+            // can't operate under thp control
+            return std::nullopt;
+        } else {
+            const auto [bhp_at_thp, rate_min_scale] = critical_values.value();
+            const auto [cmode, cmode_scale] = mostStrictControlMode(..., bhp_at_thp) // wellInterfaceFluidSystem
+            if (cmode_scale < rate_min_scale) {
+                if (cmode == Well::ProducerCMode::GROUP) {
+                    // report group
+                } else {
+                    // report individual
+                }
+                return std::nullopt;
+            }
+            if (cmode == Well::ProducerCMode::THP) {
+                return bhp_at_thp;
+            } else {
+                return // calculate bhp from the most strict limit
+            }
+        }
+
     }
 
     template<typename TypeTag>

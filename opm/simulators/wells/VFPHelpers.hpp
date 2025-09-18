@@ -224,7 +224,7 @@ public:
                                 const Scalar alq,
                                 const Scalar ipr_a,
                                 const Scalar ipr_b,
-                                const std::function<Scalar(const Scalar)>& adjust_bhp)
+                                const std::function<Scalar(const Scalar)>& adjust_bhp);
 };
 
 } // namespace
