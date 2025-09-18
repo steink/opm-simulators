@@ -976,12 +976,13 @@ estimateStableBhp(const WellState<Scalar, IndexTraits>& well_state,
 }
 
 template<typename Scalar, typename IndexTraits>
-std::optional<Scalar> WellBhpThpCalculator<Scalar, IndexTraits>::
+std::optional<std::pair<Scalar, Scalar>> WellBhpThpCalculator<Scalar, IndexTraits>::
 estimateCriticalPoints(const WellState<Scalar, IndexTraits>& well_state,
                        const Well& well,
                        const std::vector<Scalar>& rates,
                        const Scalar rho,
-                       const SummaryState& summaryState) const
+                       const SummaryState& summaryState,
+                       const bool enforceStable) const
 {   
     // Given a *converged* well_state with ipr, estimate
     // 1. (bhp, rate) for minimal flowing rate (unstable)
@@ -1013,17 +1014,21 @@ estimateCriticalPoints(const WellState<Scalar, IndexTraits>& well_state,
     auto bhp_adjusted = [this, &thp, &dp_hydro](const Scalar bhp) {
            return bhp - dp_hydro + getVfpBhpAdjustment(bhp, thp);
        };
-    const auto retval = VFPHelpers<double>::intersectWithIPR(table, thp, wfr, gfr,
-                                                             well_.getALQ(well_state),
-                                                             ipr.first, ipr.second,
-                                                             bhp_adjusted);
+    // returns 3 rates and 3 bhps
+    const auto retval = VFPHelpers<double>::intersectWithIPRCriticalPoints(table, thp, wfr, gfr,
+                                                                           well_.getALQ(well_state),
+                                                                           ipr.first, ipr.second,
+                                                                           bhp_adjusted);
     if (retval.has_value()) {
-        // returned pair is (flo, bhp)
-        return retval.value().second;
+        // returned pair is bhp at thp-limit and minimal scale of (stable) rate
+        const Scalar minimal_rate = enforceStable ? retval.value().first[1] : retval.value().first[0];
+        return std::make_pair(retval.value().second[2], minimal_rate/detail::getFlo(table, aqua, liquid, vapour)); // maximal rate at thp
+        //return retval.value().second;
     } else {
         return std::nullopt;
     }
 }
+
 template<typename Scalar, typename IndexTraits>
 std::pair<Scalar, Scalar> WellBhpThpCalculator<Scalar, IndexTraits>::
 getFloIPR(const WellState<Scalar, IndexTraits>& well_state,
