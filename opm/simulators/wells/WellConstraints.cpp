@@ -335,7 +335,7 @@ mostStrictProductionControl(const SingleWellState<Scalar, IndexTraits>& ws,
     const auto rates = ws.surface_rates;
     const Scalar tot_ipr_b = std::accumulate(ws.implicit_ipr_b.begin(), ws.implicit_ipr_b.end(), 0.0);
     const Scalar tot_ipr_a = std::accumulate(ws.implicit_ipr_a.begin(), ws.implicit_ipr_a.end(), 0.0);
-    const Scalar tot_rate_at_bhp = -tot_ipr_b*mostStrictBHP + tot_ipr_a;
+    const Scalar tot_rate_at_bhp = tot_ipr_b*mostStrictBHP - tot_ipr_a;
     Scalar mostStrictScale = tot_rate_at_bhp/std::accumulate(rates.begin(), rates.end(), 0.0);
 
     const std::array<Well::ProducerCMode, 5> rateModes = {Well::ProducerCMode::ORAT,
@@ -353,7 +353,7 @@ mostStrictProductionControl(const SingleWellState<Scalar, IndexTraits>& ws,
         }
     }
     
-    if (ws.group_target.has_value()) {
+    if (controls.hasControl(Well::ProducerCMode::GRUP) && ws.group_target.has_value()) {
         const Scalar scale = getProductionControlModeScale(ws, ws.production_cmode_group_translated.value(), controls, ws.group_target.value());
         if (scale < mostStrictScale) {
             mostStrictScale = scale;

@@ -1022,29 +1022,35 @@ estimateStableSolutionBhp(const WellState<Scalar, IndexTraits>& well_state,
            return bhp - dp_hydro + getVfpBhpAdjustment(bhp, thp);
        };
     // returns 3 rates and 3 bhps
-    const auto retval = VFPHelpers<double>::intersectWithIPRCriticalPoints(table, thp, wfr, gfr,
+    //const auto retval = VFPHelpers<double>::intersectWithIPRCriticalPoints(table, thp, wfr, gfr,
+    //                                                                       well_.getALQ(well_state),
+    //                                                                       ipr.first, ipr.second,
+    //                                                                       bhp_adjusted);
+
+    const auto retval = VFPHelpers<double>::rateLimitsFromIPRIntersections(table, thp, wfr, gfr,
                                                                            well_.getALQ(well_state),
                                                                            ipr.first, ipr.second,
-                                                                           bhp_adjusted);
+                                                                           bhp_adjusted, enforceStable);
     if (!retval.has_value()) {
         // no intersection, can't operate at thp limit
         return std::make_pair(std::nullopt, true);
     } else {
-        const auto [critical_rates, critical_bhps] = retval.value();
+        const auto [rate_critical, rate_at_thp_limit] = retval.value();
         // can operate at thp limit, check if we can operate at rate-limit
-        const Scalar minimal_rate = enforceStable ? critical_rates[1] : critical_rates[0];
-        const Scalar rate_limit = strict_cmode_scale * flo;
-        if (rate_limit < minimal_rate) {
+        //const Scalar minimal_rate = enforceStable ? critical_rates[1] : critical_rates[0];
+        const Scalar cmode_limit = strict_cmode_scale * flo;
+        if (cmode_limit < rate_critical) {
             // cant operate at rate limit
             return std::make_pair(std::nullopt, false);
         } else {
-            // can opeate, determine which is most strict
-            if (rate_limit > critical_rates[2]) {
-                // thp most strict
-                return std::make_pair(critical_bhps[2], true);
+            // can operate, determine which is most strict
+            if (cmode_limit > rate_at_thp_limit) {
+                // thp most strict, find bhp from ipr at thp limit
+                const Scalar bhp_at_thp_limit = -(rate_at_thp_limit-ipr.first) / ipr.second;
+                return std::make_pair(bhp_at_thp_limit, true);
             } else {
                 // rate most strict, find bhp from ipr at rate limit
-                const Scalar bhp_at_rate_limit = -(rate_limit-ipr.first) / ipr.second;
+                const Scalar bhp_at_rate_limit = -(cmode_limit-ipr.first) / ipr.second;
                 return std::make_pair(bhp_at_rate_limit, false);
             }
         }

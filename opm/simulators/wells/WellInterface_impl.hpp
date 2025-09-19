@@ -692,7 +692,7 @@ namespace Opm
         //
         auto rates = ws.surface_rates;
         this->adaptRatesForVFP(rates);
-        const auto result = WellBhpThpCalculator(*this).estimateSolutionBhp(well_state, this->well_ecl_, rates, this->getRefDensity(), summary_state, cmode_scale);
+        const auto result = WellBhpThpCalculator(*this).estimateStableSolutionBhp(well_state, this->well_ecl_, rates, this->getRefDensity(), summary_state, cmode_scale);
         //return WellBhpThpCalculator(*this).estimateStableBhp(well_state, this->well_ecl_, rates, this->getRefDensity(), summary_state);
         // const auto critical_values = WellBhpThpCalculator(*this).estimateCriticalValues(well_state, this->well_ecl_, rates, this->getRefDensity(), summary_state, true);
         if (!result.first.has_value()) {
