@@ -88,6 +88,13 @@ protected:
                                     const std::optional<Well::InjectionControls>& inj_controls = std::nullopt,
                                     const std::optional<Well::ProductionControls>& prod_controls = std::nullopt) const;
 
+    std::pair<Well::ProducerCMode, Scalar>
+    mostStrictProductionControl(const SingleWellState<Scalar, IndexTraits>& ws,
+                                   const SummaryState& summaryState,
+                                   const Well::ProductionControls& controls,
+                                   DeferredLogger& deferred_logger, 
+                                   std::optional<Scalar> bhp_at_thp_limit = std::nullopt) const;
+
     bool checkGroupConstraints(WellState<Scalar, IndexTraits>& well_state,
                                const GroupState<Scalar>& group_state,
                                const Schedule& schedule,

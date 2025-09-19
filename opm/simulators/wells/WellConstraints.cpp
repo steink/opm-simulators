@@ -318,21 +318,20 @@ activeProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
 template<typename Scalar, typename IndexTraits>
 std::pair<Well::ProducerCMode, Scalar>
 WellConstraints<Scalar, IndexTraits>::
-getMostStrictProductionControl(const SingleWellState<Scalar, IndexTraits>& ws,
+mostStrictProductionControl(const SingleWellState<Scalar, IndexTraits>& ws,
                            const SummaryState& summaryState,
-                           const RateConvFunc& calcReservoirVoidageRates,
                            const Well::ProductionControls& controls,
                            DeferredLogger& deferred_logger, 
                            std::optional<Scalar> bhp_at_thp_limit) const
 {
-    // Assumes non-zero well-rates and updated ipr
-    const auto& pu = well_.phaseUsage();
+    // Assumes non-zero well-rates and updated ipr !!!
     auto mostStrictControl = Well::ProducerCMode::BHP;
     Scalar mostStrictBHP = ws.bhp;
     if (bhp_at_thp_limit.has_value() && *bhp_at_thp_limit > ws.bhp) {
         mostStrictControl = Well::ProducerCMode::THP;
         mostStrictBHP = *bhp_at_thp_limit;
     }
+    // use ipr for rate-sum to convert bhp to rate-scaling
     const auto rates = ws.surface_rates;
     const Scalar tot_ipr_b = std::accumulate(ws.implicit_ipr_b.begin(), ws.implicit_ipr_b.end(), 0.0);
     const Scalar tot_ipr_a = std::accumulate(ws.implicit_ipr_a.begin(), ws.implicit_ipr_a.end(), 0.0);
@@ -340,10 +339,10 @@ getMostStrictProductionControl(const SingleWellState<Scalar, IndexTraits>& ws,
     Scalar mostStrictScale = tot_rate_at_bhp/std::accumulate(rates.begin(), rates.end(), 0.0);
 
     const std::array<Well::ProducerCMode, 5> rateModes = {Well::ProducerCMode::ORAT,
-                                                        Well::ProducerCMode::WRAT,
-                                                        Well::ProducerCMode::GRAT,
-                                                        Well::ProducerCMode::LRAT,
-                                                        Well::ProducerCMode::RESV};
+                                                          Well::ProducerCMode::WRAT,
+                                                          Well::ProducerCMode::GRAT,
+                                                          Well::ProducerCMode::LRAT,
+                                                          Well::ProducerCMode::RESV};
     for (const auto& mode : rateModes) {
         if (!controls.hasControl(mode))
             continue;
@@ -355,8 +354,7 @@ getMostStrictProductionControl(const SingleWellState<Scalar, IndexTraits>& ws,
     }
     
     if (ws.group_target.has_value()) {
-        //const Scalar scale = getProductionControlModeScale(ws, ws.production_cmode_group_translated.value(), controls, ws.group_target.value());
-        const Scalar scale = 1.0;
+        const Scalar scale = getProductionControlModeScale(ws, ws.production_cmode_group_translated.value(), controls, ws.group_target.value());
         if (scale < mostStrictScale) {
             mostStrictScale = scale;
             mostStrictControl = Well::ProducerCMode::GRUP;
@@ -369,9 +367,9 @@ template<typename Scalar, typename IndexTraits>
 Scalar
 WellConstraints<Scalar, IndexTraits>::
 getProductionControlModeScale(const SingleWellState<Scalar, IndexTraits>& ws,
-                    const Well::ProducerCMode& cmode,
-                    const Well::ProductionControls& control, 
-                    const std::optional<Scalar> target) const
+                              const Well::ProducerCMode& cmode,
+                              const Well::ProductionControls& control, 
+                              const std::optional<Scalar> target) const
 {
     const auto& pu = well_.phaseUsage();
     Scalar current_rate = 0.0;
@@ -395,7 +393,8 @@ getProductionControlModeScale(const SingleWellState<Scalar, IndexTraits>& ws,
             target_rate = target.has_value() ? *target : control.liquid_rate;
             break;
         case Well::ProducerCMode::RESV:
-            // deal with non-prediction mode
+            // Do we need to deal with non-prediction mode here? 
+            assert(control.prediction_mode);
             for (int p = 0; p < well_.numPhases(); ++p) {
                 current_rate += -ws.reservoir_rates[p];
             }

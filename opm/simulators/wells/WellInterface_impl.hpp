@@ -562,7 +562,7 @@ namespace Opm
     WellInterface<TypeTag>::
     solveWellWithOperabilityCheck(const Simulator& simulator,
                                   const double dt,
-                                  const Well::InjectionControls& inj_controls,
+                                  const Well::InjectionControls& inj_controls,  // we don't end up here for injectors
                                   const Well::ProductionControls& prod_controls,
                                   WellStateType& well_state,
                                   const GroupState<Scalar>& group_state,
@@ -576,7 +576,7 @@ namespace Opm
         // if well is stopped, check if we can reopen
         if (this->wellIsStopped()) {
             this->openWell();
-            auto bhp_target = estimateOperableBhp(simulator, dt, well_state, summary_state, deferred_logger);
+            auto bhp_target = estimateOperableBhp(simulator, dt, well_state, prod_controls, summary_state, deferred_logger);
             if (!bhp_target.has_value()) {
                 // no intersection with ipr
                 const auto msg = fmt::format("estimateOperableBhp: Did not find operable BHP for well {}", this->name());
@@ -627,7 +627,7 @@ namespace Opm
             // Well did not converge, switch to explicit fractions
             this->operability_status_.use_vfpexplicit = true;
             this->openWell();
-            auto bhp_target = estimateOperableBhp(simulator, dt, well_state, summary_state, deferred_logger);
+            auto bhp_target = estimateOperableBhp(simulator, dt, well_state, prod_controls, summary_state, deferred_logger);
             if (!bhp_target.has_value()) {
                 // well can't operate using explicit fractions
                 is_operable = false;
@@ -663,6 +663,7 @@ namespace Opm
     estimateOperableBhp(const Simulator& simulator,
                         const double dt,
                         WellStateType& well_state,
+                        const Well::ProductionControls& controls,
                         const SummaryState& summary_state,
                         DeferredLogger& deferred_logger)
     {
@@ -685,31 +686,32 @@ namespace Opm
             return std::nullopt;
         }
         this->updateIPRImplicit(simulator, well_state, deferred_logger);
-        auto rates = well_state.well(this->index_of_well_).surface_rates;
+        auto& ws = well_state.well(this->index_of_well_);
+        // based on ipr/current fractions, estimate most strict control mode (disregarding thp) and corresponding rate scaling
+        auto [cmode, cmode_scale] = this->mostStrictProductionControl(ws, summary_state, controls, deferred_logger);
+        //
+        auto rates = ws.surface_rates;
         this->adaptRatesForVFP(rates);
+        const auto result = WellBhpThpCalculator(*this).estimateSolutionBhp(well_state, this->well_ecl_, rates, this->getRefDensity(), summary_state, cmode_scale);
         //return WellBhpThpCalculator(*this).estimateStableBhp(well_state, this->well_ecl_, rates, this->getRefDensity(), summary_state);
-        const auto critical_values = WellBhpThpCalculator(*this).estimateCriticalValues(well_state, this->well_ecl_, rates, this->getRefDensity(), summary_state, true);
-        if (!critical_values.has_value()) {
-            // can't operate under thp control
+        // const auto critical_values = WellBhpThpCalculator(*this).estimateCriticalValues(well_state, this->well_ecl_, rates, this->getRefDensity(), summary_state, true);
+        if (!result.first.has_value()) {
+            // well can't operate, report reason
+            if (result.second) {// can't operate at thp limit
+                const auto msg = fmt::format("estimateOperableBhp: Well {} cannot operate at THP limit and will stop", this->name());
+                deferred_logger.debug(msg);
+            } else {// can't operate at rate limit given by cmode
+                std::string cmode_str = WellProducerCMode2String(ws.production_cmode);
+                const auto msg = fmt::format("estimateOperableBhp: Well {} cannot operate at rate limit under {} and will stop", this->name(), cmode_str);
+                deferred_logger.debug(msg);
+
+            }
             return std::nullopt;
         } else {
-            const auto [bhp_at_thp, rate_min_scale] = critical_values.value();
-            const auto [cmode, cmode_scale] = mostStrictControlMode(..., bhp_at_thp) // wellInterfaceFluidSystem
-            if (cmode_scale < rate_min_scale) {
-                if (cmode == Well::ProducerCMode::GROUP) {
-                    // report group
-                } else {
-                    // report individual
-                }
-                return std::nullopt;
-            }
-            if (cmode == Well::ProducerCMode::THP) {
-                return bhp_at_thp;
-            } else {
-                return // calculate bhp from the most strict limit
-            }
+            // switch control model to most strict
+            ws.production_cmode = result.second ? Well::ProducerCMode::THP : cmode;
+            return result.first.value();
         }
-
     }
 
     template<typename TypeTag>

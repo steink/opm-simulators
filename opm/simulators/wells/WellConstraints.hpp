@@ -64,9 +64,8 @@ public:
                                const std::optional<Well::ProductionControls>& prod_controls = std::nullopt) const;
 
     std::pair<WellProducerCMode, Scalar>
-    getMostStrictProductionControl(const SingleWellState<Scalar, IndexTraits>& ws,
+    mostStrictProductionControl(const SingleWellState<Scalar, IndexTraits>& ws,
                                    const SummaryState& summaryState,
-                                   const RateConvFunc& calcReservoirVoidageRates,
                                    const WellProductionControls& controls,
                                    DeferredLogger& deferred_logger, 
                                    std::optional<Scalar> bhp_at_thp_limit = std::nullopt) const;

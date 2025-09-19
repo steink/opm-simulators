@@ -112,6 +112,16 @@ public:
                     const Scalar rho,
                     const SummaryState& summaryState) const;
 
+  std::pair<std::optional<Scalar>, bool>
+  estimateStableSolutionBhp(const WellState<Scalar, IndexTraits>& well_state,
+                    const Well& well,
+                    const std::vector<Scalar>& rates,
+                    const Scalar rho,
+                    const SummaryState& summaryState,
+                    const Scalar strict_cmode_scale,
+                    const bool enforceStable = true) const;
+
+  /*
   std::optional<std::pair<Scalar, Scalar>>
   estimateCriticalPoints(const WellState<Scalar, IndexTraits>& well_state,
                          const Well& well,
@@ -120,6 +130,7 @@ public:
                          const SummaryState& summaryState,
                          const bool enforceStable = true) const;
 
+  */
   std::pair<Scalar, Scalar>
   getFloIPR(const WellState<Scalar, IndexTraits>& well_state,
             const Well& well, 

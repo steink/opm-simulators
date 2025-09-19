@@ -976,10 +976,86 @@ estimateStableBhp(const WellState<Scalar, IndexTraits>& well_state,
 }
 
 template<typename Scalar, typename IndexTraits>
+std::pair<std::optional<Scalar>, bool> WellBhpThpCalculator<Scalar, IndexTraits>::
+estimateStableSolutionBhp(const WellState<Scalar, IndexTraits>& well_state,
+                    const Well& well,
+                    const std::vector<Scalar>& rates,
+                    const Scalar rho,
+                    const SummaryState& summaryState,
+                    const Scalar strict_cmode_scale,
+                    const bool enforceStable) const
+{   
+    // Given a *converged* well_state with ipr, estimate
+    // 1. (bhp1, rate1) for minimal flowing rate (unstable)
+    // 2. (bhp2, rate2) for minimal rates (stable)
+    // 3. (bhp3, rate3) for maximal rate (stable solution at thp)
+    // Return bhp_estimate and a bool indicating if thp is most strict
+    // Four situations:
+    // 1. (nullopt, true): can't operate at thp limit
+    // 2. (nullopt, false): can't operate at rate*scale (below minimal)
+    // 3. (bhp3, true): bhp at thp limit (thp most strict)
+    // 4. (bhp, false): bhp at rate*scale (rate most strict)
+    const auto& controls = well.productionControls(summaryState);
+    const Scalar thp = well_.getTHPConstraint(summaryState);
+    const auto& table = well_.vfpProperties()->getProd()->getTable(controls.vfp_table_number);
+
+    const Scalar aqua = rates[IndexTraits::waterPhaseIdx];
+    const Scalar liquid = rates[IndexTraits::oilPhaseIdx];
+    const Scalar vapour = rates[IndexTraits::gasPhaseIdx];
+    Scalar flo = detail::getFlo(table, aqua, liquid, vapour);
+    Scalar wfr, gfr;
+    if (well_.useVfpExplicit() || -flo < table.getFloAxis().front()) {
+        wfr =  well_.vfpProperties()->getExplicitWFR(controls.vfp_table_number, well_.indexOfWell());
+        gfr = well_.vfpProperties()->getExplicitGFR(controls.vfp_table_number, well_.indexOfWell());
+    } else {
+        wfr = detail::getWFR(table, aqua, liquid, vapour);  
+        gfr = detail::getGFR(table, aqua, liquid, vapour);   
+    }
+
+    auto ipr = getFloIPR(well_state, well, summaryState);
+    
+    const Scalar vfp_ref_depth = well_.vfpProperties()->getProd()->getTable(controls.vfp_table_number).getDatumDepth();
+
+    const Scalar dp_hydro = wellhelpers::computeHydrostaticCorrection(well_.refDepth(), vfp_ref_depth,
+                                                                      rho, well_.gravity());
+    auto bhp_adjusted = [this, &thp, &dp_hydro](const Scalar bhp) {
+           return bhp - dp_hydro + getVfpBhpAdjustment(bhp, thp);
+       };
+    // returns 3 rates and 3 bhps
+    const auto retval = VFPHelpers<double>::intersectWithIPRCriticalPoints(table, thp, wfr, gfr,
+                                                                           well_.getALQ(well_state),
+                                                                           ipr.first, ipr.second,
+                                                                           bhp_adjusted);
+    if (!retval.has_value()) {
+        // no intersection, can't operate at thp limit
+        return std::make_pair(std::nullopt, true);
+    } else {
+        const auto [critical_rates, critical_bhps] = retval.value();
+        // can operate at thp limit, check if we can operate at rate-limit
+        const Scalar minimal_rate = enforceStable ? critical_rates[1] : critical_rates[0];
+        const Scalar rate_limit = strict_cmode_scale * flo;
+        if (rate_limit < minimal_rate) {
+            // cant operate at rate limit
+            return std::make_pair(std::nullopt, false);
+        } else {
+            // can opeate, determine which is most strict
+            if (rate_limit > critical_rates[2]) {
+                // thp most strict
+                return std::make_pair(critical_bhps[2], true);
+            } else {
+                // rate most strict, find bhp from ipr at rate limit
+                const Scalar bhp_at_rate_limit = -(rate_limit-ipr.first) / ipr.second;
+                return std::make_pair(bhp_at_rate_limit, false);
+            }
+        }
+    }
+}
+/*
+template<typename Scalar, typename IndexTraits>
 std::optional<std::pair<Scalar, Scalar>> WellBhpThpCalculator<Scalar, IndexTraits>::
 estimateCriticalPoints(const WellState<Scalar, IndexTraits>& well_state,
                        const Well& well,
-                       const std::vector<Scalar>& rates,
+                       const std:   :vector<Scalar>& rates,
                        const Scalar rho,
                        const SummaryState& summaryState,
                        const bool enforceStable) const
@@ -1028,6 +1104,8 @@ estimateCriticalPoints(const WellState<Scalar, IndexTraits>& well_state,
         return std::nullopt;
     }
 }
+
+*/
 
 template<typename Scalar, typename IndexTraits>
 std::pair<Scalar, Scalar> WellBhpThpCalculator<Scalar, IndexTraits>::

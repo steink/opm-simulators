@@ -434,6 +434,7 @@ protected:
     estimateOperableBhp(const Simulator& ebos_simulator,
                         const double dt,
                         WellStateType& well_state,
+                        const Well::ProductionControls& controls,
                         const SummaryState& summary_state,
                         DeferredLogger& deferred_logger);
 

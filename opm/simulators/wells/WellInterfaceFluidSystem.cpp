@@ -177,6 +177,20 @@ checkIndividualConstraints(SingleWellState<Scalar, IndexTraits>& ws,
 }
 
 template<typename FluidSystem>
+std::pair<Well::ProducerCMode, typename FluidSystem::Scalar>
+WellInterfaceFluidSystem<FluidSystem>::
+mostStrictProductionControl(const SingleWellState<Scalar, IndexTraits>& ws,
+                               const SummaryState& summaryState,
+                               const Well::ProductionControls& controls,
+                               DeferredLogger& deferred_logger, 
+                               std::optional<Scalar> bhp_at_thp_limit) const
+{
+    // Might want to include rate-converter here, if not this detour is not needed
+    return WellConstraints(*this).
+            mostStrictProductionControl(ws, summaryState, controls, deferred_logger, bhp_at_thp_limit);
+}                               
+
+template<typename FluidSystem>
 bool
 WellInterfaceFluidSystem<FluidSystem>::
 checkGroupConstraints(WellState<Scalar, IndexTraits>& well_state,
