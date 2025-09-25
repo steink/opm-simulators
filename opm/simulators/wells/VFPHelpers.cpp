@@ -756,7 +756,7 @@ rateLimitsFromIPRIntersections(const VFPProdTable& table,
     }
     // find largest flo (flo_x) for which y = bhp(flo) + (flo-a)/b = 0 and dy/dflo > 0
     //std::vector<Scalar> bhps(3);
-    std::vector<Scalar> rates(3, 0.0);
+    std::vector<Scalar> rates({0.0, -1.0, -1.0});
     //Scalar flo_max = -1.0;
     Scalar flo0, flo1;
     Scalar y0, y1;

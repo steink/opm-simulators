@@ -173,7 +173,7 @@ namespace Opm
     updateWellStateWithTarget(const Simulator& simulator,
                               const GroupState<Scalar>& group_state,
                               WellStateType& well_state,
-                              DeferredLogger&  deferred_logger) const
+                              DeferredLogger&  deferred_logger)
     {
         Base::updateWellStateWithTarget(simulator, group_state, well_state, deferred_logger);
         // scale segment rates based on the wellRates
@@ -1650,6 +1650,7 @@ namespace Opm
         this->operability_status_.resetOperability();
         this->operability_status_.solvable = true;
 
+        well_state.well(this->index_of_well_).prevent_group_control = false;
         if (allow_switching) {
             this->checkControlFeasibility(summary_state, well_state, inj_controls, prod_controls, Base::B_avg_, deferred_logger);
         }
@@ -1665,6 +1666,9 @@ namespace Opm
                     its_since_last_switch = 0;
                     ++switch_count;
                     if (well_status_cur != this->wellStatus_) {
+                        if (this->wellStatus_ == WellStatus::OPEN) {
+                            this->checkControlFeasibility(summary_state, well_state, inj_controls, prod_controls, Base::B_avg_, deferred_logger);
+                        }
                         well_status_cur = this->wellStatus_;
                         status_switch_count++;
                     }
@@ -1736,6 +1740,20 @@ namespace Opm
                 // this is the process with rank zero)
                 deferred_logger.problem("In MultisegmentWell::iterateWellEqWithSwitching for well "
                                         + this->name() +": "+exp.what());
+                const auto rates = well_state.well(this->index_of_well_).surface_rates;
+                const auto bhp = well_state.well(this->index_of_well_).bhp;
+                const auto thp = well_state.well(this->index_of_well_).thp;
+                std::cout << "Well rates: [" << std::to_string(rates[0]) << "," << std::to_string(rates[1]) << "," << std::to_string(rates[2]) << "]"
+                          << " BHP: " << std::to_string(bhp) <<
+                          " THP: " <<   std::to_string(thp) << std::endl;
+                std::cout << "Iteration: " << it << " switch count: " << switch_count << " status switch count: " << status_switch_count << std::endl;
+                std::string mode = WellProducerCMode2String(well_state.well(this->index_of_well_).production_cmode);
+                std::cout << "Control mode: " << mode << std::endl;
+                std::cout << "Producer: " << this->isProducer() << " Injector: " << this->isInjector() << std::endl;
+                const bool well_is_stopped = this->wellIsStopped();
+                std::cout << "Well is stopped: " << well_is_stopped << std::endl;
+                const Scalar wqTotal = this->primary_variables_.getWQTotal().value();
+                std::cout << "WQTotal: " << wqTotal << std::endl;
                 throw;
             }
         }

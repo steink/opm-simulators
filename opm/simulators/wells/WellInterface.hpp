@@ -217,7 +217,7 @@ public:
     virtual void updateWellStateWithTarget(const Simulator& simulator,
                                            const GroupState<Scalar>& group_state,
                                            WellStateType& well_state,
-                                           DeferredLogger& deferred_logger) const;
+                                           DeferredLogger& deferred_logger);
 
     virtual void computeWellRatesWithBhpIterations(const Simulator& simulator,
                                                    const Scalar& bhp,

@@ -401,7 +401,8 @@ getProductionControlModeScale(const SingleWellState<Scalar, IndexTraits>& ws,
             target_rate = target.has_value() ? *target : control.resv_rate;
             break;
         default:
-            assert(false);
+            // undefined mode, no scaling applied
+            current_rate = 0.0;
     }
     return current_rate == 0.0 ? std::numeric_limits<Scalar>::max() : target_rate/current_rate;
 }

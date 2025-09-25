@@ -313,7 +313,8 @@ namespace Opm
                     if (! (isGroupControl && !this->param_.check_group_constraints_inner_well_iterations_)) {
                         changed = this->checkIndividualConstraints(ws, summary_state, deferred_logger, inj_controls, prod_controls);
                     }
-                    if (hasGroupControl && this->param_.check_group_constraints_inner_well_iterations_) {
+                    const bool prevent_group_control = ws.prevent_group_control.has_value() ? ws.prevent_group_control.value() : false;
+                    if (hasGroupControl && this->param_.check_group_constraints_inner_well_iterations_ && !prevent_group_control) {
                         changed = changed || this->checkGroupConstraints(well_state, group_state, schedule, summary_state, false, deferred_logger);
                     }
 
@@ -402,6 +403,9 @@ namespace Opm
         // We test the well as an open well during the well testing
         ws.open();
 
+        for (auto& rate : ws.surface_rates) {
+            rate *= 1e-6;
+        }
         updateWellStateWithTarget(simulator, group_state, well_state_copy, deferred_logger);
         calculateExplicitQuantities(simulator, well_state_copy, deferred_logger);
         updatePrimaryVariables(simulator, well_state_copy, deferred_logger);
@@ -516,7 +520,7 @@ namespace Opm
             if (!this->param_.local_well_solver_control_switching_){
                 converged = this->iterateWellEqWithControl(simulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
             } else {
-                if (this->param_.use_implicit_ipr_ && this->well_ecl_.isProducer() && (well_state.well(this->index_of_well_).status == WellStatus::OPEN)) {
+                if (this->param_.use_implicit_ipr_ && this->well_ecl_.isProducer()){// && (well_state.well(this->index_of_well_).status == WellStatus::OPEN)) {
                     converged = solveWellWithOperabilityCheck(simulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
                 } else {
                     converged = this->iterateWellEqWithSwitching(simulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
@@ -573,8 +577,10 @@ namespace Opm
         bool is_operable = true;
         bool converged = true;
         auto& ws = well_state.well(this->index_of_well_);
+        const Scalar ratesum = std::accumulate(ws.surface_rates.begin(), ws.surface_rates.end(), static_cast<Scalar>(0.0));
+
         // if well is stopped, check if we can reopen
-        if (this->wellIsStopped()) {
+        if (this->wellIsStopped() || (ratesum == 0.0)) {
             this->openWell();
             auto bhp_target = estimateOperableBhp(simulator, dt, well_state, prod_controls, summary_state, deferred_logger);
             if (!bhp_target.has_value()) {
@@ -599,6 +605,7 @@ namespace Opm
         }
 
         const bool isThp = ws.production_cmode == Well::ProducerCMode::THP;
+        //const bool has_thp = this->wellHasTHPConstraints(summary_state);
         // check stability of solution under thp-control
         if (converged && !stoppedOrZeroRateTarget(simulator, well_state, deferred_logger) && isThp) {
             auto rates = well_state.well(this->index_of_well_).surface_rates;
@@ -617,8 +624,8 @@ namespace Opm
                     deferred_logger.debug(msg);
                     solveWellWithBhp(simulator, dt, bhp_stable.value(), well_state, deferred_logger);
                     // re-solve with hopefully good initial guess
-                    ws.thp = this->getTHPConstraint(summary_state);
-                    converged = this->iterateWellEqWithSwitching(simulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
+                    //ws.thp = this->getTHPConstraint(summary_state);
+                    //converged = this->iterateWellEqWithSwitching(simulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
                 }
             }
         }
@@ -638,16 +645,18 @@ namespace Opm
                 // solve well with the estimated target bhp (or limit)
                 const Scalar bhp = std::max(bhp_target.value(),
                                             static_cast<Scalar>(prod_controls.bhp_limit));
-                solveWellWithBhp(simulator, dt, bhp, well_state, deferred_logger);
+                converged = solveWellWithBhp(simulator, dt, bhp, well_state, deferred_logger);
                 ws.thp = this->getTHPConstraint(summary_state);
                 const auto msg = fmt::format("Well {} did not converge, re-solving with explicit fractions for VFP caculations.", this->name());
                 deferred_logger.debug(msg);
+                /*
                 converged = this->iterateWellEqWithSwitching(simulator, dt,
                                                              inj_controls,
                                                              prod_controls,
                                                              well_state,
                                                              group_state,
                                                              deferred_logger);
+                */
             }
         }
         // update operability
@@ -701,7 +710,7 @@ namespace Opm
                 const auto msg = fmt::format("estimateOperableBhp: Well {} cannot operate at THP limit and will stop", this->name());
                 deferred_logger.debug(msg);
             } else {// can't operate at rate limit given by cmode
-                std::string cmode_str = WellProducerCMode2String(ws.production_cmode);
+                std::string cmode_str = WellProducerCMode2String(cmode);
                 const auto msg = fmt::format("estimateOperableBhp: Well {} cannot operate at rate limit under {} and will stop", this->name(), cmode_str);
                 deferred_logger.debug(msg);
 
@@ -1155,7 +1164,7 @@ namespace Opm
     updateWellStateWithTarget(const Simulator& simulator,
                               const GroupState<Scalar>& group_state,
                               WellStateType& well_state,
-                              DeferredLogger& deferred_logger) const
+                              DeferredLogger& deferred_logger)
     {
         OPM_TIMEFUNCTION();
         // only bhp and wellRates are used to initilize the primaryvariables for standard wells
@@ -1478,6 +1487,41 @@ namespace Opm
             }
             case Well::ProducerCMode::THP:
             {
+                 ws.thp = this->getTHPConstraint(summaryState);
+                if (true) {
+                    const Scalar dt = simulator.timeStepSize();
+                    auto bhp_target = estimateOperableBhp(simulator, dt, well_state, controls, summaryState, deferred_logger);
+                    if (bhp_target.has_value()) {
+                        const Scalar bhp = std::max(bhp_target.value(), static_cast<Scalar>(controls.bhp_limit));
+                        solveWellWithBhp(simulator, dt, bhp, well_state, deferred_logger);
+                    } else {
+                        deferred_logger.debug("Did not find operable bhp for well " + this->name() + ", re-trying initialization." );
+                        const bool update_success = updateWellStateWithTHPTargetProd(simulator, well_state, deferred_logger);
+                        if (!update_success) {
+                            // the following is the original way of initializing well state with THP constraint
+                            // keeping it for robust reason in case that it fails to get a bhp value with THP constraint
+                            // more sophisticated design might be needed in the future
+                            auto rates = ws.surface_rates;
+                            this->adaptRatesForVFP(rates);
+                            const Scalar bhp = WellBhpThpCalculator(*this).calculateBhpFromThp(
+                                well_state, rates, well, summaryState, this->getRefDensity(), deferred_logger);
+                            ws.bhp = bhp;
+
+                            // if the total rates are negative or zero
+                            // we try to provide a better initial well rate
+                            // using the well potentials
+                            const Scalar total_rate = -std::accumulate(rates.begin(), rates.end(), 0.0);
+                            if (total_rate <= 0.0) {
+                                for (int p = 0; p < this->number_of_phases_; ++p) {
+                                    ws.surface_rates[p] = -ws.well_potentials[p];
+                                }
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+            /*                
                 const bool update_success = updateWellStateWithTHPTargetProd(simulator, well_state, deferred_logger);
 
                 if (!update_success) {
@@ -1502,6 +1546,7 @@ namespace Opm
                 }
                 break;
             }
+            */
             case Well::ProducerCMode::GRUP:
             {
                 assert(well.isAvailableForGroupControl());

@@ -970,6 +970,10 @@ void WellInterfaceGeneric<Scalar, IndexTraits>::checkControlFeasibility(const Su
     }
     const auto& pu = this->phaseUsage();
     auto weighted_rates = ws.surface_rates;
+    const auto sum_rates = std::accumulate(weighted_rates.begin(), weighted_rates.end(), 0.0);
+    if (sum_rates == 0.0) {
+        weighted_rates = ws.prev_surface_rates;
+    }
     for (size_t i = 0; i < weighted_rates.size(); ++i) {
         weighted_rates[i] *= scaling[i];
     }
@@ -1005,6 +1009,7 @@ void WellInterfaceGeneric<Scalar, IndexTraits>::checkControlFeasibility(const Su
         std::string to = WellProducerCMode2String(ws.production_cmode);
         deferred_logger.info(fmt::format("Well {} control mode GROUP ({}), but switched {} due to low phase fraction [{}, {}, {}]",
                                          this->name(), from, to, ws.surface_rates[0], ws.surface_rates[1], ws.surface_rates[2]));
+        ws.prevent_group_control = true;
     }
 }
 

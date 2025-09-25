@@ -1038,7 +1038,7 @@ estimateStableSolutionBhp(const WellState<Scalar, IndexTraits>& well_state,
         const auto [rate_critical, rate_at_thp_limit] = retval.value();
         // can operate at thp limit, check if we can operate at rate-limit
         //const Scalar minimal_rate = enforceStable ? critical_rates[1] : critical_rates[0];
-        const Scalar cmode_limit = strict_cmode_scale * flo;
+        const Scalar cmode_limit = -strict_cmode_scale * flo;
         if (cmode_limit < rate_critical) {
             // cant operate at rate limit
             return std::make_pair(std::nullopt, false);
