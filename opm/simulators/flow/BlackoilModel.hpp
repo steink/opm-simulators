@@ -98,8 +98,8 @@ public:
     static constexpr int microbialConcentrationIdx = Indices::microbialConcentrationIdx;
     static constexpr int oxygenConcentrationIdx = Indices::oxygenConcentrationIdx;
     static constexpr int ureaConcentrationIdx = Indices::ureaConcentrationIdx;
-    static constexpr int biofilmConcentrationIdx = Indices::biofilmConcentrationIdx;
-    static constexpr int calciteConcentrationIdx = Indices::calciteConcentrationIdx;
+    static constexpr int biofilmVolumeFractionIdx = Indices::biofilmVolumeFractionIdx;
+    static constexpr int calciteVolumeFractionIdx = Indices::calciteVolumeFractionIdx;
 
     using VectorBlockType = Dune::FieldVector<Scalar, numEq>;
     using MatrixBlockType = typename SparseMatrixAdapter::MatrixBlock;
@@ -326,7 +326,8 @@ protected:
     static constexpr bool has_energy_ = getPropValue<TypeTag, Properties::EnableEnergy>();
     static constexpr bool has_foam_ = getPropValue<TypeTag, Properties::EnableFoam>();
     static constexpr bool has_brine_ = getPropValue<TypeTag, Properties::EnableBrine>();
-    static constexpr bool has_micp_ = getPropValue<TypeTag, Properties::EnableMICP>();
+    static constexpr bool has_bioeffects_ = getPropValue<TypeTag, Properties::EnableBioeffects>();
+    static constexpr bool has_micp_ = Indices::enableMICP;
 
     ModelParameters                 param_;
     SimulatorReportSingle failureReport_;

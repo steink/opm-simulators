@@ -22,10 +22,10 @@
 */
 /*!
  * \file
- * \copydoc Opm::VtkBlackOilMICPModule
+ * \copydoc Opm::VtkBlackOilBioeffectsModule
  */
-#ifndef OPM_VTK_BLACK_OIL_MICP_PARAMS_HPP
-#define OPM_VTK_BLACK_OIL_MICP_PARAMS_HPP
+#ifndef OPM_VTK_BLACK_OIL_BIOEFFECTS_PARAMS_HPP
+#define OPM_VTK_BLACK_OIL_BIOEFFECTS_PARAMS_HPP
 
 namespace Opm::Parameters {
 
@@ -33,31 +33,31 @@ namespace Opm::Parameters {
 struct VtkWriteMicrobialConcentration { static constexpr bool value = true; };
 struct VtkWriteOxygenConcentration { static constexpr bool value = true; };
 struct VtkWriteUreaConcentration { static constexpr bool value = true; };
-struct VtkWriteBiofilmConcentration { static constexpr bool value = true; };
-struct VtkWriteCalciteConcentration { static constexpr bool value = true; };
+struct VtkWriteBiofilmVolumeFraction { static constexpr bool value = true; };
+struct VtkWriteCalciteVolumeFraction { static constexpr bool value = true; };
 
 } // namespace Opm::Parameters
 
 namespace Opm {
 
 /*!
- * \brief Struct holding the parameters for VtkBlackoilMICPModule.
+ * \brief Struct holding the parameters for VtkBlackOilBioeffectsModule.
  */
-struct VtkBlackoilMICPParams
+struct VtkBlackOilBioeffectsParams
 {
     //! \brief Registers the parameters in parameter system.
-    static void registerParameters();
+    static void registerParameters(const bool isMICP);
 
     //! \brief Reads the parameter values from the parameter system.
-    void read();
+    void read(const bool isMICP);
 
     bool microbialConcentrationOutput_;
     bool oxygenConcentrationOutput_;
     bool ureaConcentrationOutput_;
-    bool biofilmConcentrationOutput_;
-    bool calciteConcentrationOutput_;
+    bool biofilmVolumeFractionOutput_;
+    bool calciteVolumeFractionOutput_;
 };
 
 } // namespace Opm
 
-#endif // OPM_VTK_BLACKOIL_MICP_PARAMS_HPP
+#endif // OPM_VTK_BLACK_OIL_BIOEFFECTS_PARAMS_HPP

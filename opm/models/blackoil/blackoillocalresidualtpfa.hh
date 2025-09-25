@@ -35,6 +35,7 @@
 #include <opm/material/fluidstates/BlackOilFluidState.hpp>
 #include <opm/material/common/ConditionalStorage.hpp>
 
+#include <opm/models/blackoil/blackoilbioeffectsmodules.hh>
 #include <opm/models/blackoil/blackoilbrinemodules.hh>
 #include <opm/models/blackoil/blackoilconvectivemixingmodule.hh>
 #include <opm/models/blackoil/blackoildiffusionmodule.hh>
@@ -42,7 +43,6 @@
 #include <opm/models/blackoil/blackoilenergymodules.hh>
 #include <opm/models/blackoil/blackoilextbomodules.hh>
 #include <opm/models/blackoil/blackoilfoammodules.hh>
-#include <opm/models/blackoil/blackoilmicpmodules.hh>
 #include <opm/models/blackoil/blackoilpolymermodules.hh>
 #include <opm/models/blackoil/blackoilproperties.hh>
 #include <opm/models/blackoil/blackoilsolventmodules.hh>
@@ -106,7 +106,8 @@ class BlackOilLocalResidualTPFA : public GetPropType<TypeTag, Properties::DiscLo
     static constexpr bool enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>();
     static constexpr bool enableDispersion = getPropValue<TypeTag, Properties::EnableDispersion>();
     static constexpr bool enableConvectiveMixing = getPropValue<TypeTag, Properties::EnableConvectiveMixing>();
-    static constexpr bool enableMICP = getPropValue<TypeTag, Properties::EnableMICP>();
+    static constexpr bool enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>();
+    static constexpr bool enableMICP = Indices::enableMICP;
 
     using SolventModule = BlackOilSolventModule<TypeTag>;
     using ExtboModule = BlackOilExtboModule<TypeTag>;
@@ -119,7 +120,7 @@ class BlackOilLocalResidualTPFA : public GetPropType<TypeTag, Properties::DiscLo
     using ConvectiveMixingModuleParam = typename ConvectiveMixingModule::ConvectiveMixingModuleParam;
 
     using DispersionModule = BlackOilDispersionModule<TypeTag, enableDispersion>;
-    using MICPModule = BlackOilMICPModule<TypeTag>;
+    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag>;
 
     using Toolbox = MathToolbox<Evaluation>;
 
@@ -161,7 +162,7 @@ public:
     static void computeStorage(Dune::FieldVector<LhsEval, numEq>& storage,
                                const IntensiveQuantities& intQuants)
     {
-        OPM_TIMEBLOCK_LOCAL(computeStorage);
+        OPM_TIMEBLOCK_LOCAL(computeStorage, Subsystem::Assembly);
         // retrieve the intensive quantities for the SCV at the specified point in time
         const auto& fs = intQuants.fluidState();
         storage = 0.0;
@@ -232,8 +233,8 @@ public:
         // deal with salt (if present)
         BrineModule::addStorage(storage, intQuants);
 
-        // deal with micp (if present)
-        MICPModule::addStorage(storage, intQuants);
+        // deal with bioeffects (if present)
+        BioeffectsModule::addStorage(storage, intQuants);
     }
 
     /*!
@@ -250,7 +251,7 @@ public:
                             const ResidualNBInfo& nbInfo,
                             const ModuleParams& moduleParams)
     {
-        OPM_TIMEBLOCK_LOCAL(computeFlux);
+        OPM_TIMEBLOCK_LOCAL(computeFlux, Subsystem::Assembly);
         flux = 0.0;
         darcy = 0.0;
 
@@ -272,7 +273,7 @@ public:
                             unsigned scvfIdx,
                             unsigned timeIdx)
     {
-        OPM_TIMEBLOCK_LOCAL(computeFlux);
+        OPM_TIMEBLOCK_LOCAL(computeFlux, Subsystem::Assembly);
         assert(timeIdx == 0);
 
         flux = 0.0;
@@ -344,7 +345,7 @@ public:
                                  const ResidualNBInfo& nbInfo,
                                  const ModuleParams& moduleParams)
     {
-        OPM_TIMEBLOCK_LOCAL(calculateFluxes);
+        OPM_TIMEBLOCK_LOCAL(calculateFluxes, Subsystem::Assembly);
         const Scalar Vin = nbInfo.Vin;
         const Scalar Vex = nbInfo.Vex;
         const Scalar distZg = nbInfo.dZg;
@@ -386,7 +387,7 @@ public:
             // Use arithmetic average (more accurate with harmonic, but that requires recomputing the transmissbility)
             Evaluation transMult = (intQuantsIn.rockCompTransMultiplier() +
                                     Toolbox::value(intQuantsEx.rockCompTransMultiplier())) / 2;
-            if constexpr (enableMICP) {
+            if constexpr (enableBioeffects) {
                 transMult *= (intQuantsIn.permFactor() + Toolbox::value(intQuantsEx.permFactor())) / 2;
             }
             Evaluation darcyFlux;
@@ -413,9 +414,9 @@ public:
                     EnergyModule::template
                         addPhaseEnthalpyFluxes_<Evaluation>(flux, phaseIdx, darcyFlux, up.fluidState());
                 }
-                if constexpr (enableMICP) {
-                    MICPModule::template
-                        addMICPFluxes_<Evaluation>(flux, darcyFlux, intQuantsIn);
+                if constexpr (enableBioeffects) {
+                    BioeffectsModule::template addBioeffectsFluxes_<Evaluation, Evaluation, IntensiveQuantities>
+                        (flux, phaseIdx, darcyFlux, up);
                 }
             } else {
                 const auto& invB = getInvB_<FluidSystem, FluidState, Scalar>(up.fluidState(), phaseIdx, pvtRegionIdx);
@@ -425,12 +426,11 @@ public:
                     EnergyModule::template
                         addPhaseEnthalpyFluxes_<Scalar>(flux,phaseIdx,darcyFlux, up.fluidState());
                 }
-                if constexpr (enableMICP) {
-                    MICPModule::template
-                        addMICPFluxes_<Scalar>(flux, darcyFlux, intQuantsEx);
+                if constexpr (enableBioeffects) {
+                    BioeffectsModule::template addBioeffectsFluxes_<Scalar, Evaluation, IntensiveQuantities>
+                        (flux, phaseIdx, darcyFlux, up);
                 }
             }
-
         }
 
         // deal with solvents (if present)
@@ -524,7 +524,7 @@ public:
         
         // apply the scaling for the urea equation in MICP
         if constexpr (enableMICP) {
-            MICPModule::applyScaling(flux);
+            BioeffectsModule::applyScaling(flux);
         }
     }
 
@@ -570,7 +570,7 @@ public:
                                         const IntensiveQuantities& insideIntQuants,
                                         unsigned globalSpaceIdx)
     {
-        OPM_TIMEBLOCK_LOCAL(computeBoundaryFluxFree);
+        OPM_TIMEBLOCK_LOCAL(computeBoundaryFluxFree, Subsystem::Assembly);
         std::array<short, numPhases> upIdx;
         std::array<short, numPhases> dnIdx;
         std::array<Evaluation, numPhases> volumeFlux;
@@ -679,7 +679,7 @@ public:
                                        const IntensiveQuantities& insideIntQuants,
                                        [[maybe_unused]] unsigned globalSpaceIdx)
     {
-        OPM_TIMEBLOCK_LOCAL(computeBoundaryThermal);
+        OPM_TIMEBLOCK_LOCAL(computeBoundaryThermal, Subsystem::Assembly);
         // only heat is allowed to flow through this boundary
         bdyFlux = 0.0;
 
@@ -714,12 +714,12 @@ public:
                               unsigned globalSpaceIdex,
                               unsigned timeIdx)
     {
-        OPM_TIMEBLOCK_LOCAL(computeSource);
+        OPM_TIMEBLOCK_LOCAL(computeSource, Subsystem::Assembly);
         // retrieve the source term intrinsic to the problem
         problem.source(source, globalSpaceIdex, timeIdx);
 
-        // deal with MICP (if present)
-        MICPModule::addSource(source, problem, insideIntQuants, globalSpaceIdex);
+        // deal with bioeffects (if present)
+        BioeffectsModule::addSource(source, problem, insideIntQuants, globalSpaceIdex);
 
         // scale the source term of the energy equation
         if constexpr (enableEnergy) {
@@ -736,8 +736,8 @@ public:
         source = 0.0;
         problem.addToSourceDense(source, globalSpaceIdex, timeIdx);
 
-        // deal with MICP (if present)
-        MICPModule::addSource(source, problem, insideIntQuants, globalSpaceIdex);
+        // deal with bioeffects (if present)
+        BioeffectsModule::addSource(source, problem, insideIntQuants, globalSpaceIdex);
 
         // scale the source term of the energy equation
         if constexpr (enableEnergy) {
@@ -753,12 +753,12 @@ public:
                        unsigned dofIdx,
                        unsigned timeIdx) const
     {
-        OPM_TIMEBLOCK_LOCAL(computeSource);
+        OPM_TIMEBLOCK_LOCAL(computeSource, Subsystem::Assembly);
         // retrieve the source term intrinsic to the problem
         elemCtx.problem().source(source, elemCtx, dofIdx, timeIdx);
 
-        // deal with MICP (if present)
-        MICPModule::addSource(source, elemCtx, dofIdx, timeIdx);
+        // deal with bioeffects (if present)
+        BioeffectsModule::addSource(source, elemCtx, dofIdx, timeIdx);
 
         // scale the source term of the energy equation
         if constexpr (enableEnergy) {

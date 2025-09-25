@@ -105,6 +105,7 @@ protected:
     using GlobalEqVector = GetPropType<TypeTag, Properties::GlobalEqVector>;
     using EqVector = GetPropType<TypeTag, Properties::EqVector>;
     using Vanguard = GetPropType<TypeTag, Properties::Vanguard>;
+    using Indices = GetPropType<TypeTag, Properties::Indices>;
 
     // Grid and world dimension
     enum { dim = GridView::dimension };
@@ -115,15 +116,16 @@ protected:
     enum { numPhases = FluidSystem::numPhases };
     enum { numComponents = FluidSystem::numComponents };
 
-    enum { enableConvectiveMixing = getPropValue<TypeTag, Properties::EnableConvectiveMixing>() };
+    enum { enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>() };
     enum { enableBrine = getPropValue<TypeTag, Properties::EnableBrine>() };
+    enum { enableConvectiveMixing = getPropValue<TypeTag, Properties::EnableConvectiveMixing>() };
     enum { enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>() };
     enum { enableDispersion = getPropValue<TypeTag, Properties::EnableDispersion>() };
     enum { enableEnergy = getPropValue<TypeTag, Properties::EnableEnergy>() };
     enum { enableExperiments = getPropValue<TypeTag, Properties::EnableExperiments>() };
     enum { enableExtbo = getPropValue<TypeTag, Properties::EnableExtbo>() };
     enum { enableFoam = getPropValue<TypeTag, Properties::EnableFoam>() };
-    enum { enableMICP = getPropValue<TypeTag, Properties::EnableMICP>() };
+    enum { enableMICP = Indices::enableMICP };
     enum { enablePolymer = getPropValue<TypeTag, Properties::EnablePolymer>() };
     enum { enablePolymerMolarWeight = getPropValue<TypeTag, Properties::EnablePolymerMW>() };
     enum { enableSaltPrecipitation = getPropValue<TypeTag, Properties::EnableSaltPrecipitation>() };
@@ -154,7 +156,6 @@ protected:
     using MaterialLaw = GetPropType<TypeTag, Properties::MaterialLaw>;
     using DofMapper = GetPropType<TypeTag, Properties::DofMapper>;
     using Evaluation = GetPropType<TypeTag, Properties::Evaluation>;
-    using Indices = GetPropType<TypeTag, Properties::Indices>;
     using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
     using WellModel = GetPropType<TypeTag, Properties::WellModel>;
     using AquiferModel = GetPropType<TypeTag, Properties::AquiferModel>;
@@ -789,7 +790,7 @@ public:
         unsigned globalSpaceIdx) const
     {
         using ContainerT = std::array<Evaluation, numPhases>;
-        OPM_TIMEBLOCK_LOCAL(updateRelperms);
+        OPM_TIMEBLOCK_LOCAL(updateRelperms, Subsystem::SatProps);
         {
             // calculate relative permeabilities. note that we store the result into the
             // mobility_ class attribute. the division by the phase viscosity happens later.
@@ -981,7 +982,7 @@ public:
                 unsigned globalDofIdx,
                 unsigned timeIdx) const
     {
-        OPM_TIMEBLOCK_LOCAL(eclProblemSource);
+        OPM_TIMEBLOCK_LOCAL(eclProblemSource, Subsystem::Assembly);
         rate = 0.0;
 
         // Add well contribution to source here.
@@ -1059,7 +1060,7 @@ public:
     template <class LhsEval>
     LhsEval rockCompPoroMultiplier(const IntensiveQuantities& intQuants, unsigned elementIdx) const
     {
-        OPM_TIMEBLOCK_LOCAL(rockCompPoroMultiplier);
+        OPM_TIMEBLOCK_LOCAL(rockCompPoroMultiplier, Subsystem::PvtProps);
         if (this->rockCompPoroMult_.empty() && this->rockCompPoroMultWc_.empty())
             return 1.0;
 
@@ -1115,7 +1116,7 @@ public:
     template <class LhsEval>
     LhsEval wellTransMultiplier(const IntensiveQuantities& intQuants, unsigned elementIdx) const
     {
-        OPM_TIMEBLOCK_LOCAL(wellTransMultiplier);
+        OPM_TIMEBLOCK_LOCAL(wellTransMultiplier, Subsystem::Wells);
         
         const bool implicit = !this->explicitRockCompaction_;
         double trans_mult = implicit ? this->simulator().problem().template computeRockCompTransMultiplier_<double>(intQuants, elementIdx)
@@ -1127,7 +1128,7 @@ public:
 
     std::pair<BCType, RateVector> boundaryCondition(const unsigned int globalSpaceIdx, const int directionId) const
     {
-        OPM_TIMEBLOCK_LOCAL(boundaryCondition);
+        OPM_TIMEBLOCK_LOCAL(boundaryCondition, Subsystem::Assembly);
         if (!nonTrivialBoundaryConditions_) {
             return { BCType::NONE, RateVector(0.0) };
         }
@@ -1238,7 +1239,7 @@ protected:
 
     bool updateMaxOilSaturation_(unsigned compressedDofIdx, const IntensiveQuantities& iq)
     {
-        OPM_TIMEBLOCK_LOCAL(updateMaxOilSaturation);
+        OPM_TIMEBLOCK_LOCAL(updateMaxOilSaturation, Subsystem::SatProps);
         const auto& fs = iq.fluidState();
         const Scalar So = decay<Scalar>(fs.saturation(refPressurePhaseIdx_()));
         auto& mos = this->maxOilSaturation_;
@@ -1269,7 +1270,7 @@ protected:
 
     bool updateMaxWaterSaturation_(unsigned compressedDofIdx, const IntensiveQuantities& iq)
     {
-        OPM_TIMEBLOCK_LOCAL(updateMaxWaterSaturation);
+        OPM_TIMEBLOCK_LOCAL(updateMaxWaterSaturation, Subsystem::SatProps);
         const auto& fs = iq.fluidState();
         const Scalar Sw = decay<Scalar>(fs.saturation(waterPhaseIdx));
         auto& mow = this->maxWaterSaturation_;
@@ -1297,7 +1298,7 @@ protected:
     }
 
     bool updateMinPressure_(unsigned compressedDofIdx, const IntensiveQuantities& iq){
-        OPM_TIMEBLOCK_LOCAL(updateMinPressure);
+        OPM_TIMEBLOCK_LOCAL(updateMinPressure, Subsystem::PvtProps);
         const auto& fs = iq.fluidState();
         const Scalar min_pressure = getValue(fs.pressure(refPressurePhaseIdx_()));
         auto& min_pressures = this->minRefPressure_;
@@ -1460,7 +1461,7 @@ protected:
 
     bool updateHysteresis_(unsigned compressedDofIdx, const IntensiveQuantities& iq)
     {
-        OPM_TIMEBLOCK_LOCAL(updateHysteresis_);
+        OPM_TIMEBLOCK_LOCAL(updateHysteresis_, Subsystem::SatProps);
         materialLawManager_->updateHysteresis(iq.fluidState(), compressedDofIdx);
         //TODO change materials to give a bool
         return true;
@@ -1637,7 +1638,7 @@ protected:
     template <class LhsEval>
     LhsEval computeRockCompTransMultiplier_(const IntensiveQuantities& intQuants, unsigned elementIdx) const
     {
-        OPM_TIMEBLOCK_LOCAL(computeRockCompTransMultiplier);
+        OPM_TIMEBLOCK_LOCAL(computeRockCompTransMultiplier, Subsystem::PvtProps);
         if (this->rockCompTransMult_.empty() && this->rockCompTransMultWc_.empty())
             return 1.0;
 

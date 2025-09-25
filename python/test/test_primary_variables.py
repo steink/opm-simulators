@@ -1,8 +1,7 @@
 import os
 import unittest
 from pathlib import Path
-from opm.simulators import BlackOilSimulator, GasWaterSimulator
-from .pytest_common import pushd
+from .pytest_common import pushd, create_black_oil_simulator, create_gas_water_simulator, create_onephase_simulator
 
 class TestBasic(unittest.TestCase):
     @classmethod
@@ -12,6 +11,7 @@ class TestBasic(unittest.TestCase):
         #   it up in multiple test functions
         test_dir = Path(os.path.dirname(__file__))
         cls.data_dir_bo = test_dir.parent.joinpath("test_data/SPE1CASE1a")
+        cls.data_dir_op = test_dir.parent.joinpath("test_data/SPE1CASE1")
         cls.data_dir_gw = test_dir.parent.joinpath("test_data/SPE1CASE2")
 
     # IMPORTANT: Since all the python unittests run in the same process we must be
@@ -24,7 +24,7 @@ class TestBasic(unittest.TestCase):
     # IMPORTANT:This test must be run first since it calls MPI_Init()
     def test_01_blackoil(self):
         with pushd(self.data_dir_bo):
-            sim = BlackOilSimulator("SPE1CASE1.DATA")
+            sim = create_black_oil_simulator(filename="SPE1CASE1.DATA")
             sim.setup_mpi(True, False)
             sim.step_init()
             sim.step()
@@ -51,10 +51,34 @@ class TestBasic(unittest.TestCase):
                 variable='brine')
             self.assertEqual(brine_meaning[0], brine_meaning_map["Disabled"])
 
+    def test_02_onephase(self):
+        with pushd(self.data_dir_op):
+            sim = create_onephase_simulator("SPE1CASE1_WATER.DATA")
+            sim.setup_mpi(False, False)
+            sim.step_init()
+            sim.step()
+            pressure = sim.get_primary_variable(variable='pressure')
+            self.assertAlmostEqual(pressure[0], 44780102.277570, delta=1e4, msg='value of pressure')
+            pressure_meaning = sim.get_primary_variable_meaning(
+                variable='pressure')
+            pressure_meaning_map = sim.get_primary_variable_meaning_map(
+                variable='pressure')
+            self.assertEqual(pressure_meaning[0], pressure_meaning_map["Pw"])
+            water_meaning = sim.get_primary_variable_meaning(
+                variable='water')
+            water_meaning_map = sim.get_primary_variable_meaning_map(
+                variable='water')
+            self.assertEqual(water_meaning[0], water_meaning_map["Disabled"])
+            brine_meaning = sim.get_primary_variable_meaning(
+                variable='brine')
+            brine_meaning_map = sim.get_primary_variable_meaning_map(
+                variable='brine')
+            self.assertEqual(brine_meaning[0], brine_meaning_map["Disabled"])
+
     # IMPORTANT: This test must be run last since it calls MPI_Finalize()
     def test_99_gaswater(self):
         with pushd(self.data_dir_gw):
-            sim = GasWaterSimulator("SPE1CASE2_GASWATER.DATA")
+            sim = create_gas_water_simulator(filename="SPE1CASE2_GASWATER.DATA")
             sim.setup_mpi(False, True)
             sim.step_init()
             sim.step()

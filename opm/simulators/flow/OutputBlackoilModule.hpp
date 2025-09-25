@@ -114,7 +114,8 @@ class OutputBlackOilModule : public GenericOutputBlackoilModule<GetPropType<Type
     static constexpr int oilCompIdx = FluidSystem::oilCompIdx;
     static constexpr int waterCompIdx = FluidSystem::waterCompIdx;
     enum { enableEnergy = getPropValue<TypeTag, Properties::EnableEnergy>() };
-    enum { enableMICP = getPropValue<TypeTag, Properties::EnableMICP>() };
+    enum { enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>() };
+    enum { enableMICP = Indices::enableMICP };
     enum { enableVapwat = getPropValue<TypeTag, Properties::EnableVapwat>() };
     enum { enableDisgasInWater = getPropValue<TypeTag, Properties::EnableDisgasInWater>() };
     enum { enableDissolvedGas = Indices::compositionSwitchIdx >= 0 };
@@ -149,7 +150,7 @@ public:
                    getPropValue<TypeTag, Properties::EnableBrine>(),
                    getPropValue<TypeTag, Properties::EnableSaltPrecipitation>(),
                    getPropValue<TypeTag, Properties::EnableExtbo>(),
-                   getPropValue<TypeTag, Properties::EnableMICP>())
+                   getPropValue<TypeTag, Properties::EnableBioeffects>())
         , simulator_(simulator)
         , collectOnIORank_(collectOnIORank)
     {
@@ -235,7 +236,7 @@ public:
      */
     void processElement(const ElementContext& elemCtx)
     {
-        OPM_TIMEBLOCK_LOCAL(processElement);
+        OPM_TIMEBLOCK_LOCAL(processElement, Subsystem::Output);
         if (!std::is_same<Discretization, EcfvDiscretization<TypeTag>>::value) {
             return;
         }
@@ -281,7 +282,7 @@ public:
 
     void processElementBlockData(const ElementContext& elemCtx)
     {
-        OPM_TIMEBLOCK_LOCAL(processElementBlockData);
+        OPM_TIMEBLOCK_LOCAL(processElementBlockData, Subsystem::Output);
         if (!std::is_same<Discretization, EcfvDiscretization<TypeTag>>::value) {
             return;
         }
@@ -444,7 +445,7 @@ public:
                        ActiveIndex&&         activeIndex,
                        CartesianIndex&&      cartesianIndex)
     {
-        OPM_TIMEBLOCK_LOCAL(processFluxes);
+        OPM_TIMEBLOCK_LOCAL(processFluxes, Subsystem::Output);
         const auto identifyCell = [&activeIndex, &cartesianIndex](const Element& elem)
             -> InterRegFlowMap::Cell
         {
@@ -675,7 +676,7 @@ private:
                              const IntensiveQuantities& intQuants,
                              const double               totVolume)
     {
-        OPM_TIMEBLOCK_LOCAL(updateFluidInPlace);
+        OPM_TIMEBLOCK_LOCAL(updateFluidInPlace, Subsystem::Output);
 
         this->updateTotalVolumesAndPressures_(globalDofIdx, intQuants, totVolume);
 
@@ -935,22 +936,25 @@ private:
             this->updateCO2InWater(globalDofIdx, pv, fs);
         }
 
-        if constexpr(enableMICP) {
-            const auto surfVolWat = pv * getValue(fs.invB(waterPhaseIdx));
+        if constexpr(enableBioeffects) {
+            const auto surfVolWat = pv * getValue(fs.saturation(waterPhaseIdx)) * 
+                                         getValue(fs.invB(waterPhaseIdx));
             if (this->fipC_.hasMicrobialMass()) {
                 this->updateMicrobialMass(globalDofIdx, intQuants, surfVolWat);
-            }
-            if (this->fipC_.hasOxygenMass()) {
-                this->updateOxygenMass(globalDofIdx, intQuants, surfVolWat);
-            }
-            if (this->fipC_.hasUreaMass()) {
-                this->updateUreaMass(globalDofIdx, intQuants, surfVolWat);
             }
             if (this->fipC_.hasBiofilmMass()) {
                 this->updateBiofilmMass(globalDofIdx, intQuants, totVolume);
             }
-            if (this->fipC_.hasCalciteMass()) {
-                this->updateCalciteMass(globalDofIdx, intQuants, totVolume);
+            if constexpr(enableMICP) {
+                if (this->fipC_.hasOxygenMass()) {
+                    this->updateOxygenMass(globalDofIdx, intQuants, surfVolWat);
+                }
+                if (this->fipC_.hasUreaMass()) {
+                    this->updateUreaMass(globalDofIdx, intQuants, surfVolWat);
+                }
+                if (this->fipC_.hasCalciteMass()) {
+                    this->updateCalciteMass(globalDofIdx, intQuants, totVolume);
+                }
             }
         }
 
@@ -1582,15 +1586,18 @@ private:
                                                  stdVolCo2 * rhoCO2 / stdMassTotal);
                     }, this->extboC_.allocated()
             },
-            Entry{[&micpC = this->micpC_](const Context& ectx)
+            Entry{[&bioeffectsC = this->bioeffectsC_](const Context& ectx)
                   {
-                      micpC.assign(ectx.globalDofIdx,
-                                   ectx.intQuants.microbialConcentration().value(),
-                                   ectx.intQuants.oxygenConcentration().value(),
-                                   ectx.intQuants.ureaConcentration().value(),
-                                   ectx.intQuants.biofilmConcentration().value(),
-                                   ectx.intQuants.calciteConcentration().value());
-                  }, this->micpC_.allocated()
+                      bioeffectsC.assign(ectx.globalDofIdx,
+                                         ectx.intQuants.microbialConcentration().value(),
+                                         ectx.intQuants.biofilmVolumeFraction().value());
+                      if (Indices::enableMICP) {
+                          bioeffectsC.assign(ectx.globalDofIdx,
+                                             ectx.intQuants.oxygenConcentration().value(),
+                                             ectx.intQuants.ureaConcentration().value(),
+                                             ectx.intQuants.calciteVolumeFraction().value());
+                      }
+                  }, this->bioeffectsC_.allocated()
             },
             Entry{[&rftC = this->rftC_,
                    &vanguard = this->simulator_.vanguard()](const Context& ectx)
@@ -2121,6 +2128,7 @@ private:
                               [&model = this->simulator_.model()](const Context& ectx)
                               {
                                   return getValue(ectx.intQuants.microbialConcentration()) *
+                                         getValue(ectx.fs.saturation(waterPhaseIdx)) *
                                          getValue(ectx.intQuants.porosity()) *
                                          model.dofTotalVolume(ectx.globalDofIdx);
                               }

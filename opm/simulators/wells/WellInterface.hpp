@@ -120,7 +120,8 @@ public:
     static constexpr bool has_watVapor = getPropValue<TypeTag, Properties::EnableVapwat>();
     static constexpr bool has_disgas_in_water = getPropValue<TypeTag, Properties::EnableDisgasInWater>();
     static constexpr bool has_saltPrecip = getPropValue<TypeTag, Properties::EnableSaltPrecipitation>();
-    static constexpr bool has_micp = getPropValue<TypeTag, Properties::EnableMICP>();
+    static constexpr bool has_bioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>();
+    static constexpr bool has_micp = Indices::enableMICP;
 
     // For the conversion between the surface volume rate and reservoir voidage rate
     using FluidState = BlackOilFluidState<Eval,
@@ -181,7 +182,6 @@ public:
                                      WellStateType& well_state,
                                      const GroupState<Scalar>& group_state,
                                      DeferredLogger& deferred_logger);
-
 
     virtual void computeWellRatesWithBhp(const Simulator& ebosSimulator,
                                          const Scalar& bhp,
@@ -368,6 +368,7 @@ protected:
     std::vector<Scalar> B_avg_;
     bool changed_to_stopped_this_step_ = false;
     bool thp_update_iterations = false;
+    int number_of_well_reopenings_{0};
 
     Scalar wpolymer() const;
     Scalar wfoam() const;

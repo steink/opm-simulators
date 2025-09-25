@@ -47,7 +47,7 @@ template<unsigned numSolventsV,
          bool enableBrine,
          unsigned PVOffset,
          unsigned canonicalCompIdx,
-         unsigned numMICPsV>
+         unsigned numBioCompV>
 struct BlackOilOnePhaseIndices
 {
     //! Is phase enabled or not
@@ -67,8 +67,11 @@ struct BlackOilOnePhaseIndices
     //! Shall energy be conserved?
     static constexpr bool enableEnergy = numEnergyV > 0;
 
-    //! Is MICP involved?
-    static constexpr bool enableMICP = numMICPsV > 0;
+    //! Is MICP involved? (microbes, oxygen, urea, biofilm, and calcite)
+    static constexpr bool enableMICP = numBioCompV == 5;
+
+    //! Biofilm effects on co2/h2store only for two phase indices  
+    static constexpr bool enableBiofilm = false;
 
     //! Number of solvent components to be considered
     static constexpr int numSolvents = enableSolvent ? numSolventsV : 0;
@@ -92,7 +95,10 @@ struct BlackOilOnePhaseIndices
     static constexpr int numPhases = 1;
 
     //! Number of MICP components to be considered
-    static constexpr int numMICPs = enableMICP ? numMICPsV : 0;
+    static constexpr int numMICPs = enableMICP ? numBioCompV : 0;
+
+    //! Number of biocomponents in the water phase
+    static constexpr int numBioInWat = enableMICP ? 3 : 0;
 
     //! The number of equations
     static constexpr int numEq = numPhases + numSolvents + numExtbos + numPolymers +
@@ -157,12 +163,12 @@ struct BlackOilOnePhaseIndices
         numMICPs > 2 ? oxygenConcentrationIdx + 1 : -1000;
 
     //! Index of the primary variable for the fourth MICP component
-    static constexpr int biofilmConcentrationIdx =
+    static constexpr int biofilmVolumeFractionIdx =
         numMICPs > 3 ? ureaConcentrationIdx + 1 : -1000;
 
     //! Index of the primary variable for the fifth MICP component
-    static constexpr int calciteConcentrationIdx =
-        numMICPs > 4 ? biofilmConcentrationIdx + 1 : -1000;
+    static constexpr int calciteVolumeFractionIdx =
+        numMICPs > 4 ? biofilmVolumeFractionIdx + 1 : -1000;
 
     //! Index of the primary variable for the foam
     static constexpr int foamConcentrationIdx =

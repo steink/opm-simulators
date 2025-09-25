@@ -577,7 +577,7 @@ set(FLOW_MODELS blackoil brine energy extbo foam gasoil gaswater
                 gasoil_energy brine_saltprecipitation
                 gaswater_saltprec_vapwat gaswater_saltprec_energy brine_precsalt_vapwat
                 blackoil_legacyassembly gasoildiffuse gaswater_dissolution
-                gaswater_dissolution_diffuse gaswater_energy gaswater_solvent)
+                gaswater_dissolution_diffuse gaswater_energy gaswater_solvent biofilm)
 set(FLOW_VARIANT_MODELS brine_energy onephase onephase_energy)
 
 set(FLOW_TGTS)
@@ -780,6 +780,8 @@ if(CUDA_FOUND)
                        gpuBlackOilFluidSystem
                        blackoilfluidstategpu
                        conditional_storage
+                       GpuPressureTransferPolicy
+                       deviceBlockOperations
                        PROPERTIES LABELS ${gpu_label})
   if(MPI_FOUND)
     set_tests_properties(GpuOwnerOverlapCopy PROPERTIES LABELS ${gpu_label})

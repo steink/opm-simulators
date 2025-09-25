@@ -100,6 +100,7 @@ class TpfaLinearizer
     using Stencil = GetPropType<TypeTag, Properties::Stencil>;
     using LocalResidual = GetPropType<TypeTag, Properties::LocalResidual>;
     using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
+    using Indices = GetPropType<TypeTag, Properties::Indices>;
 
     using Element = typename GridView::template Codim<0>::Entity;
     using ElementIterator = typename GridView::template Codim<0>::Iterator;
@@ -119,7 +120,7 @@ class TpfaLinearizer
     static constexpr bool enableEnergy = getPropValue<TypeTag, Properties::EnableEnergy>();
     static constexpr bool enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>();
     static constexpr bool enableDispersion = getPropValue<TypeTag, Properties::EnableDispersion>();
-    static constexpr bool enableMICP = getPropValue<TypeTag, Properties::EnableMICP>();
+    static const bool enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>();
 
     // copying the linearizer is not a good idea
     TpfaLinearizer(const TpfaLinearizer&) = delete;
@@ -546,7 +547,7 @@ private:
                               simulator_().problem().eclWriter().outputModule().getFlows().hasBlockFlows();
         const bool anyFlores = simulator_().problem().eclWriter().outputModule().getFlows().anyFlores();
         const bool dispersionActive = simulator_().vanguard().eclState().getSimulationConfig().rock_config().dispersion();
-        if (((!anyFlows || !flowsInfo_.empty()) && (!anyFlores || !floresInfo_.empty())) && (!dispersionActive && !enableMICP)) {
+        if (((!anyFlows || !flowsInfo_.empty()) && (!anyFlores || !floresInfo_.empty())) && (!dispersionActive && !enableBioeffects)) {
             return;
         }
         const auto& model = model_();
@@ -572,7 +573,7 @@ private:
         if (anyFlores) {
             floresInfo_.reserve(numCells, 6 * numCells);
         }
-        if (dispersionActive || enableMICP) {
+        if (dispersionActive || enableBioeffects) {
             velocityInfo_.reserve(numCells, 6 * numCells);
         }
 
@@ -618,7 +619,7 @@ private:
                 if (anyFlores) {
                     floresInfo_.appendRow(loc_flinfo.begin(), loc_flinfo.end());
                 }
-                if (dispersionActive || enableMICP) {
+                if (dispersionActive || enableBioeffects) {
                     velocityInfo_.appendRow(loc_vlinfo.begin(), loc_vlinfo.end());
                 }
             }
@@ -657,23 +658,23 @@ public:
 #pragma omp parallel for
 #endif
         for (unsigned globI = 0; globI < numCells; ++globI) {
-            OPM_TIMEBLOCK_LOCAL(linearizationForEachCell);
+            OPM_TIMEBLOCK_LOCAL(linearizationForEachCell, Subsystem::Assembly);
             const auto& nbInfos = neighborInfo_[globI];
             ADVectorBlock adres(0.0);
             ADVectorBlock darcyFlux(0.0);
             const IntensiveQuantities& intQuantsIn = model_().intensiveQuantities(globI, /*timeIdx*/ 0);
             // Flux term.
             {
-                OPM_TIMEBLOCK_LOCAL(fluxCalculationForEachCell);
+                OPM_TIMEBLOCK_LOCAL(fluxCalculationForEachCell, Subsystem::Assembly);
                 short loc = 0;
                 for (const auto& nbInfo : nbInfos) {
-                    OPM_TIMEBLOCK_LOCAL(fluxCalculationForEachFace);
+                    OPM_TIMEBLOCK_LOCAL(fluxCalculationForEachFace, Subsystem::Assembly);
                     const unsigned globJ = nbInfo.neighbor;
                     assert(globJ != globI);
                     adres = 0.0;
                     darcyFlux = 0.0;
                     const IntensiveQuantities& intQuantsEx = model_().intensiveQuantities(globJ, /*timeIdx*/ 0);
-                    LocalResidual::computeFlux(adres,darcyFlux, globI, globJ, intQuantsIn,
+                    LocalResidual::computeFlux(adres, darcyFlux, globI, globJ, intQuantsIn,
                                                intQuantsEx, nbInfo.res_nbinfo, problem_().moduleParams());
                     adres *= nbInfo.res_nbinfo.faceArea;
                     if (enableFlows) {
@@ -742,7 +743,7 @@ private:
 #pragma omp parallel for
 #endif
         for (unsigned ii = 0; ii < numCells; ++ii) {
-            OPM_TIMEBLOCK_LOCAL(linearizationForEachCell);
+            OPM_TIMEBLOCK_LOCAL(linearizationForEachCell, Subsystem::Assembly);
             const unsigned globI = domain.cells[ii];
             const auto& nbInfos = neighborInfo_[globI];
             VectorBlock res(0.0);
@@ -753,10 +754,10 @@ private:
 
             // Flux term.
             {
-                OPM_TIMEBLOCK_LOCAL(fluxCalculationForEachCell);
+                OPM_TIMEBLOCK_LOCAL(fluxCalculationForEachCell, Subsystem::Assembly);
                 short loc = 0;
                 for (const auto& nbInfo : nbInfos) {
-                    OPM_TIMEBLOCK_LOCAL(fluxCalculationForEachFace);
+                    OPM_TIMEBLOCK_LOCAL(fluxCalculationForEachFace, Subsystem::Assembly);
                     const unsigned globJ = nbInfo.neighbor;
                     assert(globJ != globI);
                     res = 0.0;
@@ -764,10 +765,10 @@ private:
                     adres = 0.0;
                     darcyFlux = 0.0;
                     const IntensiveQuantities& intQuantsEx = model_().intensiveQuantities(globJ, /*timeIdx*/ 0);
-                    LocalResidual::computeFlux(adres,darcyFlux, globI, globJ, intQuantsIn, intQuantsEx,
-                                               nbInfo.res_nbinfo,  problem_().moduleParams());
+                    LocalResidual::computeFlux(adres, darcyFlux, globI, globJ, intQuantsIn, intQuantsEx,
+                                               nbInfo.res_nbinfo, problem_().moduleParams());
                     adres *= nbInfo.res_nbinfo.faceArea;
-                    if (dispersionActive || enableMICP) {
+                    if (dispersionActive || enableBioeffects) {
                         for (unsigned phaseIdx = 0; phaseIdx < numEq; ++phaseIdx) {
                             velocityInfo_[globI][loc].velocity[phaseIdx] =
                                 darcyFlux[phaseIdx].value() / nbInfo.res_nbinfo.faceArea;
@@ -789,7 +790,7 @@ private:
             const Scalar storefac = volume / dt;
             adres = 0.0;
             {
-                OPM_TIMEBLOCK_LOCAL(computeStorage);
+                OPM_TIMEBLOCK_LOCAL(computeStorage, Subsystem::Assembly);
                 LocalResidual::computeStorage(adres, intQuantsIn);
             }
             setResAndJacobi(res, bMat, adres);
@@ -824,7 +825,7 @@ private:
                 res -= model_().cachedStorage(globI, 1);
             }
             else {
-                OPM_TIMEBLOCK_LOCAL(computeStorage0);
+                OPM_TIMEBLOCK_LOCAL(computeStorage0, Subsystem::Assembly);
                 Dune::FieldVector<Scalar, numEq> tmp;
                 const IntensiveQuantities intQuantOld = model_().intensiveQuantities(globI, 1);
                 LocalResidual::computeStorage(tmp, intQuantOld);

@@ -54,14 +54,14 @@ struct PolymerSolutionContainer {
 
 //! \brief Struct holding MICP extension data.
 template<class Scalar>
-struct MICPSolutionContainer {
+struct BioeffectsSolutionContainer {
     std::vector<Scalar> microbialConcentration;
     std::vector<Scalar> oxygenConcentration;
     std::vector<Scalar> ureaConcentration;
-    std::vector<Scalar> biofilmConcentration;
-    std::vector<Scalar> calciteConcentration;
+    std::vector<Scalar> biofilmVolumeFraction;
+    std::vector<Scalar> calciteVolumeFraction;
 
-    static MICPSolutionContainer serializationTestObject();
+    static BioeffectsSolutionContainer serializationTestObject();
 
     //! \brief Resize vectors and zero initialize.
     void resize(const unsigned numElems);
@@ -72,11 +72,11 @@ struct MICPSolutionContainer {
         serializer(microbialConcentration);
         serializer(oxygenConcentration);
         serializer(ureaConcentration);
-        serializer(biofilmConcentration);
-        serializer(calciteConcentration);
+        serializer(biofilmVolumeFraction);
+        serializer(calciteVolumeFraction);
     }
 
-    bool operator==(const MICPSolutionContainer& rhs) const;
+    bool operator==(const BioeffectsSolutionContainer& rhs) const;
 };
 
 } // namespace Opm

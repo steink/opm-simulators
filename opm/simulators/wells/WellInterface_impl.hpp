@@ -202,17 +202,20 @@ namespace Opm
         const auto& well = this->well_ecl_;
         auto& ws = well_state.well(this->index_of_well_);
         std::string from;
+        bool is_grup = false;
         if (well.isInjector()) {
             from = WellInjectorCMode2String(ws.injection_cmode);
+            is_grup = ws.injection_cmode == Well::InjectorCMode::GRUP;
         } else {
             from = WellProducerCMode2String(ws.production_cmode);
+            is_grup = ws.production_cmode == Well::ProducerCMode::GRUP;
         }
 
         const int episodeIdx = simulator.episodeIndex();
         const int iterationIdx = simulator.model().newtonMethod().numIterations();
         const int nupcol = schedule[episodeIdx].nupcol();
         const bool oscillating = std::count(this->well_control_log_.begin(), this->well_control_log_.end(), from) >= this->param_.max_number_of_well_switches_;
-        if (oscillating) {
+        if (oscillating && !is_grup) { // we would like to avoid ending up as GRUP
             // only output first time
             const bool output = std::count(this->well_control_log_.begin(), this->well_control_log_.end(), from) == this->param_.max_number_of_well_switches_;
             if (output) {
@@ -574,7 +577,6 @@ namespace Opm
     {
         OPM_TIMEFUNCTION();
         const auto& summary_state = simulator.vanguard().summaryState();
-        bool is_operable = true;
         bool converged = true;
         auto& ws = well_state.well(this->index_of_well_);
         const Scalar ratesum = std::accumulate(ws.surface_rates.begin(), ws.surface_rates.end(), static_cast<Scalar>(0.0));
@@ -587,10 +589,13 @@ namespace Opm
                 // no intersection with ipr
                 const auto msg = fmt::format("estimateOperableBhp: Did not find operable BHP for well {}", this->name());
                 deferred_logger.debug(msg);
-                is_operable = false;
+                // well can't operate using explicit fractions stop the well
                 // solve with zero rates
-                solveWellWithZeroRate(simulator, dt, well_state, deferred_logger);
+                converged = solveWellWithZeroRate(simulator, dt, well_state, deferred_logger);
                 this->stopWell();
+                this->operability_status_.can_obtain_bhp_with_thp_limit = false;
+                this->operability_status_.obey_thp_limit_under_bhp_limit = false;
+                return converged;
             } else {
                 // solve well with the estimated target bhp (or limit)
                 ws.thp = this->getTHPConstraint(summary_state);
@@ -600,9 +605,8 @@ namespace Opm
             }
         }
         // solve well-equation
-        if (is_operable) {
-            converged = this->iterateWellEqWithSwitching(simulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
-        }
+        converged = this->iterateWellEqWithSwitching(simulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
+
 
         const bool isThp = ws.production_cmode == Well::ProducerCMode::THP;
         //const bool has_thp = this->wellHasTHPConstraints(summary_state);
@@ -636,11 +640,13 @@ namespace Opm
             this->openWell();
             auto bhp_target = estimateOperableBhp(simulator, dt, well_state, prod_controls, summary_state, deferred_logger);
             if (!bhp_target.has_value()) {
-                // well can't operate using explicit fractions
-                is_operable = false;
                 // solve with zero rate
+                // well can't operate using explicit fractions stop the well
                 converged = solveWellWithZeroRate(simulator, dt, well_state, deferred_logger);
                 this->stopWell();
+                this->operability_status_.can_obtain_bhp_with_thp_limit = false;
+                this->operability_status_.obey_thp_limit_under_bhp_limit = false;
+                return converged;
             } else {
                 // solve well with the estimated target bhp (or limit)
                 const Scalar bhp = std::max(bhp_target.value(),
@@ -660,9 +666,8 @@ namespace Opm
             }
         }
         // update operability
-        is_operable = is_operable && !this->wellIsStopped();
-        this->operability_status_.can_obtain_bhp_with_thp_limit = is_operable;
-        this->operability_status_.obey_thp_limit_under_bhp_limit = is_operable;
+        this->operability_status_.can_obtain_bhp_with_thp_limit = !this->wellIsStopped();
+        this->operability_status_.obey_thp_limit_under_bhp_limit = !this->wellIsStopped();
         return converged;
     }
 
@@ -926,6 +931,25 @@ namespace Opm
                             [](Scalar rate) { return rate != Scalar(0.0); });
 
             this->operability_status_.solvable = true;
+            if (number_of_well_reopenings_ >= this->param_.max_well_status_switch_) {
+                // only output the first time
+                if (number_of_well_reopenings_ == this->param_.max_well_status_switch_) {
+                    const std::string msg = fmt::format("well {} is oscillating between open and stop. \n"
+                                                    "We don't allow for more than {} re-openings "
+                                                    "and the well is therefore kept stopped.",
+                                                     this->name(), number_of_well_reopenings_);
+                    deferred_logger.debug(msg);
+                }
+                this->stopWell();
+                changed_to_stopped_this_step_ = true;
+                bool converged_zero_rate = this->solveWellWithZeroRate(simulator, dt, well_state, deferred_logger);
+                if (this->param_.shut_unsolvable_wells_ && !converged_zero_rate ) {
+                    this->operability_status_.solvable = false;
+                }
+                // we increse the number of reopenings to avoid output in the next iteration
+                number_of_well_reopenings_++;
+                return;
+            }
             bool converged = this->iterateWellEquations(simulator, dt, well_state, group_state, deferred_logger);
 
             if (converged) {
@@ -937,6 +961,7 @@ namespace Opm
                     this->operability_status_.resetOperability();
                     this->openWell();
                     deferred_logger.debug("    " + this->name() + " is re-opened after being stopped during local solve");
+                    number_of_well_reopenings_++;
                 }
             } else {
                 // unsolvable wells are treated as not operable and will not be solved for in this iteration.
@@ -964,17 +989,21 @@ namespace Opm
             }
         }
         this->changed_to_open_this_step_ = false;
-        const bool well_operable = this->operability_status_.isOperableAndSolvable();
+        changed_to_stopped_this_step_ = false;
 
-        if (!well_operable && old_well_operable) {
-            deferred_logger.debug(" well " + this->name() + " gets STOPPED during iteration ");
+        const bool well_operable = this->operability_status_.isOperableAndSolvable();
+        if (!well_operable) {
             this->stopWell();
-            changed_to_stopped_this_step_ = true;
-        } else if (well_operable && !old_well_operable) {
-            deferred_logger.debug(" well " + this->name() + " gets REVIVED during iteration ");
+            if (old_well_operable) {
+                deferred_logger.debug(" well " + this->name() + " gets STOPPED during iteration ");
+                changed_to_stopped_this_step_ = true;
+            }
+        } else if (well_state.isOpen(this->name())) {
             this->openWell();
-            changed_to_stopped_this_step_ = false;
-            this->changed_to_open_this_step_ = true;
+            if (!old_well_operable) {
+                deferred_logger.debug(" well " + this->name() + " gets REVIVED during iteration ");
+                this->changed_to_open_this_step_ = true;
+            }
         }
     }
 
@@ -1783,7 +1812,7 @@ namespace Opm
               const Scalar                   trans_mult,
               const SingleWellStateType& ws) const
     {
-        OPM_TIMEFUNCTION_LOCAL();
+        OPM_TIMEFUNCTION_LOCAL(Subsystem::Wells);
         // Add a Forchheimer term to the gas phase CTF if the run uses
         // either of the WDFAC or the WDFACCOR keywords.
         if (static_cast<std::size_t>(perf) >= this->well_cells_.size()) {
