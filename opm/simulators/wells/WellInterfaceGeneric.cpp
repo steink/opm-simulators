@@ -960,18 +960,25 @@ void WellInterfaceGeneric<Scalar, IndexTraits>::checkGroupControlFeasibility(con
                                                                              const Well::ProductionControls& prod_controls,
                                                                              const std::vector<Scalar>& scaling,
                                                                              DeferredLogger& deferred_logger) const
-    {
+{
+    // Avoid problematic group control cases like e.g., WRAT for well with approx zero
+    // water potential. Switch to BHP or THP control in such cases.
     auto& ws = well_state.well(this->index_of_well_);
-    //const bool isGroupControl = ws.production_cmode == Well::ProducerCMode::GRUP || ws.injection_cmode == Well::InjectorCMode::GRUP;
-    if (!wellUnderGroupControl(ws) || this->isInjector() || ws.production_cmode_group_translated == Well::ProducerCMode::CMODE_UNDEFINED) {
-        // we do not check group control here
+    if (!wellUnderGroupControl(ws) || this->isInjector() || 
+        ws.production_cmode_group_translated == Well::ProducerCMode::CMODE_UNDEFINED ||
+        ws.production_cmode_group_translated == Well::ProducerCMode::RESV) {
         return;
     }
     const auto& pu = this->phaseUsage();
     auto weighted_rates = ws.surface_rates;
-    const auto sum_rates = std::accumulate(weighted_rates.begin(), weighted_rates.end(), 0.0);
-    if (sum_rates == 0.0) {
+    auto rate_sum = std::accumulate(weighted_rates.begin(), weighted_rates.end(), 0.0);
+    if (rate_sum == 0.0) {
         weighted_rates = ws.prev_surface_rates;
+        rate_sum = std::accumulate(weighted_rates.begin(), weighted_rates.end(), 0.0);
+        if (rate_sum == 0.0) {
+            // should not happen, but just in case
+            return;
+        }
     }
     for (size_t i = 0; i < weighted_rates.size(); ++i) {
         weighted_rates[i] *= scaling[i];
@@ -992,9 +999,9 @@ void WellInterfaceGeneric<Scalar, IndexTraits>::checkGroupControlFeasibility(con
         cmode_rate += weighted_rates[gas_pos];
     }
 
-    //Use well tolerance to determine if the rate is "too small"
+    // Use well tolerance to determine if the rate is "too small"
+    // Difficult to say what is a good tolerance here
     const Scalar tol = this->param_.tolerance_wells_;
-    const Scalar rate_sum = std::accumulate(weighted_rates.begin(), weighted_rates.end(), 0.0);
     if (cmode_rate >= tol*rate_sum) { // negative rates
         // Switch to "more feasible" control mode
         if (this->wellHasTHPConstraints(summary_state)) {
