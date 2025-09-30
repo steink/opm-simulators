@@ -236,10 +236,11 @@ protected:
                                      const bool checkOperability,
                                      DeferredLogger& deferred_logger);
 
-    void prepareForPotentialCalculations(const SummaryState& summary_state,
-                                         WellStateType& well_state,
-                                         Well::InjectionControls& inj_controls,
-                                         Well::ProductionControls& prod_controls) const;
+    // Remove all other controls than THP and BHP
+    void onlyKeepBHPandTHPcontrols(const SummaryState& summary_state,
+                                   WellStateType& well_state,
+                                   Well::InjectionControls& inj_controls,
+                                   Well::ProductionControls& prod_controls) const;
 
     void checkGroupControlFeasibility(const SummaryState &summary_state, 
                                       WellStateType& well_state,

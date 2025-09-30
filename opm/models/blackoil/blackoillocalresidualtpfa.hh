@@ -415,8 +415,12 @@ public:
                         addPhaseEnthalpyFluxes_<Evaluation>(flux, phaseIdx, darcyFlux, up.fluidState());
                 }
                 if constexpr (enableBioeffects) {
-                    BioeffectsModule::template addBioeffectsFluxes_<Evaluation, Evaluation, IntensiveQuantities>
-                        (flux, phaseIdx, darcyFlux, up);
+                    BioeffectsModule::template
+                        addBioeffectsFluxes_<Evaluation>(flux, phaseIdx, darcyFlux, up);
+                }
+                if constexpr (enableBrine) {
+                    BrineModule::template
+                        addBrineFluxes_<Evaluation, FluidState>(flux, phaseIdx, darcyFlux, up.fluidState());
                 }
             } else {
                 const auto& invB = getInvB_<FluidSystem, FluidState, Scalar>(up.fluidState(), phaseIdx, pvtRegionIdx);
@@ -424,11 +428,15 @@ public:
                 evalPhaseFluxes_<Scalar>(flux, phaseIdx, pvtRegionIdx, surfaceVolumeFlux, up.fluidState());
                 if constexpr (enableEnergy) {
                     EnergyModule::template
-                        addPhaseEnthalpyFluxes_<Scalar>(flux,phaseIdx,darcyFlux, up.fluidState());
+                        addPhaseEnthalpyFluxes_<Scalar>(flux, phaseIdx, darcyFlux, up.fluidState());
                 }
                 if constexpr (enableBioeffects) {
-                    BioeffectsModule::template addBioeffectsFluxes_<Scalar, Evaluation, IntensiveQuantities>
-                        (flux, phaseIdx, darcyFlux, up);
+                    BioeffectsModule::template
+                        addBioeffectsFluxes_<Scalar>(flux, phaseIdx, darcyFlux, up);
+                }
+                if constexpr (enableBrine) {
+                    BrineModule::template
+                        addBrineFluxes_<Scalar, FluidState>(flux, phaseIdx, darcyFlux, up.fluidState());
                 }
             }
         }
@@ -490,11 +498,6 @@ public:
         static_assert(!enableFoam,
                       "Relevant computeFlux() method must be implemented for this module before enabling.");
         // FoamModule::computeFlux(flux, elemCtx, scvfIdx, timeIdx);
-
-        // deal with salt (if present)
-        static_assert(!enableBrine,
-                      "Relevant computeFlux() method must be implemented for this module before enabling.");
-        // BrineModule::computeFlux(flux, elemCtx, scvfIdx, timeIdx);
 
         // deal with diffusion (if present). opm-models expects per area flux (added in the tmpdiffusivity).
         if constexpr (enableDiffusion) {
