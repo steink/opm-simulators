@@ -954,6 +954,64 @@ prepareForPotentialCalculations(const SummaryState& summary_state,
     }    
 }
 
+template<typename Scalar, typename IndexTraits>
+void WellInterfaceGeneric<Scalar, IndexTraits>::checkGroupControlFeasibility(const SummaryState& summary_state,
+                                                                             WellState<Scalar, IndexTraits>& well_state,
+                                                                             const Well::ProductionControls& prod_controls,
+                                                                             const std::vector<Scalar>& scaling,
+                                                                             DeferredLogger& deferred_logger) const
+    {
+    auto& ws = well_state.well(this->index_of_well_);
+    //const bool isGroupControl = ws.production_cmode == Well::ProducerCMode::GRUP || ws.injection_cmode == Well::InjectorCMode::GRUP;
+    if (!wellUnderGroupControl(ws) || this->isInjector() || ws.production_cmode_group_translated == Well::ProducerCMode::CMODE_UNDEFINED) {
+        // we do not check group control here
+        return;
+    }
+    const auto& pu = this->phaseUsage();
+    auto weighted_rates = ws.surface_rates;
+    const auto sum_rates = std::accumulate(weighted_rates.begin(), weighted_rates.end(), 0.0);
+    if (sum_rates == 0.0) {
+        weighted_rates = ws.prev_surface_rates;
+    }
+    for (size_t i = 0; i < weighted_rates.size(); ++i) {
+        weighted_rates[i] *= scaling[i];
+    }
+    const auto& gcmode = ws.production_cmode_group_translated;
+    // scaling
+    Scalar cmode_rate = 0.0;
+    if (gcmode == Well::ProducerCMode::ORAT || gcmode == Well::ProducerCMode::LRAT) {
+        const int oil_pos = pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx);
+        cmode_rate += weighted_rates[oil_pos];
+    }
+    if (gcmode == Well::ProducerCMode::WRAT || gcmode == Well::ProducerCMode::LRAT) {
+        const int water_pos = pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx);
+        cmode_rate += weighted_rates[water_pos];
+    }
+    if (gcmode == Well::ProducerCMode::GRAT) {
+        const int gas_pos = pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx);
+        cmode_rate += weighted_rates[gas_pos];
+    }
+
+    //Use well tolerance to determine if the rate is "too small"
+    const Scalar tol = this->param_.tolerance_wells_;
+    const Scalar rate_sum = std::accumulate(weighted_rates.begin(), weighted_rates.end(), 0.0);
+    if (cmode_rate >= tol*rate_sum) { // negative rates
+        // Switch to "more feasible" control mode
+        if (this->wellHasTHPConstraints(summary_state)) {
+            // Switch to THP control
+            ws.production_cmode = Well::ProducerCMode::THP;
+            ws.thp = this->getTHPConstraint(summary_state);
+        } else {
+            ws.production_cmode = Well::ProducerCMode::BHP;
+            ws.bhp = prod_controls.bhp_limit;
+        }
+        std::string from = WellProducerCMode2String(gcmode.value());
+        std::string to = WellProducerCMode2String(ws.production_cmode);
+        deferred_logger.info(fmt::format("Well {} control mode GROUP ({}), but switched {} due to low phase fraction [{}, {}, {}]",
+                                         this->name(), from, to, ws.surface_rates[0], ws.surface_rates[1], ws.surface_rates[2]));
+        ws.prevent_group_control = true;
+    }
+}
 
 template class WellInterfaceGeneric<double, BlackOilDefaultFluidSystemIndices>;
 

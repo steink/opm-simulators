@@ -2414,6 +2414,9 @@ namespace Opm
         // well needs to be set operable or else solving/updating of re-opened wells is skipped
         this->operability_status_.resetOperability();
         this->operability_status_.solvable = true;
+        if (allow_switching && well_state.well(this->index_of_well_).production_cmode == Well::ProducerCMode::GRUP) {
+            this->checkGroupControlFeasibility(summary_state, well_state, prod_controls, Base::B_avg_, deferred_logger);
+        }
         do {
             its_since_last_switch++;
             if (allow_switching && its_since_last_switch >= min_its_after_switch && status_switch_count < max_status_switch){
