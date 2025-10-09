@@ -1582,7 +1582,7 @@ namespace Opm
             deferred_logger.debug(sstr.str(), OpmLog::defaultDebugVerbosityLevel + (it == 0));
         } else {
             std::ostringstream sstr;
-            sstr << "     Well " << this->name() << " did not converge in " << it << " inner iterations.";
+            sstr << "     iterateWellEqWithControl: Well " << this->name() << " did not converge in " << it << " inner iterations.";
 #define EXTRA_DEBUG_MSW 0
 #if EXTRA_DEBUG_MSW
             sstr << "***** Outputting the residual history for well " << this->name() << " during inner iterations:";
@@ -1713,6 +1713,7 @@ namespace Opm
                     final_check = true;
                     its_since_last_switch = min_its_after_switch;
                 } else {
+
                     break;
                 }
             }
@@ -1753,6 +1754,7 @@ namespace Opm
         }
 
         if (converged) {
+            well_state.well(this->index_of_well_).converged = true;
             if (allow_switching){
                 // update operability if status change
                 const bool is_stopped = this->wellIsStopped();
@@ -1771,12 +1773,19 @@ namespace Opm
             }
             deferred_logger.debug(message, OpmLog::defaultDebugVerbosityLevel + ((it == 0) && (switch_count == 0)));
         } else {
+            well_state.well(this->index_of_well_).converged = false;
             this->wellStatus_ = well_status_orig;
             this->operability_status_ = operability_orig;            
-            const std::string message = fmt::format("   Well {} did not converge in {} inner iterations ("
+            const std::string message = fmt::format("   iterateWellEqWithSwitching (MSW): Well {} did not converge in {} inner iterations ("
                 "{} switches, {} status changes).", this->name(), it, switch_count, status_switch_count);
             deferred_logger.debug(message);
             this->primary_variables_.outputLowLimitPressureSegments(deferred_logger);
+
+            const auto& ws = well_state.well(this->index_of_well_);
+            const Scalar thp_limit = this->wellHasTHPConstraints(summary_state) ? this->getTHPConstraint(summary_state) : Scalar(-1.0);
+            const Scalar grp_target = ws.group_target.has_value() ? ws.group_target.value() : Scalar(-1.0);
+            const std::string thp_msg = fmt::format("   THP limit for well {} is {} barsa, group target is {}", this->name(), unit::convert::to(thp_limit, unit::barsa), grp_target);
+            deferred_logger.debug(thp_msg);
         }
 
         return converged;

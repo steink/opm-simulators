@@ -210,6 +210,7 @@ initSingleProducer(const Well& well,
     }
 
     ws.update_producer_targets(well, summary_state);
+    ws.converged = false;
 }
 
 template<typename Scalar, typename IndexTraits>

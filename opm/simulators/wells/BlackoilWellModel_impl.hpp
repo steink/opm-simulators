@@ -438,8 +438,12 @@ namespace Opm {
             // This is done only for producers, as injectors will only have a single
             // nonzero phase anyway.
             for (const auto& well : well_container_) {
-                if (well->isProducer() && !well->wellIsStopped()) {
-                    well->initializeProducerWellState(simulator_, this->wellState(), local_deferredLogger);
+                if (well->isProducer()) {
+                    const bool wasInitialized = well->initializeProducerWellState(simulator_, this->wellState(), local_deferredLogger);
+                    if (wasInitialized) {
+                        well->scaleSegmentRatesAndPressure(this->wellState());
+                        well->initialSolveWellWithBhp(this->simulator_, this->wellState(), local_deferredLogger);
+                    }
                 }
             }
         }

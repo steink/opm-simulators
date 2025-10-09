@@ -519,7 +519,7 @@ namespace Opm
             if (!this->param_.local_well_solver_control_switching_){
                 converged = this->iterateWellEqWithControl(simulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
             } else {
-                if (this->param_.use_implicit_ipr_ && this->well_ecl_.isProducer() && (well_state.well(this->index_of_well_).status == WellStatus::OPEN)) {
+                if (this->param_.use_implicit_ipr_ && this->well_ecl_.isProducer()) {
                     converged = solveWellWithOperabilityCheck(simulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
                 } else {
                     converged = this->iterateWellEqWithSwitching(simulator, dt, inj_controls, prod_controls, well_state, group_state, deferred_logger);
@@ -671,8 +671,16 @@ namespace Opm
                         const SummaryState& summary_state,
                         DeferredLogger& deferred_logger)
     {
+        const auto& ws = well_state.well(this->index_of_well_);
+        const auto msg = fmt::format("--- Estimating operability for well {}", this->name());
+        deferred_logger.debug(msg);
+        const auto msg9 = fmt::format("--- Well {} previous rates: [{}, {}, {}]", this->name(), ws.prev_surface_rates[0], ws.prev_surface_rates[1], ws.prev_surface_rates[2]);
+        deferred_logger.debug(msg9);
+
         if (!this->wellHasTHPConstraints(summary_state)) {
             const Scalar bhp_limit = WellBhpThpCalculator(*this).mostStrictBhpFromBhpLimits(summary_state);
+            const auto msg6 = fmt::format("--- Well {} has no thp-limit, attempting BHP control with limit {}", this->name(), bhp_limit);
+            deferred_logger.debug(msg6);
             const bool converged = solveWellWithBhp(simulator, dt, bhp_limit, well_state, deferred_logger);
             if (!converged || this->wellIsStopped()) {
                 return std::nullopt;
@@ -684,15 +692,35 @@ namespace Opm
         // Given an unconverged well or closed well, estimate an operable bhp (if any)
         // Get minimal bhp from vfp-curve
         Scalar bhp_min =  WellBhpThpCalculator(*this).calculateMinimumBhpFromThp(well_state, this->well_ecl_, summary_state, this->getRefDensity());
+        const auto msg1 = fmt::format("--- Well {} minimum BHP from THP ({}) estimated to {}, solving with it ...", this->name(), ws.thp, bhp_min);
+        deferred_logger.debug(msg1);
         // Solve
         const bool converged = solveWellWithBhp(simulator, dt, bhp_min, well_state, deferred_logger);
         if (!converged || this->wellIsStopped()) {
+            const auto msg2 = fmt::format("--- Well {} was stopped or did not converge", this->name());
+            deferred_logger.debug(msg2);
             return std::nullopt;
         }
+        const auto msg8 = fmt::format("--- Well {} converged with rate: [{}, {}, {}]", this->name(), ws.surface_rates[0], ws.surface_rates[1], ws.surface_rates[2]);
+        deferred_logger.debug(msg8);
         this->updateIPRImplicit(simulator, well_state, deferred_logger);
+
+        const auto msg3 = fmt::format("--- Well {} ipr_a: [{}, {}, {}], ipr_b: [{}, {}, {}]", this->name(), ws.implicit_ipr_a[0], ws.implicit_ipr_a[1], ws.implicit_ipr_a[2], ws.implicit_ipr_b[0], ws.implicit_ipr_b[1], ws.implicit_ipr_b[2]);
+        deferred_logger.debug(msg3);
         auto rates = well_state.well(this->index_of_well_).surface_rates;
         this->adaptRatesForVFP(rates);
-        return WellBhpThpCalculator(*this).estimateStableBhp(well_state, this->well_ecl_, rates, this->getRefDensity(), summary_state);
+
+        const Scalar rho = this->getRefDensity();
+        const auto res = WellBhpThpCalculator(*this).estimateStableBhp(well_state, this->well_ecl_, rates, rho, summary_state);
+        if (!res.has_value()) {
+            const auto msg4 = fmt::format("--- Well {} did not find intersection with IPR (rho = {})", this->name(), rho);
+            deferred_logger.debug(msg4);
+            return std::nullopt;
+        }
+        const Scalar bhp_target = res.value();
+        const auto msg5 = fmt::format("--- Well {} estimated operable BHP to {} (rho = {})", this->name(), bhp_target, rho);
+        deferred_logger.debug(msg5);
+        return res;
     }
 
     template<typename TypeTag>
@@ -859,7 +887,27 @@ namespace Opm
         }
     }
 
-
+    template<typename TypeTag>
+    bool
+    WellInterface<TypeTag>::
+    initialSolveWellWithBhp(const Simulator& simulator,
+                     WellStateType& well_state,
+                     DeferredLogger& deferred_logger)
+    {
+        assert(this->well_ecl_.isProducer());
+        // keep a copy of the original well state
+        const WellStateType well_state0 = well_state;
+        const double dt = simulator.timeStepSize();
+        const auto& summary_state = simulator.vanguard().summaryState();
+        const auto prod_controls = this->well_ecl_.productionControls(summary_state);
+        const Scalar bhp = prod_controls.bhp_limit;
+        const bool converged = solveWellWithBhp(simulator, dt, bhp, well_state, deferred_logger);
+        if (!converged) {
+            deferred_logger.debug("Initial bhp-solve for well " + this->name() + " failed to converge");
+            well_state = well_state0;
+        }
+        return converged;
+    }
 
     template <typename TypeTag>
     void
@@ -1681,7 +1729,7 @@ namespace Opm
 
 
     template <typename TypeTag>
-    void
+    bool
     WellInterface<TypeTag>::
     initializeProducerWellState(const Simulator& simulator,
                                 WellStateType& well_state,
@@ -1692,6 +1740,9 @@ namespace Opm
         // Check if the rates of this well only are single-phase, do nothing
         // if more than one nonzero rate.
         auto& ws = well_state.well(this->index_of_well_);
+        if (ws.converged) {
+            return false;
+        }
         int nonzero_rate_index = -1;
         const Scalar floating_point_error_epsilon = 1e-14;
         for (int p = 0; p < this->number_of_phases_; ++p) {
@@ -1700,7 +1751,7 @@ namespace Opm
                     nonzero_rate_index = p;
                 } else {
                     // More than one nonzero rate.
-                    return;
+                    return false;
                 }
             }
         }
@@ -1737,7 +1788,7 @@ namespace Opm
             for (int p = 0; p < this->number_of_phases_; ++p) {
                ws.surface_rates[p] = factor * well_q_s[p];
             }
-            return;
+            return true;
         }
 
         // If we are here, we had a single nonzero rate for the well,
@@ -1756,7 +1807,7 @@ namespace Opm
                     ws.surface_rates[p] = factor * well_q_s[p];
                 }
             }
-            return;
+            return true;
         }
 
         // If we are here, we had a single nonzero rate, but it was
@@ -1765,6 +1816,7 @@ namespace Opm
         for (int p = 0; p < this->number_of_phases_; ++p) {
             ws.surface_rates[p] = well_q_s[p];
         }
+        return true;
     }
 
     template <typename TypeTag>

@@ -87,6 +87,7 @@ public:
         serializer(injection_cmode_group_translated);
         serializer(production_cmode_group_translated);
         serializer(prevent_group_control);
+        serializer(converged);
     }
 
     bool operator==(const SingleWellState&) const;
@@ -126,6 +127,7 @@ public:
     std::optional<WellInjectorCMode> injection_cmode_group_translated{WellInjectorCMode::CMODE_UNDEFINED};
     std::optional<WellProducerCMode> production_cmode_group_translated{WellProducerCMode::CMODE_UNDEFINED};
     std::optional<bool> prevent_group_control;
+    bool converged;
     SegmentState<Scalar> segments;
     Events events;
     WellInjectorCMode injection_cmode{WellInjectorCMode::CMODE_UNDEFINED};

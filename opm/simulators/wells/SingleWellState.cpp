@@ -414,6 +414,7 @@ bool SingleWellState<Scalar, IndexTraits>::operator==(const SingleWellState& rhs
            this->injection_cmode_group_translated == rhs.injection_cmode_group_translated;
            this->production_cmode_group_translated == rhs.production_cmode_group_translated;
            this->prevent_group_control == rhs.prevent_group_control;
+           this->converged == rhs.converged;
 }
 
 template class SingleWellState<double, BlackOilDefaultFluidSystemIndices>;

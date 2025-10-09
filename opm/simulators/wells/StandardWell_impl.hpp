@@ -2482,7 +2482,7 @@ namespace Opm
         } else {
             this->wellStatus_ = well_status_orig;
             this->operability_status_ = operability_orig;
-            const std::string message = fmt::format("   Well {} did not converge in {} inner iterations ("
+            const std::string message = fmt::format("   iterateWellEqWithSwitching (STDW): Well {} did not converge in {} inner iterations ("
                                                     "{} switches, {} status changes).", this->name(), it, switch_count, status_switch_count);
             deferred_logger.debug(message);
             // add operability here as well ?

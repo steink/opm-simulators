@@ -330,7 +330,7 @@ public:
     /// Modify the well_state's rates if there is only one nonzero rate.
     /// If so, that rate is kept as is, but the others are set proportionally
     /// to the rates at bhp limit or bhp 1 bar.
-    void initializeProducerWellState(const Simulator& simulator,
+    bool initializeProducerWellState(const Simulator& simulator,
                                      WellStateType& well_state,
                                      DeferredLogger& deferred_logger) const;
 
@@ -338,6 +338,10 @@ public:
                            WellStateType& well_state,
                            const GroupState<Scalar>& group_state,
                            DeferredLogger& deferred_logger);
+
+    bool initialSolveWellWithBhp(const Simulator& simulator,
+                                WellStateType& well_state,
+                                DeferredLogger& deferred_logger);
 
     const std::vector<RateVector>& connectionRates() const
     {
@@ -444,7 +448,7 @@ protected:
                           const double dt,
                           const Scalar bhp,
                           WellStateType& well_state,
-                          DeferredLogger& deferred_logger);         
+                          DeferredLogger& deferred_logger);
 
     bool solveWellWithZeroRate(const Simulator& simulator,
                                const double dt,
