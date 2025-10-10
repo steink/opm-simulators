@@ -151,7 +151,7 @@ struct BlackOilVariableAndEquationIndices
 
     //! Index of the primary variable for the brine
     static constexpr int saltConcentrationIdx =
-        enableBrine ? PVOffset + numPhases + numSolvents + numExtbos + numExtbos + numPolymers + numFoam : -1000;
+        enableBrine ? PVOffset + numPhases + numSolvents + numExtbos + numPolymers + numFoam : -1000;
 
     //! Index of the primary variable for temperature
     static constexpr int temperatureIdx  =
@@ -181,7 +181,7 @@ struct BlackOilVariableAndEquationIndices
     //! Index of the continuity equation for the second polymer component (molecular weight)
     static constexpr int contiPolymerMWEqIdx =
         numPolymers > 1 ? contiPolymerEqIdx + 1 : -1000;
-    
+
     //! No bioeffects for three phase indices
     static constexpr int contiMicrobialEqIdx = -1000;
     static constexpr int contiOxygenEqIdx = -1000;

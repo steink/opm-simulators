@@ -292,12 +292,12 @@ int main(int argc, char** argv)
     Opm::PropertyTree prm;
     prm.put("type", "Jac"s);
     std::function<Vector()> weights = [&mat]() {
-        return Opm::Amg::getQuasiImpesWeights<BCRSMat, Vector>(mat, 0, false);
+        return Opm::Amg::getQuasiImpesWeights<BCRSMat, Vector>(mat, 0, false, false);
     };
 
     auto fullPreconditioner = Opm::PreconditionerFactory<Operator, Communication>::create(op, prm, weights, comm);
     Dune::BiCGSTABSolver<Vector> amgBiCGSTAB(op, sp, *fullPreconditioner, 10e-8, 300, (ccomm.rank()==0) ? 2 : 0);
-    
+
     using PreconditionerOperatorType = Opm::GhostLastMatrixAdapter<BCRSMat, Vector, Vector, Communication>;
     auto ghostOperator = std::make_unique<PreconditionerOperatorType>(mat, comm);
     auto ghostPreconditioner = Opm::PreconditionerFactory<PreconditionerOperatorType, Communication>::create(*ghostOperator, prm, weights, comm);

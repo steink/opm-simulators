@@ -140,7 +140,7 @@ public:
 
     /**
      * \copydoc AbstractISTLSolver::eraseMatrix
-     * 
+     *
      * \note This method will not do anything.
      */
     void eraseMatrix() override
@@ -150,7 +150,7 @@ public:
 
     /**
      * \copydoc AbstractISTLSolver::setActiveSolver
-     * 
+     *
      * \note This method will throw an exception if the solver number is not 0,
      *       as only one solver is available for the GPU backend.
      */
@@ -163,7 +163,7 @@ public:
 
     /**
      * \copydoc AbstractISTLSolver::numAvailableSolvers
-     * 
+     *
      * \note This method always returns 1, as only one solver is available for the GPU backend.
      */
     int numAvailableSolvers() const override
@@ -207,7 +207,7 @@ public:
                                                 "Check for errors related to missing nodes.");
     }
 
-    /** 
+    /**
      * \copydoc AbstractISTLSolver::setResidual
      *
      * \note Unused in this implementation.
@@ -235,7 +235,7 @@ public:
 
     /**
      * \copydoc AbstractISTLSolver::setMatrix
-     * 
+     *
      * \note This method does not set the matrix directly, as it should be handled in prepare().
      */
     void setMatrix(const SparseMatrixAdapter&) override
@@ -375,14 +375,16 @@ private:
                     const_cast<real_type*>(&m_cpuWeights[0][0]), m_cpuWeights.dim());
                 m_weights.emplace(m_cpuWeights);
 
+                const bool enableThreadParallel = m_parameters.cpr_weights_thread_parallel_;
                 // CPU implementation wrapped for GPU
-                weightsCalculator = [this]() -> GPUVector& {
+                weightsCalculator = [this, enableThreadParallel]() -> GPUVector& {
                     // Use the CPU implementation to calculate the weights
                     ElementContext elemCtx(m_simulator);
                     Amg::getTrueImpesWeights(pressureIndex,
                                              m_cpuWeights,
                                              elemCtx, m_simulator.model(),
-                                             m_element_chunks);
+                                             m_element_chunks,
+                                             enableThreadParallel);
 
                     // Copy CPU vector to GPU vector using main stream and asynchronous transfer
                     m_weights->copyFromHostAsync(m_cpuWeights);
@@ -394,14 +396,16 @@ private:
                 m_pinnedWeightsMemory = std::make_unique<PinnedMemoryHolder<real_type>>(
                     const_cast<real_type*>(&m_cpuWeights[0][0]), m_cpuWeights.dim());
                 m_weights.emplace(m_cpuWeights);
+                const bool enableThreadParallel = m_parameters.cpr_weights_thread_parallel_;
                 // CPU implementation wrapped for GPU
-                weightsCalculator = [this]() -> GPUVector& {
+                weightsCalculator = [this, enableThreadParallel]() -> GPUVector& {
                     // Use the CPU implementation to calculate the weights
                     ElementContext elemCtx(m_simulator);
                     Amg::getTrueImpesWeightsAnalytic(pressureIndex,
                                                      m_cpuWeights,
                                                      elemCtx, m_simulator.model(),
-                                                     m_element_chunks);
+                                                     m_element_chunks,
+                                                     enableThreadParallel);
 
                     // Copy CPU vector to GPU vector using main stream and asynchronous transfer
                     m_weights->copyFromHostAsync(m_cpuWeights);

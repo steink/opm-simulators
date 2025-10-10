@@ -208,7 +208,7 @@ namespace Opm
                                         const Well::ProductionControls& prod_controls,
                                         WellStateType& well_state,
                                         const GroupState<Scalar>& group_state,
-                                        DeferredLogger& deferred_logger, 
+                                        DeferredLogger& deferred_logger,
                                         const bool fixed_control = false,
                                         const bool fixed_status = false) override;
 
@@ -320,8 +320,10 @@ namespace Opm
         bool computeWellPotentialsImplicit(const Simulator& ebos_simulator,
                                            const WellStateType& well_state,
                                            std::vector<Scalar>& well_potentials,
-                                           DeferredLogger& deferred_logger) const;               
+                                           DeferredLogger& deferred_logger) const;
 
+        // return the density at the perforation[0] of the rank owning this well,
+        // value is cached to minimize the number of broadcasts
         Scalar getRefDensity() const override;
 
         // get the mobility for specific perforation
@@ -455,6 +457,9 @@ namespace Opm
         Eval connectionRateEnergy(const std::vector<EvalWell>& cq_s,
                                   const IntensiveQuantities& intQuants,
                                   DeferredLogger& deferred_logger) const;
+
+        // density of the first perforation, might not be from this rank
+        Scalar cachedRefDensity{0};
     };
 
 }

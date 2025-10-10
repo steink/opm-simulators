@@ -67,7 +67,6 @@ class BlackOilLocalResidualTPFA : public GetPropType<TypeTag, Properties::DiscLo
     using Indices = GetPropType<TypeTag, Properties::Indices>;
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
     using Evaluation = GetPropType<TypeTag, Properties::Evaluation>;
-    using EqVector = GetPropType<TypeTag, Properties::EqVector>;
     using RateVector = GetPropType<TypeTag, Properties::RateVector>;
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
     using GridView = GetPropType<TypeTag, Properties::GridView>;
@@ -468,7 +467,7 @@ public:
                                                             nbInfo.faceArea,
                                                             moduleParams.convectiveMixingModuleParam);
         }
-        
+
         // deal with energy (if present)
         if constexpr (enableEnergy) {
             const Scalar inAlpha = nbInfo.inAlpha;
@@ -524,7 +523,7 @@ public:
                                                 tmpdispersivity,
                                                 normVelocityAvg);
         }
-        
+
         // apply the scaling for the urea equation in MICP
         if constexpr (enableMICP) {
             BioeffectsModule::applyScaling(flux);

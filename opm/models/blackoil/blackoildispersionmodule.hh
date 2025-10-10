@@ -52,7 +52,7 @@ namespace Opm {
  * \ingroup Dispersion
  * \class Opm::BlackOilDispersionModule
  * \brief Provides the auxiliary methods required for consideration of the
- * dispersion equation. 
+ * dispersion equation.
  */
 template <class TypeTag, bool enableDispersion>
 class BlackOilDispersionModule;
@@ -71,8 +71,6 @@ class BlackOilDispersionModule<TypeTag, /*enableDispersion=*/false>
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
     using Evaluation = GetPropType<TypeTag, Properties::Evaluation>;
     using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
-
-    enum { numPhases = FluidSystem::numPhases };
 
 public:
     using ExtensiveQuantities = BlackOilDispersionExtensiveQuantities<TypeTag,false>;
@@ -116,7 +114,6 @@ class BlackOilDispersionModule<TypeTag, /*enableDispersion=*/true>
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
     using Model = GetPropType<TypeTag, Properties::Model>;
     using Simulator = GetPropType<TypeTag, Properties::Simulator>;
-    using EqVector = GetPropType<TypeTag, Properties::EqVector>;
     using RateVector = GetPropType<TypeTag, Properties::RateVector>;
     using Indices = GetPropType<TypeTag, Properties::Indices>;
 
@@ -337,7 +334,6 @@ class BlackOilDispersionIntensiveQuantities<TypeTag, /*enableDispersion=*/false>
 {
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
     using ElementContext = GetPropType<TypeTag, Properties::ElementContext>;
-    using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
 
 public:
     /*!
@@ -368,11 +364,10 @@ template <class TypeTag>
 class BlackOilDispersionIntensiveQuantities<TypeTag, /*enableDispersion=*/true>
 {
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
-    using Evaluation = GetPropType<TypeTag, Properties::Evaluation>;
     using ElementContext = GetPropType<TypeTag, Properties::ElementContext>;
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
-    using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
     using Indices = GetPropType<TypeTag, Properties::Indices>;
+
     enum { numPhases = FluidSystem::numPhases };
     enum { numComponents = FluidSystem::numComponents };
     enum { oilPhaseIdx = FluidSystem::oilPhaseIdx };
@@ -384,7 +379,7 @@ class BlackOilDispersionIntensiveQuantities<TypeTag, /*enableDispersion=*/true>
     enum { conti0EqIdx = Indices::conti0EqIdx };
     enum { enableDispersion = getPropValue<TypeTag, Properties::EnableDispersion>() };
 
-public:    
+public:
     /*!
      * \brief Returns the max. norm of the filter velocity of the cell.
      */
@@ -423,7 +418,7 @@ protected:
         for (const auto& velocityInfo : velocityInfos) {
             for (unsigned i = 0; i < phaseIdxs.size(); ++i) {
                 if (FluidSystem::phaseIsActive(phaseIdxs[i])) {
-                    normVelocityCell_[phaseIdxs[i]] = std::max(normVelocityCell_[phaseIdxs[i]], 
+                    normVelocityCell_[phaseIdxs[i]] = std::max(normVelocityCell_[phaseIdxs[i]],
                         std::abs(velocityInfo.velocity[conti0EqIdx +
                                  FluidSystem::canonicalToActiveCompIdx(compIdxs[i])]));
                 }
@@ -451,7 +446,6 @@ template <class TypeTag>
 class BlackOilDispersionExtensiveQuantities<TypeTag, /*enableDispersion=*/false>
 {
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
-    using Evaluation = GetPropType<TypeTag, Properties::Evaluation>;
     using ElementContext = GetPropType<TypeTag, Properties::ElementContext>;
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
     using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
@@ -514,19 +508,10 @@ template <class TypeTag>
 class BlackOilDispersionExtensiveQuantities<TypeTag, /*enableDispersion=*/true>
 {
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
-    using Evaluation = GetPropType<TypeTag, Properties::Evaluation>;
-    using ElementContext = GetPropType<TypeTag, Properties::ElementContext>;
-    using GridView = GetPropType<TypeTag, Properties::GridView>;
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
-    using Toolbox = MathToolbox<Evaluation>;
     using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
 
-    enum { dimWorld = GridView::dimensionworld };
     enum { numPhases = getPropValue<TypeTag, Properties::NumPhases>() };
-    enum { numComponents = getPropValue<TypeTag, Properties::NumComponents>() };
-
-    using DimVector = Dune::FieldVector<Scalar, dimWorld>;
-    using DimEvalVector = Dune::FieldVector<Evaluation, dimWorld>;
 
 public:
     using ScalarArray = std::array<Scalar, numPhases>;

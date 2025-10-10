@@ -84,17 +84,13 @@ protected:
                                          const Scalar tol_wells,
                                          const Scalar relaxed_tolerance_flow,
                                          const bool relax_tolerance,
-                                         const bool well_is_stopped, 
+                                         const bool well_is_stopped,
                                          std::vector<Scalar>& res,
                                          DeferredLogger& deferred_logger) const;
 
     void init(std::vector<Scalar>& perf_depth,
               const std::vector<Scalar>& depth_arg,
               const bool has_polymermw);
-
-    void updateWellStateFromPrimaryVariables(WellState<Scalar, IndexTraits>& well_state,
-                                             const SummaryState& summary_state,
-                                             DeferredLogger& deferred_logger) const;
 
     PrimaryVariables primary_variables_; //!< Primary variables for well
 

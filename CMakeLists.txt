@@ -370,8 +370,12 @@ macro (sources_hook)
   endif()
   if(QuadMath_FOUND)
     get_target_property(qm_defs QuadMath::QuadMath INTERFACE_COMPILE_DEFINITIONS)
-    list(APPEND qm_defs HAVE_QUAD=1)
     get_target_property(qm_options QuadMath::QuadMath INTERFACE_COMPILE_OPTIONS)
+    if(qm_defs)
+      list(APPEND qm_defs HAVE_QUAD=1)
+    else()
+      set(qm_defs HAVE_QUAD=1)
+    endif()
     set_source_files_properties(opm/models/nonlinear/newtonmethodparams.cpp
                                 opm/models/utils/parametersystem.cpp
                                 opm/models/utils/simulatorutils.cpp
@@ -521,6 +525,10 @@ if(MPI_FOUND)
   include (${CMAKE_CURRENT_SOURCE_DIR}/parallelUnitTests.cmake)
 endif()
 
+if(OPM_ENABLE_PYTHON)
+  include (${CMAKE_CURRENT_SOURCE_DIR}/pythonIntegrationTests.cmake)
+endif()
+
 include(OpmBashCompletion)
 
 if (NOT BUILD_FLOW)
@@ -548,7 +556,7 @@ add_library(MainDispatchDynamic OBJECT opm/simulators/flow/MainDispatchDynamic.c
 set_property(TARGET MainDispatchDynamic PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 # We only wait for the hipification process if we are compiling HIP.
-# That is, we need to wait for the HIP header files to be generated 
+# That is, we need to wait for the HIP header files to be generated
 # before the rest of the code can compile. HIP header file includes
 # anything in gpuistl, say.
 if (CONVERT_CUDA_TO_HIP)
@@ -577,7 +585,8 @@ set(FLOW_MODELS blackoil brine energy extbo foam gasoil gaswater
                 gasoil_energy brine_saltprecipitation
                 gaswater_saltprec_vapwat gaswater_saltprec_energy brine_precsalt_vapwat
                 blackoil_legacyassembly gasoildiffuse gaswater_dissolution
-                gaswater_dissolution_diffuse gaswater_energy gaswater_solvent biofilm)
+                gaswater_dissolution_diffuse gaswater_energy gaswater_solvent biofilm
+                blackoil_nohyst)
 set(FLOW_VARIANT_MODELS brine_energy onephase onephase_energy)
 
 set(FLOW_TGTS)
@@ -595,13 +604,13 @@ foreach(OBJ ${COMMON_MODELS} ${FLOW_MODELS} ${FLOW_VARIANT_MODELS})
   endif()
 
   # We only wait for the hipification process if we are compiling HIP.
-  # That is, we need to wait for the HIP header files to be generated 
+  # That is, we need to wait for the HIP header files to be generated
   # before the rest of the code can compile. HIP header file includes
   # anything in gpuistl, say.
   if(CONVERT_CUDA_TO_HIP)
     add_dependencies(flow_lib${OBJ} hipified_headers)
   endif()
-  
+
   opm_add_test(flow_${OBJ}
                ONLY_COMPILE
                SOURCES
@@ -832,4 +841,3 @@ endif()
 
 install(DIRECTORY doc/man1 DESTINATION ${CMAKE_INSTALL_MANDIR}
   FILES_MATCHING PATTERN "*.1")
-
