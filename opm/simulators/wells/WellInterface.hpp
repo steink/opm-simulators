@@ -334,6 +334,14 @@ public:
                                      WellStateType& well_state,
                                      DeferredLogger& deferred_logger) const;
 
+    bool initializeProducerWellState2(const Simulator& simulator,
+                                     WellStateType& well_state,
+                                     DeferredLogger& deferred_logger) const;
+
+    bool scaleProducerRatesWithConstraints(const Simulator& simulator,
+                                           WellStateType& well_state,
+                                           DeferredLogger& deferred_logger) const;
+
     void solveWellEquation(const Simulator& simulator,
                            WellStateType& well_state,
                            const GroupState<Scalar>& group_state,

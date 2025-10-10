@@ -439,11 +439,11 @@ namespace Opm {
             // nonzero phase anyway.
             for (const auto& well : well_container_) {
                 if (well->isProducer()) {
-                    const bool wasInitialized = well->initializeProducerWellState(simulator_, this->wellState(), local_deferredLogger);
-                    if (wasInitialized) {
-                        well->scaleSegmentRatesAndPressure(this->wellState());
-                        well->initialSolveWellWithBhp(this->simulator_, this->wellState(), local_deferredLogger);
-                    }
+                    const bool wasInitialized = well->initializeProducerWellState2(simulator_, this->wellState(), local_deferredLogger);
+                    //if (wasInitialized) {
+                    //    well->scaleSegmentRatesAndPressure(this->wellState());
+                    //    well->initialSolveWellWithBhp(this->simulator_, this->wellState(), local_deferredLogger);
+                    //}
                 }
             }
         }
@@ -461,6 +461,12 @@ namespace Opm {
         } catch ( std::runtime_error& e ) {
             const std::string msg = "A zero well potential is returned for output purposes. ";
             local_deferredLogger.warning("WELL_POTENTIAL_CALCULATION_FAILED", msg);
+        }
+        // For new/non-converged wells, reset scale rates to potentials 
+        for (const auto& well : well_container_) {
+            if (well->isProducer()) {
+                well->scaleProducerRatesWithConstraints(simulator_, this->wellState(), local_deferredLogger);
+            }
         }
         this->guide_rate_handler_.setLogger(&local_deferredLogger);
 #ifdef RESERVOIR_COUPLING_ENABLED
@@ -515,7 +521,7 @@ namespace Opm {
 
                 if (event || dyn_status_change) {
                     try {
-                        well->scaleSegmentRatesAndPressure(this->wellState());
+                        well->scaleSegmentRatesAndPressure(this->wellState()); // should not be necessary now
                         well->calculateExplicitQuantities(simulator_, this->wellState(), local_deferredLogger);
                         well->updateWellStateWithTarget(simulator_, this->groupState(), this->wellState(), local_deferredLogger);
                         well->updatePrimaryVariables(simulator_, this->wellState(), local_deferredLogger);

@@ -68,6 +68,7 @@ public:
         serializer(efficiency_scaling_factor);
         serializer(phase_mixing_rates);
         serializer(well_potentials);
+        serializer(well_potentials_cmode);
         serializer(productivity_index);
         serializer(implicit_ipr_a);
         serializer(implicit_ipr_b);
@@ -115,6 +116,7 @@ public:
     };
 
     std::vector<Scalar> well_potentials;
+    WellProducerCMode well_potentials_cmode{WellProducerCMode::CMODE_UNDEFINED};
     std::vector<Scalar> productivity_index;
     std::vector<Scalar> implicit_ipr_a;
     std::vector<Scalar> implicit_ipr_b;

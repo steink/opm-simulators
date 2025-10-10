@@ -45,6 +45,7 @@ SingleWellState(const std::string& name_,
     , pu(pu_arg)
     , temperature(temp)
     , well_potentials(pu.numActivePhases())
+    , well_potentials_cmode(Well::ProducerCMode::CMODE_UNDEFINED)
     , productivity_index(pu.numActivePhases())
     , implicit_ipr_a(pu.numActivePhases())
     , implicit_ipr_b(pu.numActivePhases())
@@ -395,6 +396,7 @@ bool SingleWellState<Scalar, IndexTraits>::operator==(const SingleWellState& rhs
            this->temperature == rhs.temperature &&
            this->phase_mixing_rates == rhs.phase_mixing_rates &&
            this->well_potentials == rhs.well_potentials &&
+           this->well_potentials_cmode == rhs.well_potentials_cmode &&
            this->productivity_index == rhs.productivity_index &&
            this->implicit_ipr_a == rhs.implicit_ipr_a &&
            this->implicit_ipr_b == rhs.implicit_ipr_b &&
@@ -410,10 +412,10 @@ bool SingleWellState<Scalar, IndexTraits>::operator==(const SingleWellState& rhs
            this->production_cmode == rhs.production_cmode &&
            this->alq_state == rhs.alq_state &&
            this->primaryvar == rhs.primaryvar &&
-           this->group_target == rhs.group_target;
-           this->injection_cmode_group_translated == rhs.injection_cmode_group_translated;
-           this->production_cmode_group_translated == rhs.production_cmode_group_translated;
-           this->prevent_group_control == rhs.prevent_group_control;
+           this->group_target == rhs.group_target &&
+           this->injection_cmode_group_translated == rhs.injection_cmode_group_translated &&
+           this->production_cmode_group_translated == rhs.production_cmode_group_translated &&
+           this->prevent_group_control == rhs.prevent_group_control &&
            this->converged == rhs.converged;
 }
 
