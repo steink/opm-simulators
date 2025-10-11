@@ -244,11 +244,11 @@ protected:
                                    Well::InjectionControls& inj_controls,
                                    Well::ProductionControls& prod_controls) const;
 
-    void checkGroupControlFeasibility(const SummaryState &summary_state, 
-                                      WellStateType& well_state,
-                                      const Well::ProductionControls &prod_controls,
-                                      const std::vector<Scalar>& scaling,
-                                      DeferredLogger& deferred_logger) const;
+    void updatePreventGroupControl(const SummaryState &summary_state, 
+                                   WellStateType& well_state,
+                                   const Well::ProductionControls &prod_controls,
+                                   const std::vector<Scalar>& rate_scaling,
+                                   DeferredLogger& deferred_logger) const;
 
     void resetDampening() {
         std::fill(this->inj_multiplier_damp_factor_.begin(), this->inj_multiplier_damp_factor_.end(), 1.0);

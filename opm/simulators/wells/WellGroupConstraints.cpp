@@ -141,8 +141,7 @@ checkGroupConstraints(WellState<Scalar, IndexTraits>& well_state,
     const auto& well = well_.wellEcl();
     const int well_index = well_.indexOfWell();
     auto& ws = well_state.well(well_index);
-    const bool prevent_group_control = ws.prevent_group_control.has_value() ? ws.prevent_group_control.value() : false;
-    if (prevent_group_control) {
+    if (ws.prevent_group_control) {
         return false;
     }
 

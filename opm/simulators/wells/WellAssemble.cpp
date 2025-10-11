@@ -142,6 +142,7 @@ assembleControlEqProd(const WellState<Scalar, IndexTraits>& well_state,
         break;
     }
     case Well::ProducerCMode::GRUP: {
+        // re-write this
         assert(well_.wellEcl().isAvailableForGroupControl());
         const auto& group = schedule.getGroup(well_.wellEcl().groupName(), well_.currentStep());
         // Annoying thing: the rates passed to this function are

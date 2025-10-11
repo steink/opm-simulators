@@ -63,6 +63,12 @@ public:
                                const std::optional<Well::InjectionControls>& inj_controls = std::nullopt,
                                const std::optional<Well::ProductionControls>& prod_controls = std::nullopt) const;
 
+    bool
+    updateProducerControlMode(SingleWellState<Scalar, IndexTraits>& ws,
+                              const SummaryState& summaryState,
+                              const Well::ProductionControls& controls,
+                              DeferredLogger& deferred_logger) const;
+
     std::pair<WellProducerCMode, Scalar>
     estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
                                           const SummaryState& summaryState,

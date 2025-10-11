@@ -465,7 +465,7 @@ namespace Opm {
         // For new/non-converged wells, reset scale rates to potentials 
         for (const auto& well : well_container_) {
             if (well->isProducer()) {
-                well->scaleProducerRatesWithConstraints(simulator_, this->wellState(), local_deferredLogger);
+                this->scaleProducerRatesWithStrictestConstraint(simulator_, well_state, deferred_logger, /*skip_zero_rate_constraints*/ true);
             }
         }
         this->guide_rate_handler_.setLogger(&local_deferredLogger);

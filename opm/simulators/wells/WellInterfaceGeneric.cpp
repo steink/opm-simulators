@@ -955,18 +955,20 @@ onlyKeepBHPandTHPcontrols(const SummaryState& summary_state,
 }
 
 template<typename Scalar, typename IndexTraits>
-void WellInterfaceGeneric<Scalar, IndexTraits>::checkGroupControlFeasibility(const SummaryState& summary_state,
-                                                                             WellState<Scalar, IndexTraits>& well_state,
-                                                                             const Well::ProductionControls& prod_controls,
-                                                                             const std::vector<Scalar>& scaling,
-                                                                             DeferredLogger& deferred_logger) const
+void WellInterfaceGeneric<Scalar, IndexTraits>::updatePreventGroupControl(const SummaryState& summary_state,
+                                                                          WellState<Scalar, IndexTraits>& well_state,
+                                                                          const Well::ProductionControls& prod_controls,
+                                                                          const std::vector<Scalar>& rate_scaling,
+                                                                          DeferredLogger& deferred_logger) const
 {
     // Avoid problematic group control cases like e.g., WRAT for well with approx zero
-    // water potential. Switch to BHP or THP control in such cases.
+    // water potential. Set flag prevent_group_control in such cases
     auto& ws = well_state.well(this->index_of_well_);
-    if (!wellUnderGroupControl(ws) || this->isInjector() || 
-        ws.production_cmode_group_translated == Well::ProducerCMode::CMODE_UNDEFINED ||
-        ws.production_cmode_group_translated == Well::ProducerCMode::RESV) {
+    ws.prevent_group_control = false;
+    if (this->isInjector() || !prod_controls.hasControl(Well::ProducerCMode::GRUP)) {
+        return;
+    }
+    if (!ws.production_cmode_group_translated.has_value()) {
         return;
     }
     const auto& pu = this->phaseUsage();
@@ -981,10 +983,18 @@ void WellInterfaceGeneric<Scalar, IndexTraits>::checkGroupControlFeasibility(con
         }
     }
     for (size_t i = 0; i < weighted_rates.size(); ++i) {
-        weighted_rates[i] *= scaling[i];
+        weighted_rates[i] *= rate_scaling[i];
     }
     const auto& gcmode = ws.production_cmode_group_translated;
-    // scaling
+    // We only need to check ORAT, WRAT, GRAT, LRAT
+    const bool do_check = (gcmode == Well::ProducerCMode::ORAT ||
+                           gcmode == Well::ProducerCMode::WRAT ||
+                           gcmode == Well::ProducerCMode::GRAT ||
+                           gcmode == Well::ProducerCMode::LRAT);
+    if (!do_check) {
+        return;
+    }
+    // Compute rate corresponding to the (translated) group control mode
     Scalar cmode_rate = 0.0;
     if (gcmode == Well::ProducerCMode::ORAT || gcmode == Well::ProducerCMode::LRAT) {
         const int oil_pos = pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx);
@@ -998,26 +1008,14 @@ void WellInterfaceGeneric<Scalar, IndexTraits>::checkGroupControlFeasibility(con
         const int gas_pos = pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx);
         cmode_rate += weighted_rates[gas_pos];
     }
-
-    // Use well tolerance to determine if the rate is "too small"
-    // Difficult to say what is a good tolerance here
-    const Scalar tol = this->param_.tolerance_wells_;
-    if (cmode_rate >= tol*rate_sum) { // negative rates
-        // Switch to "more feasible" control mode
-        if (this->wellHasTHPConstraints(summary_state)) {
-            // Switch to THP control
-            ws.production_cmode = Well::ProducerCMode::THP;
-            ws.thp = this->getTHPConstraint(summary_state);
-        } else {
-            ws.production_cmode = Well::ProducerCMode::BHP;
-            ws.bhp = prod_controls.bhp_limit;
-        }
-        std::string from = WellProducerCMode2String(gcmode.value());
-        std::string to = WellProducerCMode2String(ws.production_cmode);
-        deferred_logger.info(fmt::format("Well {} control mode GROUP ({}), but switched {} due to low phase fraction [{}, {}, {}]",
-                                         this->name(), from, to, ws.surface_rates[0], ws.surface_rates[1], ws.surface_rates[2]));
+    const Scalar fraction_tol = this->param_.tolerance_wells_;
+    const Scalar fraction_cur = cmode_rate / rate_sum;
+    if (fraction_cur < fraction_tol) {
+        std::string mode_string = WellProducerCMode2String(gcmode.value());
+        deferred_logger.debug(fmt::format("Well {} is flagged to prevent group control ({}) due to low rate fraction ({:.3e})",
+                                         this->name(), mode_string, fraction_cur));
         ws.prevent_group_control = true;
-    }
+    } 
 }
 
 template class WellInterfaceGeneric<double, BlackOilDefaultFluidSystemIndices>;

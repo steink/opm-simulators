@@ -309,15 +309,18 @@ namespace Opm
                     // Changing to group controls here may lead to inconsistencies in the group handling which in turn
                     // may result in excessive back and forth switching. However, we currently allow this by default.
                     // The switch check_group_constraints_inner_well_iterations_ is a temporary solution.
-
-                    const bool hasGroupControl = this->isInjector() ? inj_controls.hasControl(Well::InjectorCMode::GRUP) :
-                                                                      prod_controls.hasControl(Well::ProducerCMode::GRUP);
-                    bool isGroupControl = ws.production_cmode == Well::ProducerCMode::GRUP || ws.injection_cmode == Well::InjectorCMode::GRUP;
-                    if (! (isGroupControl && !this->param_.check_group_constraints_inner_well_iterations_)) {
-                        changed = this->checkIndividualConstraints(ws, summary_state, deferred_logger, inj_controls, prod_controls);
-                    }
-                    if (hasGroupControl && this->param_.check_group_constraints_inner_well_iterations_) {
-                        changed = changed || this->checkGroupConstraints(well_state, group_state, schedule, summary_state, false, deferred_logger);
+                    if (this->isProducer() && (ws.group_target.has_value() || !prod_controls.hasControl(Well::ProducerCMode::GRUP) )) {
+                        changed = this->updateProducerControlMode(ws, summary_state, prod_controls, deferred_logger);
+                    } else {
+                        const bool hasGroupControl = this->isInjector() ? inj_controls.hasControl(Well::InjectorCMode::GRUP) :
+                                                                        prod_controls.hasControl(Well::ProducerCMode::GRUP);
+                        bool isGroupControl = ws.production_cmode == Well::ProducerCMode::GRUP || ws.injection_cmode == Well::InjectorCMode::GRUP;
+                        if (! (isGroupControl && !this->param_.check_group_constraints_inner_well_iterations_)) {
+                            changed = this->checkIndividualConstraints(ws, summary_state, deferred_logger, inj_controls, prod_controls);
+                        }
+                        if (hasGroupControl && this->param_.check_group_constraints_inner_well_iterations_) {
+                            changed = changed || this->checkGroupConstraints(well_state, group_state, schedule, summary_state, false, deferred_logger);
+                        }
                     }
 
                     if (changed) {
@@ -1643,7 +1646,12 @@ namespace Opm
             const auto& summaryState = simulator.vanguard().summaryState();
             return this->wellUnderZeroRateTargetIndividual(summaryState, well_state);
         } else {
-            return this->wellUnderZeroGroupRateTarget(simulator, well_state, deferred_logger, isGroupControlled);
+            const auto& ws = well_state.well(this->index_of_well_);
+            if (ws.group_target.has_value()) {
+                return ws.group_target.value() == 0.0;
+            } else {
+                return this->wellUnderZeroGroupRateTarget(simulator, well_state, deferred_logger, isGroupControlled);
+            }
         }
     }
 
@@ -1813,10 +1821,17 @@ namespace Opm
         const auto& summary_state = simulator.vanguard().summaryState();
         const auto& prod_controls = this->well_ecl_.productionControls(summary_state);
         // Might want to include rate-converter here, if not this detour is not needed
-        const auto [mode, scale] = this->estimateMostStrictProductionControl(ws, summary_state, prod_controls, deferred_logger);
+        const auto [mode, scale] = this->estimateMostStrictProductionControl(ws, summary_state, prod_controls, skip_zero_rate_constraints, deferred_logger);
         if (mode != Well::ProducerCMode::CMODE_UNDEFINED && std::abs(scale - 1.0) > 1e-10) {
-            for (auto& q : ws.surface_rates) {
-                q *= scale;
+            // if strictest mode is pressure, we set rates directly equal to potentials
+            if (mode == Well::ProducerCMode::BHP || mode == Well::ProducerCMode::THP) {
+                for (int p = 0; p < this->number_of_phases_; ++p) {
+                    ws.surface_rates[p] = -ws.well_potentials[p];
+                }
+            } else {
+                for (auto& q : ws.surface_rates) {
+                    q *= scale;
+                }
             }
             this->scaleSegmentRatesAndPressure(well_state);
         }

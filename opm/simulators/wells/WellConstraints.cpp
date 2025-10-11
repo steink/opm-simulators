@@ -316,6 +316,76 @@ activeProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
 }
 
 template<typename Scalar, typename IndexTraits>
+bool
+WellConstraints<Scalar, IndexTraits>::
+updateProducerControlMode(SingleWellState<Scalar, IndexTraits>& ws,
+                          const SummaryState& summaryState,
+                          const Well::ProductionControls& controls,
+                          DeferredLogger& deferred_logger) const
+{
+    // We first check pressure constraints, and return if any broken. If not,
+    // check most strict rate control. Assuming no zero rate constraints. 
+    const auto& pu = well_.phaseUsage();
+    const auto controls = controls.has_value() ? controls.value() : well_.wellEcl().productionControls(summaryState);
+    const auto currentControl = ws.production_cmode;
+
+    const Scalar tol = 1e-5;
+    
+    if (controls.hasControl(Well::ProducerCMode::BHP) && currentControl != Well::ProducerCMode::BHP) {
+        const Scalar bhp_limit = controls.bhp_limit;
+        Scalar current_bhp = ws.bhp;
+        if (bhp_limit > current_bhp*(1.0 + tol)) {
+            ws.production_cmode = Well::ProducerCMode::BHP;
+            return true;
+        }
+    }
+
+    if (well_.wellHasTHPConstraints(summaryState) && currentControl != Well::ProducerCMode::THP) {
+        const auto& thp = well_.getTHPConstraint(summaryState);
+        Scalar current_thp = ws.thp;
+        // For trivial group targets (for instance caused by NETV) we dont want to flip to THP control.
+        const bool dont_check = (currentControl == Well::ProducerCMode::GRUP && ws.trivial_group_target);
+        if (thp > current_thp*(1.0 + tol) && !dont_check) {
+            // If WVFPEXP item 4 is set to YES1 or YES2
+            // switching to THP is prevented if the well will
+            // produce at a higher rate with THP control
+            const auto& wvfpexp = well_.wellEcl().getWVFPEXP();
+            bool rate_less_than_potential = true;
+            if (wvfpexp.prevent()) {
+                for (int p = 0; p < well_.numPhases(); ++p) {
+                    // Currently we use the well potentials here computed before the iterations.
+                    // We may need to recompute the well potentials to get a more
+                    // accurate check here.
+                    rate_less_than_potential = rate_less_than_potential && (-ws.surface_rates[p]) <= ws.well_potentials[p];
+                }
+            }
+            if (!wvfpexp.prevent() || !rate_less_than_potential) {
+                thp_limit_violated_but_not_switched = false;
+                ws.production_cmode = Well::ProducerCMode::THP;
+                return true;
+            } else {
+                thp_limit_violated_but_not_switched = true;
+                deferred_logger.info("NOT_SWITCHING_TO_THP",
+                "The THP limit is violated for producer " +
+                well_.name() +
+                ". But the rate will increase if switched to THP. " +
+                "The well is therefore kept at " + WellProducerCMode2String(currentControl));
+            }
+        }
+    }
+
+    // check most strict rate control.
+    const auto [most_strict_control, most_strict_scale] =
+        estimateStrictestProductionRateConstraint(ws, summaryState, controls, 
+                                                  /*skip_zero_rate_constraints*/ false, deferred_logger);
+    if (most_strict_control != Well::ProducerCMode::CMODE_UNDEFINED && most_strict_scale < 1.0 - tol) {
+        ws.production_cmode = most_strict_control;
+        return true;
+    }
+    return false;
+}
+
+template<typename Scalar, typename IndexTraits>
 std::pair<Well::ProducerCMode, Scalar>
 WellConstraints<Scalar, IndexTraits>::
 estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
