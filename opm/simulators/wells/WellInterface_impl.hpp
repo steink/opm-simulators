@@ -576,7 +576,7 @@ namespace Opm
         bool converged = true;
         auto& ws = well_state.well(this->index_of_well_);
         // if well is stopped, check if we can reopen
-        if (this->wellIsStopped() || !ws.converged) {
+        if (this->wellIsStopped()) {
             this->openWell();
             auto bhp_target = estimateOperableBhp(simulator, dt, well_state, summary_state, deferred_logger);
             if (!bhp_target.has_value()) {
@@ -1731,18 +1731,34 @@ namespace Opm
     template <typename TypeTag>
     bool
     WellInterface<TypeTag>::
-    initializeProducerWellState2(const Simulator& simulator,
-                                 WellStateType& well_state,
-                                 DeferredLogger& deferred_logger) const
+    initializeProducerWellStateRates(const Simulator& simulator,
+                                     WellStateType& well_state,
+                                     DeferredLogger& deferred_logger) const
     {
+        // Initialize non-zero well state rates for un-converged producer well
         assert(this->isProducer());
         OPM_TIMEFUNCTION();
-        // Check if the rates of this well only are single-phase, do nothing
-        // if more than one nonzero rate.
         auto& ws = well_state.well(this->index_of_well_);
         if (ws.converged) {
             return false;
         }
+        const auto well_status = this->wellStatus_;
+        const auto& well_name = this->name();
+        switch (well_status)
+                {
+                case Well::Status::OPEN:
+                    deferred_logger.debug("Well " + well_name + " is open in well interface.");
+                    break;
+                case Well::Status::SHUT:
+                    deferred_logger.debug("Well " + well_name + " is shut in well interface.");
+                    break;
+                case Well::Status::STOP:
+                    deferred_logger.debug("Well " + well_name + " is stopped in well interface.");
+                    break;
+                default:
+                    deferred_logger.debug("Well " + well_name + " has unknown status in well interface.");
+                    break;
+                }
 
         // Calculate rates at bhp limit, or 1 bar if no limit.
         std::vector<Scalar> well_q_s(this->number_of_phases_, 0.0);
@@ -1765,40 +1781,45 @@ namespace Opm
                 q = std::min(q, Scalar{0.0});
             }
         }
+        // report problem if only zeros
+        if (none_of(well_q_s.begin(), well_q_s.end(), [](Scalar q) {return q < 0.0})) {
+            deferred_logger.debug("initializeProducerWellStateRates was not able to provide non-zero rates for well " + this->name());
+        }
         ws.surface_rates = well_q_s;
         // Estimate most restrictive (currently available) control, and scale accordingly
-        this->scaleProducerRatesWithConstraints(simulator, well_state, deferred_logger);
+        this->scaleProducerRatesWithStrictestConstraint(simulator, well_state, deferred_logger, /*skip_zero_rate_constraints*/, true);
         return true;
-        // regarding bhp: in SingleWellState:
-        //     if (cmode_is_bhp)
-        //          this->bhp = bhp_limit;
-        //     else
-        //          this->bhp = this->perf_data.pressure_first_connection * bhp_safety_factor;
     }
 
     template<typename TypeTag>
     bool
     WellInterface<TypeTag>::
-    scaleProducerRatesWithConstraints(const Simulator& simulator,
-                                      WellStateType& well_state,
-                                      DeferredLogger& deferred_logger) const
+    scaleProducerRatesWithStrictestConstraint(const Simulator& simulator,
+                                              WellStateType& well_state,
+                                              DeferredLogger& deferred_logger,
+                                              const bool skip_zero_rate_constraints) const
     {
+        // Estimate strictest constraint and scale well-state surface-rates accoringly
         auto& ws = well_state.well(this->index_of_well_);
-        if (ws.converged) {
+        // Only fiddle with well-state in the non-converged case
+        if (ws.converged) {  
+            return false;
+        }
+        // Entering here, rates should be non-zero, return otherwise
+        if (none_of(ws.surface_rates.begin(), ws.surface_rates.end(), [](Scalar q) {return q < 0.0;})) {
+            deferred_logger.debug("scaleProducerRatesWithStrictestConstraint: failed scaling rates for well " + this->name() + " since all rates were zero.");
             return false;
         }
         const auto& summary_state = simulator.vanguard().summaryState();
         const auto& prod_controls = this->well_ecl_.productionControls(summary_state);
         // Might want to include rate-converter here, if not this detour is not needed
         const auto [mode, scale] = this->estimateMostStrictProductionControl(ws, summary_state, prod_controls, deferred_logger);
-        if (scale < 1.0) {
+        if (mode != Well::ProducerCMode::CMODE_UNDEFINED && std::abs(scale - 1.0) > 1e-10) {
             for (auto& q : ws.surface_rates) {
                 q *= scale;
             }
-            ws.production_cmode = mode;
+            this->scaleSegmentRatesAndPressure(well_state);
         }
-        // finally (if multi-segment) scale the segment rates/pressures
-        this->scaleSegmentRatesAndPressure(well_state);
         return true;
     } 
 

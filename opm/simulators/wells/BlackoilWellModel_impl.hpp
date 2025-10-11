@@ -439,7 +439,7 @@ namespace Opm {
             // nonzero phase anyway.
             for (const auto& well : well_container_) {
                 if (well->isProducer()) {
-                    const bool wasInitialized = well->initializeProducerWellState2(simulator_, this->wellState(), local_deferredLogger);
+                    well->initializeProducerWellStateRates(simulator_, this->wellState(), local_deferredLogger);
                     //if (wasInitialized) {
                     //    well->scaleSegmentRatesAndPressure(this->wellState());
                     //    well->initialSolveWellWithBhp(this->simulator_, this->wellState(), local_deferredLogger);
@@ -874,6 +874,21 @@ namespace Opm {
                 const std::string& well_name = well_ecl.name();
                 const auto well_status = this->schedule()
                     .getWell(well_name, report_step).getStatus();
+                switch (well_status)
+                {
+                case Well::Status::OPEN:
+                    local_deferredLogger.debug("Well " + well_name + " is open in the schedule.");
+                    break;
+                case Well::Status::SHUT:
+                    local_deferredLogger.debug("Well " + well_name + " is shut in the schedule.");
+                    break;
+                case Well::Status::STOP:
+                    local_deferredLogger.debug("Well " + well_name + " is stopped in the schedule.");
+                    break;
+                default:
+                    local_deferredLogger.debug("Well " + well_name + " has unknown status in the schedule.");
+                    break;
+                }
 
                 const bool shut_event = this->wellState().well(w).events.hasEvent(ScheduleEvents::WELL_STATUS_CHANGE)
                                     && well_status == Well::Status::SHUT;
@@ -884,8 +899,10 @@ namespace Opm {
                 if (shut_event && ws.status != Well::Status::SHUT) {
                     this->closed_this_step_.insert(well_name);
                     this->wellState().shutWell(w);
+                    local_deferredLogger.debug("  Well {} gets shut due to a SHUT event ", well_name);
                 } else if (open_event && ws.status != Well::Status::OPEN) {
                     this->wellState().openWell(w);
+                    local_deferredLogger.debug("  Well {} gets opened due to a OPEN event ", well_name);
                 }
 
                 // A new WCON keywords can re-open a well that was closed/shut due to Physical limit
@@ -978,6 +995,22 @@ namespace Opm {
                     this->well_close_times_.erase(well_name);
                     this->well_open_times_.erase(well_name);
                 }
+
+                switch (ws.status)
+                    {
+                    case Well::Status::OPEN:
+                        local_deferredLogger.debug("--Well-state " + well_name + " is open.");
+                        break;
+                    case Well::Status::SHUT:
+                        local_deferredLogger.debug("--Well-state " + well_name + " is shut.");
+                        break;
+                    case Well::Status::STOP:
+                        local_deferredLogger.debug("--Well-state " + well_name + " is stopped.");
+                        break;
+                    default:
+                        local_deferredLogger.debug("--Well-state " + well_name + " has unknown status.");
+                        break;
+                    }
             }
 
             if (!wcycle.empty()) {

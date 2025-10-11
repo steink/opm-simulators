@@ -1624,6 +1624,11 @@ namespace Opm
             if(!isFinite)
                 return false;
         }
+        const auto& q_s = well_state.well(this->index_of_well_).surface_rates;
+        deferred_logger.debug("Well " + this->name() + " surface rates before solving: "
+                              + std::to_string(q_s[0]) + " "
+                              + std::to_string(q_s[1]) + " "
+                              + std::to_string(q_s[2]) );
 
         updatePrimaryVariables(simulator, well_state, deferred_logger);
 
@@ -1652,6 +1657,15 @@ namespace Opm
         auto well_status_cur = well_status_orig;
         // don't allow opening wells that has a stopped well status
         const bool allow_open = well_state.well(this->index_of_well_).status == WellStatus::OPEN;
+        if (allow_open && this->wellIsStopped()) {
+            deferred_logger.debug("Well " + this->name() + " is stopped, but allowed to reopen.");
+            if (this->well_ecl_.getStatus() == Well::Status::SHUT || this->well_ecl_.getStatus() == Well::Status::STOP) {
+                deferred_logger.debug("Well " + this->name() + " is shut/stop in the schedule.");
+            }
+            if (this->well_ecl_.getStatus() == Well::Status::OPEN) {
+                deferred_logger.debug("Well " + this->name() + " is open in the schedule.");
+            }
+        }
         // don't allow switcing for wells under zero rate target or requested fixed status and control
         const bool allow_switching = !this->wellUnderZeroRateTarget(simulator, well_state, deferred_logger) &&
                                      (!fixed_control || !fixed_status) && allow_open;
@@ -1787,7 +1801,10 @@ namespace Opm
             const std::string thp_msg = fmt::format("   THP limit for well {} is {} barsa, group target is {}", this->name(), unit::convert::to(thp_limit, unit::barsa), grp_target);
             deferred_logger.debug(thp_msg);
         }
-
+        deferred_logger.debug("Well " + this->name() + " surface rates after solving: "
+                              + std::to_string(q_s[0]) + " "
+                              + std::to_string(q_s[1]) + " "
+                              + std::to_string(q_s[2]) );
         return converged;
     }
 
