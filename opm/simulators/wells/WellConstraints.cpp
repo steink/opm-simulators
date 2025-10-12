@@ -416,7 +416,7 @@ estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>
     if (!bhp_at_thp_limit.has_value()) {
         const auto tot_potential = std::accumulate(ws.well_potentials.begin(), ws.well_potentials.end(), 0.0);
         if (std::abs(tot_potential) > 0.0) {
-            most_strict_scale = tot_potential/tot_rates;
+            most_strict_scale = -tot_potential/tot_rates;
             if (well_.wellHasTHPConstraints(summaryState)) {
                 // not neccessarily true, but most likely
                 most_strict_control = Well::ProducerCMode::THP;
@@ -433,7 +433,11 @@ estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>
         const Scalar most_strict_bhp = std::max(*bhp_at_thp_limit, controls.bhp_limit);
         const Scalar tot_ipr_b = std::accumulate(ws.implicit_ipr_b.begin(), ws.implicit_ipr_b.end(), 0.0);
         const Scalar tot_ipr_a = std::accumulate(ws.implicit_ipr_a.begin(), ws.implicit_ipr_a.end(), 0.0);
-        const Scalar tot_rate_at_bhp = tot_ipr_b*most_strict_bhp - tot_ipr_a;
+        const Scalar tot_rate_at_bhp = -tot_ipr_b*most_strict_bhp + tot_ipr_a; // XXXXXXXXX WHY??????????? XXXXXXX
+        //deferred_logger.debug("estimateStrictestProductionControl: Well " + ws.name + 
+        //                      " has rate at bhp limit " + std::to_string(tot_rate_at_bhp) +
+        //                      " (bhp limit " + std::to_string(most_strict_bhp) + ")" + 
+        //                      " and current total rate " + std::to_string(tot_rates));
         most_strict_scale = tot_rate_at_bhp/tot_rates;
     }
     // check rate constraints
@@ -557,7 +561,7 @@ getProductionControlModeScale(const SingleWellState<Scalar, IndexTraits>& ws,
             // undefined mode, no scaling applied
             break;
     }
-    const bool valid_scale = (!skip_zero_rate_constraints || target_rate < 0.0) && current_rate < 0.0;
+    const bool valid_scale = (!skip_zero_rate_constraints || target_rate > 0.0) && current_rate > 0.0;
     return valid_scale ? target_rate/current_rate : -1.0;
 }
 

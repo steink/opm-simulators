@@ -1700,8 +1700,9 @@ namespace Opm
                         well_status_cur = this->wellStatus_;
                         status_switch_count++;
                         // if a well is re-opened, we need to re-initialize the rates
-                        if (well_status_cur == WellStatus::OPEN && !this->stoppedOrZeroRateTarget(simulator, well_state, deferred_logger)) {
+                        if (this->isProducer() && well_status_cur == WellStatus::OPEN && !this->stoppedOrZeroRateTarget(simulator, well_state, deferred_logger)) {
                             this->initializeProducerWellStateRates(simulator, well_state, deferred_logger);
+                            updatePrimaryVariables(simulator, well_state, deferred_logger);
                         }
                     }
                 }

@@ -54,6 +54,8 @@ SingleWellState(const std::string& name_,
     , prev_surface_rates(pu.numActivePhases())
     , perf_data(perf_input.size(), pressure_first_connection, !is_producer, pu.numActivePhases())
     , trivial_group_target(false)
+    , prevent_group_control(false)
+    , converged(false)
 {
     for (std::size_t perf = 0; perf < perf_input.size(); perf++) {
         this->perf_data.cell_index[perf] = perf_input[perf].cell_index;

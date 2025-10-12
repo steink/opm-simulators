@@ -875,6 +875,7 @@ namespace Opm {
                 const std::string& well_name = well_ecl.name();
                 const auto well_status = this->schedule()
                     .getWell(well_name, report_step).getStatus();
+                /*
                 switch (well_status)
                 {
                 case Well::Status::OPEN:
@@ -890,7 +891,7 @@ namespace Opm {
                     local_deferredLogger.debug("Well " + well_name + " has unknown status in the schedule.");
                     break;
                 }
-
+                */
                 const bool shut_event = this->wellState().well(w).events.hasEvent(ScheduleEvents::WELL_STATUS_CHANGE)
                                     && well_status == Well::Status::SHUT;
                 const bool open_event = this->wellState().well(w).events.hasEvent(ScheduleEvents::WELL_STATUS_CHANGE)
@@ -996,7 +997,7 @@ namespace Opm {
                     this->well_close_times_.erase(well_name);
                     this->well_open_times_.erase(well_name);
                 }
-
+                /*
                 switch (ws.status)
                     {
                     case Well::Status::OPEN:
@@ -1012,6 +1013,7 @@ namespace Opm {
                         local_deferredLogger.debug("--Well-state " + well_name + " has unknown status.");
                         break;
                     }
+                */
             }
 
             if (!wcycle.empty()) {

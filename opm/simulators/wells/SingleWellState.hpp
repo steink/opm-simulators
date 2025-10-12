@@ -128,7 +128,7 @@ public:
     std::optional<Scalar> group_target;
     std::optional<WellInjectorCMode> injection_cmode_group_translated{WellInjectorCMode::CMODE_UNDEFINED};
     std::optional<WellProducerCMode> production_cmode_group_translated{WellProducerCMode::CMODE_UNDEFINED};
-    std::optional<bool> prevent_group_control;
+    bool prevent_group_control;
     bool converged;
     SegmentState<Scalar> segments;
     Events events;

@@ -658,7 +658,7 @@ rateLimitsFromIPRIntersections(const VFPProdTable& table,
     }
     // find largest flo (flo_x) for which y = bhp(flo) + (flo-a)/b = 0 and dy/dflo > 0
     //std::vector<Scalar> bhps(3);
-    std::vector<Scalar> rates({0.0, -1.0, -1.0});
+    std::vector<Scalar> rates({0.0, 1.0, 1.0});
     //Scalar flo_max = -1.0;
     Scalar flo0, flo1;
     Scalar y0, y1;
@@ -681,37 +681,37 @@ rateLimitsFromIPRIntersections(const VFPProdTable& table,
         // might need to extrapolate to get first intersection
         if (i ==0 && y0 < 0 && y1 < y0) {
             //Scalar w = -y0/(y1-y0); // w < 0.0
-            rates[0] = flo0 + w*(flo1 - flo0);
+            rates[0] = -(flo0 + w*(flo1 - flo0));
         } else if (y0 >= 0 && y1 < 0){
             // crossing with negative slope
             //Scalar w = -y0/(y1-y0);
             w = std::clamp(w, Scalar{0.0}, Scalar{1.0}); // just to be safe (if y0~y1~0)
-            rates[0] = flo0 + w*(flo1 - flo0);
+            rates[0] = -(flo0 + w*(flo1 - flo0));
         }
         if (y1 < y_min) {
             // minimum stable
-            rates[1] = flo1;
+            rates[1] = -flo1;
             y_min = y1;
         }
         if (y0 < 0 && y1 >= 0){
             // crossing with positive slope
             //Scalar w = -y0/(y1-y0);
             w = std::clamp(w, Scalar{0.0}, Scalar{1.0}); // just to be safe (if y0~y1~0)
-            rates[2] = flo0 + w*(flo1 - flo0);
+            rates[2] = -(flo0 + w*(flo1 - flo0));
         }
         if (i < flos.size()-1) { // check next interval
             flo0 = flo1;
             y0 = y1;
-        } else if (y1 < 0 && y0 < y1 && rates[2] < 0) { // at last interval
+        } else if (y1 < 0 && y0 < y1 && rates[2] > 0) { // at last interval
             // If y0 < y1 < 0, there is a stable intersection above the largest flo-value by 
             // extrapolation. If no previous stable intersections were found, i.e., ipr-line lies 
             // above all (flo, bhp) points, then we return this intersection. Otherwise, we don't 
             // trust it (avoid vfp-extrapolation whenever possible)
             //Scalar w = -y0/(y1-y0); // w > 1.0
-            rates[2] = flo0 + w*(flo1 - flo0);
+            rates[2] = -(flo0 + w*(flo1 - flo0));
         }
     }
-    if (rates[2] >= 0.0) {
+    if (rates[2] <= 0.0) {
         if (false) {
             return std::make_pair(rates[1], rates[2]);
         } else {

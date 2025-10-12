@@ -660,9 +660,11 @@ namespace Opm
                                                               well_state,
                                                               group_state,
                                                               deferred_logger);
-                const auto msg = fmt::format("XXX Well {} did not converge in final attempt", this->name());
-                deferred_logger.debug(msg);
-                // if not converged here, we could try a "forced bhp" in next global Newton iteration
+                if (!converged) {
+                    const auto msg = fmt::format("XXX Well {} did not converge in final attempt", this->name());
+                    deferred_logger.debug(msg);
+                    // if not converged here, we could try a "forced bhp" in next global Newton iteration
+                }
             }
         }
         // update operability
@@ -773,10 +775,14 @@ namespace Opm
             return std::nullopt;
         } else {
             // estimate most strict control mode and corresponding rate scaling
+            deferred_logger.debug(fmt::format("estimateOperableBhp: Well {} has VFP/IPR intersections at scale {} (bhp {}) and {} (bhp {})", 
+                                          this->name(), intersect_rate_scale.first, intersect_bhp.first, intersect_rate_scale.second, intersect_bhp.second));
+            //deferred_logger.debug(fmt::format("estimateOperableBhp: Well {} has surface rates [{}, {}, {}]", this->name(), ws.surface_rates[0], ws.surface_rates[1], ws.surface_rates[2]));
             const auto [cmode, cmode_scale] = this->estimateStrictestProductionConstraint(ws, summary_state, controls, 
                                                                                     /*skip_zero_rate_constraints*/ false,
                                                                                     deferred_logger, 
                                                                                     /*bhp_at_thp_limit*/ intersect_bhp.second);
+            deferred_logger.debug(fmt::format("estimateOperableBhp: Well {} strictest control mode is {} at scale {}", this->name(), WellProducerCMode2String(cmode), cmode_scale));
             if (cmode == Well::ProducerCMode::CMODE_UNDEFINED) {
                 // should not happen, report and return
                 deferred_logger.info(fmt::format("estimateOperableBhp: found no valid control mode for well {}", this->name()));
@@ -1883,6 +1889,7 @@ namespace Opm
         ws.surface_rates = well_q_s;
         // Estimate most restrictive (currently available) control, and scale accordingly
         this->scaleProducerRatesWithStrictestConstraint(simulator, well_state, deferred_logger, /*skip_zero_rate_constraints*/ true);
+        deferred_logger.debug("Well " + well_name + " initialized with rates " + std::to_string(ws.surface_rates[0]) + ", " + std::to_string(ws.surface_rates[1]) + ", " + std::to_string(ws.surface_rates[2]) + ". ");
         return true;
     }
 
@@ -1909,6 +1916,11 @@ namespace Opm
         const auto& prod_controls = this->well_ecl_.productionControls(summary_state);
         // Might want to include rate-converter here, if not this detour is not needed
         const auto [mode, scale] = this->estimateStrictestProductionConstraint(ws, summary_state, prod_controls, skip_zero_rate_constraints, deferred_logger);
+        if (mode == Well::ProducerCMode::CMODE_UNDEFINED) {
+            deferred_logger.debug("scaleProducerRatesWithStrictestConstraint: failed scaling rates for well " + this->name() + " since no valid constraint was found.");
+        } else {
+            deferred_logger.debug("Well " + this->name() + " estimated strictest constraint mode " + WellProducerCMode2String(mode) + " with scale factor " + std::to_string(scale) + ". ");
+        }
         if (mode != Well::ProducerCMode::CMODE_UNDEFINED && std::abs(scale - 1.0) > 1e-10) {
             // if strictest mode is pressure, we set rates directly equal to potentials
             if (mode == Well::ProducerCMode::BHP || mode == Well::ProducerCMode::THP) {
