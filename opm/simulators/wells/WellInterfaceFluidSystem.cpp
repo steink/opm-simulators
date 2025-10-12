@@ -179,7 +179,7 @@ checkIndividualConstraints(SingleWellState<Scalar, IndexTraits>& ws,
 template<typename FluidSystem>
 bool
 WellInterfaceFluidSystem<FluidSystem>::
-updateProducerControlMode(const SingleWellState<Scalar, IndexTraits>& ws,
+updateProducerControlMode(SingleWellState<Scalar, IndexTraits>& ws,
                           const SummaryState& summaryState,
                           const Well::ProductionControls& controls,
                           DeferredLogger& deferred_logger) const

@@ -465,7 +465,7 @@ namespace Opm {
         // For new/non-converged wells, reset scale rates to potentials 
         for (const auto& well : well_container_) {
             if (well->isProducer()) {
-                this->scaleProducerRatesWithStrictestConstraint(simulator_, well_state, deferred_logger, /*skip_zero_rate_constraints*/ true);
+                well->scaleProducerRatesWithStrictestConstraint(simulator_, this->wellState(), local_deferredLogger, /*skip_zero_rate_constraints*/ true);
             }
         }
         this->guide_rate_handler_.setLogger(&local_deferredLogger);
@@ -576,7 +576,8 @@ namespace Opm {
 
             // initialize rates/previous rates to prevent zero fractions in vfp-interpolation
             if (well->isProducer() && alternative_well_rate_init_) {
-                well->initializeProducerWellState(simulator_, this->wellState(), deferred_logger);
+                //well->initializeProducerWellState(simulator_, this->wellState(), deferred_logger);
+                well->initializeProducerWellStateRates(simulator_, this->wellState(), deferred_logger);
             }
             if (well->isVFPActive(deferred_logger)) {
                 well->setPrevSurfaceRates(this->wellState(), this->prevWellState());

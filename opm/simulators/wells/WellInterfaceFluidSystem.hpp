@@ -88,7 +88,7 @@ protected:
                                     const std::optional<Well::InjectionControls>& inj_controls = std::nullopt,
                                     const std::optional<Well::ProductionControls>& prod_controls = std::nullopt) const;
 
-    bool updateProducerControlMode(const SingleWellState<Scalar, IndexTraits>& ws,
+    bool updateProducerControlMode(SingleWellState<Scalar, IndexTraits>& ws,
                                    const SummaryState& summaryState,
                                    const Well::ProductionControls& controls,
                                    DeferredLogger& deferred_logger) const;
@@ -99,7 +99,7 @@ protected:
                                           const Well::ProductionControls& controls,
                                           const bool skip_zero_rate_constraints,
                                           DeferredLogger& deferred_logger,
-                                          const std::optional<Scalar> bhp_at_thp_limit) const;
+                                          const std::optional<Scalar> bhp_at_thp_limit = std::nullopt) const;
 
     std::pair<Well::ProducerCMode, Scalar>
     estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTraits>& ws,

@@ -32,6 +32,7 @@
 
 #include <opm/input/eclipse/Schedule/ScheduleTypes.hpp>
 #include <opm/input/eclipse/Schedule/Well/WDFAC.hpp>
+#include <opm/input/eclipse/Schedule/Well/WVFPEXP.hpp>
 
 #include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
 
@@ -653,12 +654,15 @@ namespace Opm
                 ws.thp = this->getTHPConstraint(summary_state);
                 // const auto msg = fmt::format("Well {} did not converge, re-solving with explicit fractions for VFP caculations.", this->name());
                 // deferred_logger.debug(msg);
-                // converged = this->iterateWellEqWithSwitching(simulator, dt,
-                //                                              inj_controls,
-                //                                              prod_controls,
-                //                                              well_state,
-                //                                              group_state,
-                //                                              deferred_logger);
+                converged = this->iterateWellEqWithSwitching(simulator, dt,
+                                                              inj_controls,
+                                                              prod_controls,
+                                                              well_state,
+                                                              group_state,
+                                                              deferred_logger);
+                const auto msg = fmt::format("XXX Well {} did not converge in final attempt", this->name());
+                deferred_logger.debug(msg);
+                // if not converged here, we could try a "forced bhp" in next global Newton iteration
             }
         }
         // update operability
@@ -762,8 +766,8 @@ namespace Opm
         std::pair<Scalar, Scalar> intersect_bhp;
         auto rates = ws.surface_rates;
         this->adaptRatesForVFP(rates);
-        const bool success = intersectVFPWithIPR(well_state, this->well_ecl_, rates, this->getRefDensity(), 
-                                                 summaryState, intersect_rate_scale, intersect_bhp);
+        const bool success = WellBhpThpCalculator(*this).intersectVFPWithIPR(well_state, this->well_ecl_, rates, this->getRefDensity(), 
+                                                                             summary_state, intersect_rate_scale, intersect_bhp);
         if (!success) {
             deferred_logger.debug(fmt::format("estimateOperableBhp: Well {} has no VFP/IPR intersections at current conditions", this->name()));
             return std::nullopt;
@@ -791,11 +795,11 @@ namespace Opm
                     }
                 }
             }
-            //ws.production_cmode = cmode;
-            // scale surface rates 
-            //for (auto& q : ws.surface_rates) {
-            //    q *= cmode_scale;
-            //}
+            ws.production_cmode = cmode;
+            // scale surface rates
+            for (auto& q : ws.surface_rates) {
+                q *= cmode_scale;
+            }
             // interpolate between the two intersection points to get bhp at cmode_scale
             const Scalar scale_diff = intersect_rate_scale.second - intersect_rate_scale.first;
             if (std::abs(scale_diff) < 1e-6) {
@@ -1873,12 +1877,12 @@ namespace Opm
             }
         }
         // report problem if only zeros
-        if (none_of(well_q_s.begin(), well_q_s.end(), [](Scalar q) {return q < 0.0})) {
+        if (none_of(well_q_s.begin(), well_q_s.end(), [](Scalar q) {return q < 0.0; })) {
             deferred_logger.debug("initializeProducerWellStateRates was not able to provide non-zero rates for well " + this->name());
         }
         ws.surface_rates = well_q_s;
         // Estimate most restrictive (currently available) control, and scale accordingly
-        this->scaleProducerRatesWithStrictestConstraint(simulator, well_state, deferred_logger, /*skip_zero_rate_constraints*/, true);
+        this->scaleProducerRatesWithStrictestConstraint(simulator, well_state, deferred_logger, /*skip_zero_rate_constraints*/ true);
         return true;
     }
 
@@ -1904,7 +1908,7 @@ namespace Opm
         const auto& summary_state = simulator.vanguard().summaryState();
         const auto& prod_controls = this->well_ecl_.productionControls(summary_state);
         // Might want to include rate-converter here, if not this detour is not needed
-        const auto [mode, scale] = this->estimateStrictestProductionControl(ws, summary_state, prod_controls, skip_zero_rate_constraints, deferred_logger);
+        const auto [mode, scale] = this->estimateStrictestProductionConstraint(ws, summary_state, prod_controls, skip_zero_rate_constraints, deferred_logger);
         if (mode != Well::ProducerCMode::CMODE_UNDEFINED && std::abs(scale - 1.0) > 1e-10) {
             // if strictest mode is pressure, we set rates directly equal to potentials
             if (mode == Well::ProducerCMode::BHP || mode == Well::ProducerCMode::THP) {

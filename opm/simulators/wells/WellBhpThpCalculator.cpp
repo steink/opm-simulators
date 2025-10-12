@@ -982,8 +982,8 @@ intersectVFPWithIPR(const WellState<Scalar, IndexTraits>& well_state,
                     const std::vector<Scalar>& rates,
                     const Scalar rho,
                     const SummaryState& summaryState,
-                    std::pair<Scalar, Scalar> intersect_rate_scale,
-                    std::pair<Scalar, Scalar> intersect_bhp) const
+                    std::pair<Scalar, Scalar>& intersect_rate_scale,
+                    std::pair<Scalar, Scalar>& intersect_bhp) const
 {
     // Given a *converged* well_state with ipr, estimate
     // 1. (bhp1, rate1) for minimal flowing rate (unstable)
@@ -1030,11 +1030,11 @@ intersectVFPWithIPR(const WellState<Scalar, IndexTraits>& well_state,
         // no intersection
         return false;
     } else {
-        const auto& rates = retval.value();
-        intersect_rate_scale.first = rates.first/flo;
-        intersect_rate_scale.second = rates.second/flo;
-        intersect_bhp.first = (rates.first-ipr.first)/(-ipr.second);
-        intersect_bhp.second = (rates.second-ipr.first)/(-ipr.second);
+        const auto& rate_limits = retval.value();
+        intersect_rate_scale.first = rate_limits.first/flo;
+        intersect_rate_scale.second = rate_limits.second/flo;
+        intersect_bhp.first = (rate_limits.first-ipr.first)/(-ipr.second);
+        intersect_bhp.second = (rate_limits.second-ipr.first)/(-ipr.second);
         return true;
     }
 }

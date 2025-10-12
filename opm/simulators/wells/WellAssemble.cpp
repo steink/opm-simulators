@@ -69,30 +69,30 @@ assembleControlEqProd(const WellState<Scalar, IndexTraits>& well_state,
                                     well_state[well_.name()].efficiency_scaling_factor;
     // hack option for setting group control eq directly 
     const bool alternativeGroupControlEq = true;
-    const std::optional<Scalar> target;
+    std::optional<Scalar> group_target;
     if (alternativeGroupControlEq && current == Well::ProducerCMode::GRUP) {
         current = well_state.well(well_.indexOfWell()).production_cmode_group_translated.value();
-        target = well_state.well(well_.indexOfWell()).group_target.value();
+        group_target = well_state.well(well_.indexOfWell()).group_target.value();
     }
     switch (current) {
     case Well::ProducerCMode::ORAT: {
         assert(FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx));
         const EvalWell rate = -rates[FluidSystem::oilPhaseIdx];
-        const Scalar oil_target = target.has_value() ? target.value() : controls.oil_rate;
+        const Scalar oil_target = group_target.has_value() ? group_target.value() : controls.oil_rate;
         control_eq = rate - oil_target;
         break;
     }
     case Well::ProducerCMode::WRAT: {
         assert(FluidSystem::phaseIsActive(FluidSystem::waterPhaseIdx));
         const EvalWell rate = -rates[FluidSystem::waterPhaseIdx];
-        const Scalar water_target = target.has_value() ? target.value() : controls.water_rate;
+        const Scalar water_target = group_target.has_value() ? group_target.value() : controls.water_rate;
         control_eq = rate - water_target;
         break;
     }
     case Well::ProducerCMode::GRAT: {
         assert(FluidSystem::phaseIsActive(FluidSystem::gasPhaseIdx));
         const EvalWell rate = -rates[FluidSystem::gasPhaseIdx];
-        const Scalar gas_target = target.has_value() ? target.value() : controls.gas_rate;
+        const Scalar gas_target = group_target.has_value() ? group_target.value() : controls.gas_rate;
         control_eq = rate - gas_target;
         break;
     }
@@ -100,7 +100,7 @@ assembleControlEqProd(const WellState<Scalar, IndexTraits>& well_state,
         assert(FluidSystem::phaseIsActive(FluidSystem::waterPhaseIdx));
         assert(FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx));
         EvalWell rate = -rates[FluidSystem::waterPhaseIdx] - rates[FluidSystem::oilPhaseIdx];
-        const Scalar liquid_target = target.has_value() ? target.value() : controls.liquid_rate;
+        const Scalar liquid_target = group_target.has_value() ? group_target.value() : controls.liquid_rate;
         control_eq = rate - liquid_target;
         break;
     }
@@ -120,8 +120,8 @@ assembleControlEqProd(const WellState<Scalar, IndexTraits>& well_state,
                 total_rate -= rates[phase] * convert_coeff[pos]; // Note different indices.
             }
         }
-        if (controls.prediction_mode || target.has_value()) {
-            const Scalar resv_target = target.has_value() ? target.value() : controls.resv_rate;
+        if (controls.prediction_mode || group_target.has_value()) {
+            const Scalar resv_target = group_target.has_value() ? group_target.value() : controls.resv_rate;
             control_eq = total_rate - resv_target;
         } else {
             std::vector<Scalar> hrates(well_.numPhases(), 0.);
