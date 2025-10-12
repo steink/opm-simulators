@@ -66,12 +66,14 @@ public:
     bool
     updateProducerControlMode(SingleWellState<Scalar, IndexTraits>& ws,
                               const SummaryState& summaryState,
+                              const RateConvFunc& calcReservoirVoidageRates,
                               const Well::ProductionControls& controls,
                               DeferredLogger& deferred_logger) const;
 
     std::pair<WellProducerCMode, Scalar>
     estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
                                           const SummaryState& summaryState,
+                                          const RateConvFunc& calcReservoirVoidageRates,
                                           const WellProductionControls& controls,
                                           const bool skip_zero_rate_constraints,
                                           DeferredLogger& deferred_logger,
@@ -80,6 +82,7 @@ public:
     std::pair<WellProducerCMode, Scalar>
     estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
                                           const SummaryState& summaryState,
+                                          const RateConvFunc& calcReservoirVoidageRates,
                                           const Well::ProductionControls& controls,
                                           const bool skip_zero_rate_constraints,
                                           DeferredLogger& deferred_logger) const;
@@ -87,6 +90,7 @@ public:
 private:
     Scalar
     getProductionControlModeScale(const SingleWellState<Scalar, IndexTraits>& ws,
+                                  const RateConvFunc& calcReservoirVoidageRates,
                                   const WellProducerCMode& cmode,
                                   const WellProductionControls& control,
                                   const bool skip_zero_rate_constraints,

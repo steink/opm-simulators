@@ -320,6 +320,7 @@ bool
 WellConstraints<Scalar, IndexTraits>::
 updateProducerControlMode(SingleWellState<Scalar, IndexTraits>& ws,
                           const SummaryState& summaryState,
+                          const RateConvFunc& calcReservoirVoidageRates,
                           const Well::ProductionControls& controls,
                           DeferredLogger& deferred_logger) const
 {
@@ -376,7 +377,7 @@ updateProducerControlMode(SingleWellState<Scalar, IndexTraits>& ws,
 
     // check most strict rate control.
     const auto [most_strict_control, most_strict_scale] =
-        estimateStrictestProductionRateConstraint(ws, summaryState, controls, 
+        estimateStrictestProductionRateConstraint(ws, summaryState, calcReservoirVoidageRates, controls, 
                                                   /*skip_zero_rate_constraints*/ false, deferred_logger);
     if (most_strict_control != Well::ProducerCMode::CMODE_UNDEFINED && most_strict_scale < 1.0 - tol) {
         ws.production_cmode = most_strict_control;
@@ -390,6 +391,7 @@ std::pair<Well::ProducerCMode, Scalar>
 WellConstraints<Scalar, IndexTraits>::
 estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
                                        const SummaryState& summaryState,
+                                       const RateConvFunc& calcReservoirVoidageRates,
                                        const Well::ProductionControls& controls,
                                        const bool skip_zero_rate_constraints,
                                        DeferredLogger& deferred_logger,
@@ -436,7 +438,7 @@ estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>
     }
     // check rate constraints
     const auto [most_strict_rate_control, most_strict_rate_scale] =
-        estimateStrictestProductionRateConstraint(ws, summaryState, controls, skip_zero_rate_constraints, deferred_logger);
+        estimateStrictestProductionRateConstraint(ws, summaryState, calcReservoirVoidageRates, controls, skip_zero_rate_constraints, deferred_logger);
     if (most_strict_rate_control != Well::ProducerCMode::CMODE_UNDEFINED && most_strict_rate_scale < most_strict_scale) {
         most_strict_scale = most_strict_rate_scale;
         most_strict_control = most_strict_rate_control;
@@ -449,6 +451,7 @@ std::pair<Well::ProducerCMode, Scalar>
 WellConstraints<Scalar, IndexTraits>::
 estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
                                           const SummaryState& summaryState,
+                                          const RateConvFunc& calcReservoirVoidageRates,
                                           const Well::ProductionControls& controls,
                                           const bool skip_zero_rate_constraints,
                                           DeferredLogger& deferred_logger) const
@@ -474,7 +477,7 @@ estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTra
     for (const auto& mode : rate_modes) {
         if (!controls.hasControl(mode))
             continue;
-        const Scalar scale = getProductionControlModeScale(ws, mode, controls);
+        const Scalar scale = getProductionControlModeScale(ws, calcReservoirVoidageRates, mode, controls);
         if (scale >= 0.0 && scale < most_strict_scale) {
             most_strict_scale = scale;
             most_strict_control = mode;
@@ -482,7 +485,7 @@ estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTra
     }
     // check group constraints if target is given in well-state
     if (controls.hasControl(Well::ProducerCMode::GRUP) && !ws.prevent_group_control && ws.group_target.has_value()) {
-        const Scalar scale = getProductionControlModeScale(ws, ws.production_cmode_group_translated.value(), controls, ws.group_target.value());
+        const Scalar scale = getProductionControlModeScale(ws, calcReservoirVoidageRates, ws.production_cmode_group_translated.value(), controls, ws.group_target.value());
         if (scale >= 0.0 && scale < most_strict_scale) {
             most_strict_scale = scale;
             most_strict_control = Well::ProducerCMode::GRUP;
@@ -495,6 +498,7 @@ template<typename Scalar, typename IndexTraits>
 Scalar
 WellConstraints<Scalar, IndexTraits>::
 getProductionControlModeScale(const SingleWellState<Scalar, IndexTraits>& ws,
+                              const RateConvFunc& calcReservoirVoidageRates,
                               const Well::ProducerCMode& cmode,
                               const Well::ProductionControls& control,
                               const bool skip_zero_rate_constraints,
@@ -523,12 +527,30 @@ getProductionControlModeScale(const SingleWellState<Scalar, IndexTraits>& ws,
             target_rate = target.has_value() ? *target : control.liquid_rate;
             break;
         case Well::ProducerCMode::RESV:
-            // Do we need to deal with non-prediction mode here? 
-            assert(control.prediction_mode);
             for (int p = 0; p < well_.numPhases(); ++p) {
                 current_rate += -ws.reservoir_rates[p];
             }
-            target_rate = target.has_value() ? *target : control.resv_rate;
+            if (!control.prediction_mode || target.has_value()) {
+                target_rate = target.has_value() ? *target : control.resv_rate;
+            } else {
+                const int fipreg = 0; // not considering the region for now
+                const int np = well_.numPhases();
+
+                std::vector<Scalar> target_surface_rates(np, 0.0);
+                if (pu.phaseIsActive(IndexTraits::waterPhaseIdx))
+                    target_surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx)] = controls.water_rate;
+                if (pu.phaseIsActive(IndexTraits::oilPhaseIdx))
+                    target_surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx)] = controls.oil_rate;
+                if (pu.phaseIsActive(IndexTraits::gasPhaseIdx))
+                    target_surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx)] = controls.gas_rate;
+
+                std::vector<Scalar> target_voidage_rates(np, 0.0);
+                calcReservoirVoidageRates(fipreg, well_.pvtRegionIdx(), target_surface_rates, target_voidage_rates);
+                Scalar resv_rate = 0.0;
+                for (int p = 0; p < np; ++p) {
+                    target_rate += target_voidage_rates[p];
+                }
+            }
             break;
         default:
             // undefined mode, no scaling applied

@@ -1821,7 +1821,7 @@ namespace Opm
         const auto& summary_state = simulator.vanguard().summaryState();
         const auto& prod_controls = this->well_ecl_.productionControls(summary_state);
         // Might want to include rate-converter here, if not this detour is not needed
-        const auto [mode, scale] = this->estimateMostStrictProductionControl(ws, summary_state, prod_controls, skip_zero_rate_constraints, deferred_logger);
+        const auto [mode, scale] = this->estimateStrictestProductionControl(ws, summary_state, prod_controls, skip_zero_rate_constraints, deferred_logger);
         if (mode != Well::ProducerCMode::CMODE_UNDEFINED && std::abs(scale - 1.0) > 1e-10) {
             // if strictest mode is pressure, we set rates directly equal to potentials
             if (mode == Well::ProducerCMode::BHP || mode == Well::ProducerCMode::THP) {

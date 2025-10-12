@@ -88,11 +88,22 @@ protected:
                                     const std::optional<Well::InjectionControls>& inj_controls = std::nullopt,
                                     const std::optional<Well::ProductionControls>& prod_controls = std::nullopt) const;
 
+    bool updateProducerControlMode(const SingleWellState<Scalar, IndexTraits>& ws,
+                                   const SummaryState& summaryState,
+                                   const Well::ProductionControls& controls,
+                                   DeferredLogger& deferred_logger) const;
+
     std::pair<Well::ProducerCMode, Scalar>
-    estimateMostStrictProductionControl(const SingleWellState<Scalar, IndexTraits>& ws,
-                                        const SummaryState& summaryState,
-                                        const Well::ProductionControls& controls,
-                                        DeferredLogger& deferred_logger) const;
+    estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
+                                          const SummaryState& summaryState,
+                                          const Well::ProductionControls& controls,
+                                          DeferredLogger& deferred_logger) const;
+
+    std::pair<Well::ProducerCMode, Scalar>
+    estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
+                                              const SummaryState& summaryState,
+                                              const Well::ProductionControls& controls,
+                                              DeferredLogger& deferred_logger) const;
 
     bool checkGroupConstraints(WellState<Scalar, IndexTraits>& well_state,
                                const GroupState<Scalar>& group_state,
