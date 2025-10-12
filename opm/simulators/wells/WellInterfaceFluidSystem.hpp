@@ -97,12 +97,15 @@ protected:
     estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
                                           const SummaryState& summaryState,
                                           const Well::ProductionControls& controls,
-                                          DeferredLogger& deferred_logger) const;
+                                          const bool skip_zero_rate_constraints,
+                                          DeferredLogger& deferred_logger,
+                                          const std::optional<Scalar> bhp_at_thp_limit) const;
 
     std::pair<Well::ProducerCMode, Scalar>
     estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
                                               const SummaryState& summaryState,
                                               const Well::ProductionControls& controls,
+                                              const bool skip_zero_rate_constraints,
                                               DeferredLogger& deferred_logger) const;
 
     bool checkGroupConstraints(WellState<Scalar, IndexTraits>& well_state,

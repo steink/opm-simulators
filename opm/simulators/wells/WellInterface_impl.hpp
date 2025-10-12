@@ -48,6 +48,7 @@
 #include <utility>
 
 #include <fmt/format.h>
+#include "WellInterface.hpp"
 
 namespace Opm
 {
@@ -581,7 +582,7 @@ namespace Opm
         // if well is stopped, check if we can reopen
         if (this->wellIsStopped()) {
             this->openWell();
-            auto bhp_target = estimateOperableBhp(simulator, dt, well_state, summary_state, deferred_logger);
+            auto bhp_target = estimateOperableBhp(simulator, dt, well_state, prod_controls, summary_state, deferred_logger);
             if (!bhp_target.has_value()) {
                 // no intersection with ipr
                 const auto msg = fmt::format("estimateOperableBhp: Did not find operable BHP for well {}", this->name());
@@ -634,7 +635,8 @@ namespace Opm
             // Well did not converge, switch to explicit fractions
             this->operability_status_.use_vfpexplicit = true;
             this->openWell();
-            auto bhp_target = estimateOperableBhp(simulator, dt, well_state, summary_state, deferred_logger);
+            // re-initialize here?
+            auto bhp_target = estimateOperableBhp(simulator, dt, well_state, prod_controls, summary_state, deferred_logger);
             if (!bhp_target.has_value()) {
                 // solve with zero rate
                 // well can't operate using explicit fractions stop the well
@@ -668,11 +670,11 @@ namespace Opm
     template<typename TypeTag>
     std::optional<typename WellInterface<TypeTag>::Scalar>
     WellInterface<TypeTag>::
-    estimateOperableBhp(const Simulator& simulator,
+    estimateOperableBhpOrig(const Simulator& simulator,
                         const double dt,
                         WellStateType& well_state,
                         const SummaryState& summary_state,
-                        DeferredLogger& deferred_logger)
+                        DeferredLogger& deferred_logger)    
     {
         const auto& ws = well_state.well(this->index_of_well_);
         const auto msg = fmt::format("--- Estimating operability for well {}", this->name());
@@ -724,6 +726,87 @@ namespace Opm
         const auto msg5 = fmt::format("--- Well {} estimated operable BHP to {} (rho = {})", this->name(), bhp_target, rho);
         deferred_logger.debug(msg5);
         return res;
+    }
+
+    template<typename TypeTag>
+    std::optional<typename WellInterface<TypeTag>::Scalar>
+    WellInterface<TypeTag>::
+    estimateOperableBhp(const Simulator& simulator,
+                        const double dt,
+                        WellStateType& well_state,
+                        const Well::ProductionControls& controls,
+                        const SummaryState& summary_state,
+                        DeferredLogger& deferred_logger)
+    {
+        if (!this->wellHasTHPConstraints(summary_state)) {
+            const Scalar bhp_limit = WellBhpThpCalculator(*this).mostStrictBhpFromBhpLimits(summary_state);
+            const bool converged = solveWellWithBhp(simulator, dt, bhp_limit, well_state, deferred_logger);
+            if (!converged || this->wellIsStopped()) {
+                return std::nullopt;
+            }
+            return bhp_limit;
+        }
+        OPM_TIMEFUNCTION();
+        // Given an unconverged well or closed well, estimate an operable bhp (if any)
+        // Get minimal bhp from vfp-curve
+        Scalar bhp_min =  WellBhpThpCalculator(*this).calculateMinimumBhpFromThp(well_state, this->well_ecl_, summary_state, this->getRefDensity());
+        // Solve
+        const bool converged = solveWellWithBhp(simulator, dt, bhp_min, well_state, deferred_logger);
+        if (!converged || this->wellIsStopped()) {
+            return std::nullopt;
+        }
+        this->updateIPRImplicit(simulator, well_state, deferred_logger);
+        auto& ws = well_state.well(this->index_of_well_);
+        // obtain corresponding vfp/ipr intersections
+        std::pair<Scalar, Scalar> intersect_rate_scale;
+        std::pair<Scalar, Scalar> intersect_bhp;
+        auto rates = ws.surface_rates;
+        this->adaptRatesForVFP(rates);
+        const bool success = intersectVFPWithIPR(well_state, this->well_ecl_, rates, this->getRefDensity(), 
+                                                 summaryState, intersect_rate_scale, intersect_bhp);
+        if (!success) {
+            deferred_logger.debug(fmt::format("estimateOperableBhp: Well {} has no VFP/IPR intersections at current conditions", this->name()));
+            return std::nullopt;
+        } else {
+            // estimate most strict control mode and corresponding rate scaling
+            const auto [cmode, cmode_scale] = this->estimateStrictestProductionConstraint(ws, summary_state, controls, 
+                                                                                    /*skip_zero_rate_constraints*/ false,
+                                                                                    deferred_logger, 
+                                                                                    /*bhp_at_thp_limit*/ intersect_bhp.second);
+            if (cmode == Well::ProducerCMode::CMODE_UNDEFINED) {
+                // should not happen, report and return
+                deferred_logger.info(fmt::format("estimateOperableBhp: found no valid control mode for well {}", this->name()));
+                return std::nullopt;
+            }
+            if (!(cmode == Well::ProducerCMode::BHP) && !(cmode == Well::ProducerCMode::THP)) {
+                // most strict control is rate or group
+                if (cmode_scale < intersect_rate_scale.first) {
+                    // rate control below first intersection
+                    const auto& wvfpexp = this->wellEcl().getWVFPEXP();
+                    if (!wvfpexp.prevent()) {
+                        // don't allow operating at rate limit below lower intersection (subject to change?)
+                        deferred_logger.debug(fmt::format("estimateOperableBhp: Well {} is not allowed to operate under unstable rate limit ({})", 
+                                              this->name(), WellProducerCMode2String(cmode)));
+                        return std::nullopt;
+                    }
+                }
+            }
+            //ws.production_cmode = cmode;
+            // scale surface rates 
+            //for (auto& q : ws.surface_rates) {
+            //    q *= cmode_scale;
+            //}
+            // interpolate between the two intersection points to get bhp at cmode_scale
+            const Scalar scale_diff = intersect_rate_scale.second - intersect_rate_scale.first;
+            if (std::abs(scale_diff) < 1e-6) {
+                // return bhp at the second intersection (the two should be ~equal)
+                return intersect_bhp.second;
+            } else {
+                // linear interpolation
+                const Scalar a = (intersect_bhp.second - intersect_bhp.first)/scale_diff;
+                return intersect_bhp.first + a*(cmode_scale - intersect_rate_scale.first);
+            }
+        }
     }
 
     template<typename TypeTag>

@@ -447,9 +447,17 @@ protected:
                                        DeferredLogger& deferred_logger);
 
     std::optional<Scalar>
-    estimateOperableBhp(const Simulator& ebos_simulator,
+    estimateOperableBhpOrig(const Simulator& ebos_simulator,
                         const double dt,
                         WellStateType& well_state,
+                        const SummaryState& summary_state,
+                        DeferredLogger& deferred_logger);
+
+    std::optional<Scalar>
+    estimateOperableBhp(const Simulator& simulator,
+                        const double dt,
+                        WellStateType& well_state,
+                        const Well::ProductionControls& controls,
                         const SummaryState& summary_state,
                         DeferredLogger& deferred_logger);
 

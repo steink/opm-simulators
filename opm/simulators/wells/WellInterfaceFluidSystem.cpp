@@ -193,7 +193,7 @@ updateProducerControlMode(const SingleWellState<Scalar, IndexTraits>& ws,
                                                         surface_rates, voidage_rates);
     };
     return WellConstraints(*this).
-            estimateMostStrictProductionControl(ws, summaryState, rRates, controls, deferred_logger);
+            updateProducerControlMode(ws, summaryState, rRates, controls, deferred_logger);
 }
 
 
@@ -203,7 +203,9 @@ WellInterfaceFluidSystem<FluidSystem>::
 estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
                                     const SummaryState& summaryState,
                                     const Well::ProductionControls& controls,
-                                    DeferredLogger& deferred_logger) const
+                                    const bool skip_zero_rate_constraints,
+                                    DeferredLogger& deferred_logger,
+                                    const std::optional<Scalar> bhp_at_thp_limit) const
 {
     auto rRates = [this](const int fipreg,
                          const int pvtRegion,
@@ -214,7 +216,8 @@ estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>
                                                         surface_rates, voidage_rates);
     };
     return WellConstraints(*this).
-            estimateStrictestProductionConstraint(ws, summaryState, rRates, controls, deferred_logger);
+            estimateStrictestProductionConstraint(ws, summaryState, rRates, controls, skip_zero_rate_constraints,
+                                                  deferred_logger, bhp_at_thp_limit);
 }
 
 template<typename FluidSystem>
@@ -223,6 +226,7 @@ WellInterfaceFluidSystem<FluidSystem>::
 estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
                                           const SummaryState& summaryState,
                                           const Well::ProductionControls& controls,
+                                          const bool skip_zero_rate_constraints,
                                           DeferredLogger& deferred_logger) const
     {
     auto rRates = [this](const int fipreg,
@@ -234,7 +238,8 @@ estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTra
                                                         surface_rates, voidage_rates);
     };
     return WellConstraints(*this).
-            estimateStrictestProductionRateConstraint(ws, summaryState, rRates, controls, deferred_logger);
+            estimateStrictestProductionRateConstraint(ws, summaryState, rRates, controls, 
+                                                      skip_zero_rate_constraints, deferred_logger);
 }
 
 template<typename FluidSystem>
