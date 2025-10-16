@@ -29,7 +29,7 @@
 
 #include <opm/ml/ml_model.hpp>
 
-#include <string>         
+#include <string>
 #include <vector>
 
 namespace Opm {
@@ -97,11 +97,11 @@ public:
     *         invalid fluid system is encountered.
     */
     void tryApplyHybridNewton()
-    {   
-        // Check if flag activated 
+    {
+        // Check if flag activated
         if (!Parameters::Get<Parameters::UseHyNe>())
             return;
-        
+
         validateFluidSystem();
 
         if (!configsLoaded_) {
@@ -147,12 +147,11 @@ private:
     }
 
 protected:
-
     void validateFluidSystem()
     {
         const auto& eclState = simulator_.vanguard().eclState();
         const auto& phases = eclState.runspec().phases();
-        
+
         bool hasWater = phases.active(Phase::WATER);
         bool hasGas = phases.active(Phase::GAS);
         bool hasOil = phases.active(Phase::OIL);
@@ -160,7 +159,7 @@ protected:
 
         // Check for three-phase black oil system
         if (!(hasWater && hasOil && hasGas && !hasSolvent)) {
-            OPM_THROW(std::runtime_error, 
+            OPM_THROW(std::runtime_error,
                 "HybridNewton: Unsupported fluid system. Only three-phase black oil is supported.");
         }
     }
@@ -205,7 +204,7 @@ protected:
         return false;
     }
 
-    
+
     /*!
     * \brief Construct the input feature tensor for the Hybrid Newton model.
     *
@@ -230,9 +229,8 @@ protected:
     * \param config  HybridNewtonConfig containing feature definitions and cell indices.
     * \return        A 1D tensor of Evaluation values with the computed layout.
     */
-    ML::Tensor<Evaluation> constructInputTensor(
-        const HybridNewtonConfig& config
-    )
+    ML::Tensor<Evaluation>
+    constructInputTensor(const HybridNewtonConfig& config)
     {
         const auto& features = config.input_features;
 
@@ -363,7 +361,7 @@ protected:
     * output tensor. Scaling and transformations defined in the configuration
     * are applied automatically.
     *
-    * \param input The input tensor of shape 
+    * \param input The input tensor of shape
     *              [(# of scalar features) + (# of per-cell features × n_cells)].
     * \param config The HybridNewtonConfig specifying model path and output
     *        feature definitions.
@@ -374,18 +372,19 @@ protected:
     *         output tensor does not match the expected feature layout.
     */
     ML::Tensor<Evaluation>
-    constructOutputTensor(const ML::Tensor<Evaluation>& input, const HybridNewtonConfig& config)
+    constructOutputTensor(const ML::Tensor<Evaluation>& input,
+                          const HybridNewtonConfig& config)
     {
         const auto& features = config.output_features;
         const int n_features = features.size();
-        
+
         ML::NNModel<Evaluation> model;
         model.loadModel(config.model_path);
 
         ML::Tensor<Evaluation> output(1, config.n_cells * n_features);
         model.apply(input, output);
 
-        return output; 
+        return output;
     }
 
     /*!
@@ -415,11 +414,9 @@ protected:
     * \throws std::runtime_error if an unknown output feature is encountered
     *         or if state consistency cannot be enforced.
     */
-    void updateInitialGuess(
-        ML::Tensor<Evaluation>& output, 
-        const HybridNewtonConfig& config 
-    )
-    {   
+    void updateInitialGuess(ML::Tensor<Evaluation>& output,
+                            const HybridNewtonConfig& config)
+    {
         const auto& features = config.output_features;
 
         FeatureFlags flags = flagFeatures(features);
@@ -436,35 +433,35 @@ protected:
             // Temp variables per cell
             Scalar sw_val = -1.0;
             Scalar so_val = -1.0;
-            Scalar sg_val = -1.0; 
+            Scalar sg_val = -1.0;
             Scalar po_val = -1.0;
 
             for (const auto& [name, spec] : features) {
 
                 auto scaled_value = getValue(output(feature_idx * config.n_cells + i));
-                
+
                 // Inverse scaling
                 Scalar raw_value = spec.scaler.unscale(scaled_value);
 
                 // Inverse transform
                 raw_value = spec.transform.applyInverse(raw_value);
 
-                if (spec.is_delta) { 
-                    if (spec.actual_name == "PRESSURE") { 
-                        raw_value = raw_value + unitSyst.from_si(UnitSystem::measure::pressure, getValue(fs.pressure(oilPhaseIdx))); 
-                    } else if (spec.actual_name == "SWAT") { 
-                        raw_value += getValue(fs.saturation(waterPhaseIdx)); 
-                    } else if (spec.actual_name == "SOIL") { 
-                        raw_value += getValue(fs.saturation(oilPhaseIdx)); 
-                    } else if (spec.actual_name == "SGAS") { 
-                        raw_value += getValue(fs.saturation(gasPhaseIdx)); 
-                    } else if (spec.actual_name == "RS") { 
-                        raw_value = raw_value + unitSyst.from_si(UnitSystem::measure::gas_oil_ratio, getValue(fs.Rs())); 
-                    } else if (spec.actual_name == "RV") { 
-                        raw_value = raw_value + unitSyst.from_si(UnitSystem::measure::oil_gas_ratio, getValue(fs.Rv())); 
-                    } else { 
-                        OPM_THROW(std::runtime_error, "Unknown delta feature: " + name); 
-                    } 
+                if (spec.is_delta) {
+                    if (spec.actual_name == "PRESSURE") {
+                        raw_value = raw_value + unitSyst.from_si(UnitSystem::measure::pressure, getValue(fs.pressure(oilPhaseIdx)));
+                    } else if (spec.actual_name == "SWAT") {
+                        raw_value += getValue(fs.saturation(waterPhaseIdx));
+                    } else if (spec.actual_name == "SOIL") {
+                        raw_value += getValue(fs.saturation(oilPhaseIdx));
+                    } else if (spec.actual_name == "SGAS") {
+                        raw_value += getValue(fs.saturation(gasPhaseIdx));
+                    } else if (spec.actual_name == "RS") {
+                        raw_value = raw_value + unitSyst.from_si(UnitSystem::measure::gas_oil_ratio, getValue(fs.Rs()));
+                    } else if (spec.actual_name == "RV") {
+                        raw_value = raw_value + unitSyst.from_si(UnitSystem::measure::oil_gas_ratio, getValue(fs.Rv()));
+                    } else {
+                        OPM_THROW(std::runtime_error, "Unknown delta feature: " + name);
+                    }
                 }
 
                 if (spec.actual_name == "PRESSURE") {
@@ -477,7 +474,7 @@ protected:
                     sg_val = raw_value;
                 } else if (spec.actual_name == "RS") {
                     if constexpr (compositionSwitchEnabled) {
-                        raw_value = unitSyst.to_si(UnitSystem::measure::gas_oil_ratio, raw_value); 
+                        raw_value = unitSyst.to_si(UnitSystem::measure::gas_oil_ratio, raw_value);
                         fs.setRs(raw_value);
                     }
                 } else if (spec.actual_name == "RV") {
@@ -492,7 +489,9 @@ protected:
                 ++feature_idx;
             }
 
-            int sat_count = static_cast<int>(flags.has_SWAT) + static_cast<int>(flags.has_SOIL) + static_cast<int>(flags.has_SGAS);
+            int sat_count = static_cast<int>(flags.has_SWAT) +
+                            static_cast<int>(flags.has_SOIL) +
+                            static_cast<int>(flags.has_SGAS);
 
             if (sat_count >= 2) {
                 Scalar sw = sw_val;
@@ -542,15 +541,16 @@ protected:
 
         simulator_.model().invalidateAndUpdateIntensiveQuantities(/*timeIdx*/0);
     }
-    
-    struct FeatureFlags {
-    bool has_SWAT = false;
-    bool has_SOIL = false;
-    bool has_SGAS = false;
-    bool has_PRESSURE = false;
+
+    struct FeatureFlags
+    {
+        bool has_SWAT = false;
+        bool has_SOIL = false;
+        bool has_SGAS = false;
+        bool has_PRESSURE = false;
     };
 
-    FeatureFlags flagFeatures(const std::vector<std::pair<std::string, FeatureSpec>>& features) 
+    FeatureFlags flagFeatures(const std::vector<std::pair<std::string, FeatureSpec>>& features)
     {
         FeatureFlags flags;
 
@@ -570,11 +570,11 @@ protected:
         return flags;
     }
 
-    protected:
-        Simulator& simulator_;
-        std::vector<HybridNewtonConfig> configs_;
-        bool configsLoaded_;
-    };
+protected:
+    Simulator& simulator_;
+    std::vector<HybridNewtonConfig> configs_;
+    bool configsLoaded_;
+};
 
 } // namespace Opm
 

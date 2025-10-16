@@ -684,11 +684,12 @@ namespace Opm
     template <typename TypeTag>
     void
     MultisegmentWell<TypeTag>::
-    computeInitialSegmentFluids(const Simulator& simulator)
+    computeInitialSegmentFluids(const Simulator& simulator,
+                                DeferredLogger& deferred_logger)
     {
         for (int seg = 0; seg < this->numberOfSegments(); ++seg) {
             // TODO: trying to reduce the times for the surfaceVolumeFraction calculation
-            const Scalar surface_volume = getSegmentSurfaceVolume(simulator, seg).value();
+            const Scalar surface_volume = getSegmentSurfaceVolume(simulator, seg, deferred_logger).value();
             for (int comp_idx = 0; comp_idx < this->num_conservation_quantities_; ++comp_idx) {
                 segment_fluid_initial_[seg][comp_idx] = surface_volume * this->primary_variables_.surfaceVolumeFraction(seg, comp_idx).value();
             }
@@ -747,7 +748,7 @@ namespace Opm
     {
         updatePrimaryVariables(simulator, well_state, deferred_logger);
         computePerfCellPressDiffs(simulator);
-        computeInitialSegmentFluids(simulator);
+        computeInitialSegmentFluids(simulator, deferred_logger);
     }
 
 
@@ -1140,7 +1141,6 @@ namespace Opm
         this->segments_.computeFluidProperties(temperature,
                                                saltConcentration,
                                                this->primary_variables_,
-                                               std::get<2>(info), //pvt_region_index
                                                deferred_logger);
     }
 
@@ -1935,7 +1935,7 @@ namespace Opm
             // calculating the accumulation term
             // TODO: without considering the efficiency factor for now
             {
-                const EvalWell segment_surface_volume = getSegmentSurfaceVolume(simulator, seg);
+                const EvalWell segment_surface_volume = getSegmentSurfaceVolume(simulator, seg, deferred_logger);
 
                 // Add a regularization_factor to increase the accumulation term
                 // This will make the system less stiff and help convergence for
@@ -2086,7 +2086,9 @@ namespace Opm
     template<typename TypeTag>
     typename MultisegmentWell<TypeTag>::EvalWell
     MultisegmentWell<TypeTag>::
-    getSegmentSurfaceVolume(const Simulator& simulator, const int seg_idx) const
+    getSegmentSurfaceVolume(const Simulator& simulator,
+                            const int seg_idx,
+                            DeferredLogger& deferred_logger) const
     {
         EvalWell temperature;
         EvalWell saltConcentration;
@@ -2098,8 +2100,8 @@ namespace Opm
         return this->segments_.getSurfaceVolume(temperature,
                                                 saltConcentration,
                                                 this->primary_variables_,
-                                                std::get<2>(info), //pvt_region_index
-                                                seg_idx);
+                                                seg_idx,
+                                                deferred_logger);
     }
 
 
@@ -2338,13 +2340,13 @@ namespace Opm
     }
 
     template <typename TypeTag>
-    typename MultisegmentWell<TypeTag>::FSInfo MultisegmentWell<TypeTag>::
+    typename MultisegmentWell<TypeTag>::FSInfo
+    MultisegmentWell<TypeTag>::
     getFirstPerforationFluidStateInfo(const Simulator& simulator) const
     {
         Scalar fsTemperature = 0.0;
         using SaltConcType = typename std::decay<decltype(std::declval<decltype(simulator.model().intensiveQuantities(0, 0).fluidState())>().saltConcentration())>::type;
         SaltConcType fsSaltConcentration{};
-        int pvt_region_index = 0;
 
         // If this process does not contain active perforations, this->well_cells_ is empty.
         if (this->well_cells_.size() > 0) {
@@ -2356,10 +2358,9 @@ namespace Opm
 
             fsTemperature = fs.temperature(FluidSystem::oilPhaseIdx).value();
             fsSaltConcentration = fs.saltConcentration();
-            pvt_region_index = fs.pvtRegionIndex();
         }
 
-        auto info = std::make_tuple(fsTemperature, fsSaltConcentration, pvt_region_index);
+        auto info = std::make_tuple(fsTemperature, fsSaltConcentration);
 
         // The following broadcast call is neccessary to ensure that processes that do *not* contain
         // the first perforation get the correct temperature, saltConcentration and pvt_region_index
