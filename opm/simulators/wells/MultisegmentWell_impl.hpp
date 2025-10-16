@@ -1625,17 +1625,24 @@ namespace Opm
                 return false;
         }
         const auto& q_s = well_state.well(this->index_of_well_).surface_rates;
+        /*
         deferred_logger.debug("Well " + this->name() + " surface rates before solving: "
                               + std::to_string(q_s[0]) + " "
                               + std::to_string(q_s[1]) + " "
                               + std::to_string(q_s[2]) );
+        const auto& pq_s = well_state.well(this->index_of_well_).prev_surface_rates;
+        deferred_logger.debug("Well " + this->name() + " previous surface rates before solving: "
+                              + std::to_string(pq_s[0]) + " "
+                              + std::to_string(pq_s[1]) + " "
+                              + std::to_string(pq_s[2]) );
+        */
 
         if (this->isProducer()) {
             // if well is not stopped/has zero rate target, and all rates are zero, we re-initialize the rates
             auto& rates = well_state.well(this->index_of_well_).surface_rates;
             const bool zero_rates = none_of(rates.begin(), rates.end(), [](Scalar q) {return q < 0.0;});
             if (zero_rates && !this->stoppedOrZeroRateTarget(simulator, well_state, deferred_logger)) {
-                this->initializeProducerWellStateRates(simulator, well_state, deferred_logger);
+                this->initializeProducerWellStateRates(simulator, well_state, deferred_logger, prod_controls);
             }
         }
         updatePrimaryVariables(simulator, well_state, deferred_logger);
@@ -1701,7 +1708,7 @@ namespace Opm
                         status_switch_count++;
                         // if a well is re-opened, we need to re-initialize the rates
                         if (this->isProducer() && well_status_cur == WellStatus::OPEN && !this->stoppedOrZeroRateTarget(simulator, well_state, deferred_logger)) {
-                            this->initializeProducerWellStateRates(simulator, well_state, deferred_logger);
+                            this->initializeProducerWellStateRates(simulator, well_state, deferred_logger, prod_controls);
                             updatePrimaryVariables(simulator, well_state, deferred_logger);
                         }
                     }
@@ -1812,10 +1819,12 @@ namespace Opm
             const std::string thp_msg = fmt::format("   THP limit for well {} is {} barsa, group target is {}", this->name(), unit::convert::to(thp_limit, unit::barsa), grp_target);
             deferred_logger.debug(thp_msg);
         }
+        /*
         deferred_logger.debug("Well " + this->name() + " surface rates after solving: "
                               + std::to_string(q_s[0]) + " "
                               + std::to_string(q_s[1]) + " "
                               + std::to_string(q_s[2]) );
+        */
         return converged;
     }
 

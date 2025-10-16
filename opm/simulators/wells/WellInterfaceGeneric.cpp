@@ -449,6 +449,11 @@ setPrevSurfaceRates(WellState<Scalar, IndexTraits>& well_state,
     } else {
         ws.prev_surface_rates = ws.surface_rates;
     }
+    const auto sum_prev_surface_rates = std::accumulate(ws.prev_surface_rates.begin(), ws.prev_surface_rates.end(), 0.0);
+    if (std::abs(sum_prev_surface_rates) == 0.0) {
+        // this is a bit worrying, but we have to live with it.
+        std::cout << "Warning: well " << this->name() << " has zero previous surface rates" << std::endl;
+    }
 }
 
 template<typename Scalar, typename IndexTraits>

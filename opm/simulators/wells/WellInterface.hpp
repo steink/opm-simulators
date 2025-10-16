@@ -336,12 +336,14 @@ public:
 
     bool initializeProducerWellStateRates(const Simulator& simulator,
                                           WellStateType& well_state,
-                                          DeferredLogger& deferred_logger) const;
+                                          DeferredLogger& deferred_logger,
+                                          const std::optional<Well::ProductionControls>& prod_controls = std::nullopt) const;
 
     bool scaleProducerRatesWithStrictestConstraint(const Simulator& simulator,
                                                    WellStateType& well_state,
                                                    DeferredLogger& deferred_logger,
-                                                   const bool skip_zero_rate_constraints = false) const;
+                                                   const bool skip_zero_rate_constraints,
+                                                   const std::optional<Well::ProductionControls>& prod_controls = std::nullopt) const;
 
     void solveWellEquation(const Simulator& simulator,
                            WellStateType& well_state,

@@ -2400,7 +2400,7 @@ namespace Opm
             auto& rates = well_state.well(this->index_of_well_).surface_rates;
             const bool zero_rates = none_of(rates.begin(), rates.end(), [](Scalar q) {return q < 0.0;});
             if (zero_rates && !this->stoppedOrZeroRateTarget(simulator, well_state, deferred_logger)) {
-                this->initializeProducerWellStateRates(simulator, well_state, deferred_logger);
+                this->initializeProducerWellStateRates(simulator, well_state, deferred_logger, prod_controls);
             }
         }
         updatePrimaryVariables(simulator, well_state, deferred_logger);
@@ -2455,7 +2455,7 @@ namespace Opm
                         status_switch_count++;
                         // if a well is re-opened, we need to re-initialize the rates
                         if (this->isProducer() && well_status_cur == WellStatus::OPEN && !this->stoppedOrZeroRateTarget(simulator, well_state, deferred_logger)) {
-                            this->initializeProducerWellStateRates(simulator, well_state, deferred_logger);
+                            this->initializeProducerWellStateRates(simulator, well_state, deferred_logger, prod_controls);
                             updatePrimaryVariables(simulator, well_state, deferred_logger);
                         }
                     }
@@ -2497,6 +2497,7 @@ namespace Opm
         } while (it < max_iter);
 
         if (converged) {
+            well_state.well(this->index_of_well_).converged = true;
             if (allow_switching){
                 // update operability if status change
                 const bool is_stopped = this->wellIsStopped();
@@ -2508,6 +2509,7 @@ namespace Opm
                 }
             }
         } else {
+            well_state.well(this->index_of_well_).converged = false;
             this->wellStatus_ = well_status_orig;
             this->operability_status_ = operability_orig;
             const std::string message = fmt::format("   iterateWellEqWithSwitching (STDW): Well {} did not converge in {} inner iterations ("

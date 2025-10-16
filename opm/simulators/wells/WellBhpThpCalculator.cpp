@@ -1033,8 +1033,8 @@ intersectVFPWithIPR(const WellState<Scalar, IndexTraits>& well_state,
         const auto& rate_limits = retval.value();
         intersect_rate_scale.first = rate_limits.first/flo;
         intersect_rate_scale.second = rate_limits.second/flo;
-        intersect_bhp.first = (rate_limits.first-ipr.first)/(-ipr.second);
-        intersect_bhp.second = (rate_limits.second-ipr.first)/(-ipr.second);
+        intersect_bhp.first = (rate_limits.first+ipr.first)/(ipr.second);
+        intersect_bhp.second = (rate_limits.second+ipr.first)/(ipr.second);
         return true;
     }
 }

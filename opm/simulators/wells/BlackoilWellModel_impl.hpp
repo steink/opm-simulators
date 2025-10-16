@@ -449,9 +449,9 @@ namespace Opm {
         }
 
         for (const auto& well : well_container_) {
-            if (well->isVFPActive(local_deferredLogger)){
+            //if (well->isVFPActive(local_deferredLogger)){
                 well->setPrevSurfaceRates(this->wellState(), this->prevWellState());
-            }
+            //}
         }
         try {
             this->updateWellPotentials(reportStepIdx,
@@ -579,9 +579,9 @@ namespace Opm {
                 //well->initializeProducerWellState(simulator_, this->wellState(), deferred_logger);
                 well->initializeProducerWellStateRates(simulator_, this->wellState(), deferred_logger);
             }
-            if (well->isVFPActive(deferred_logger)) {
+            //if (well->isVFPActive(deferred_logger)) {
                 well->setPrevSurfaceRates(this->wellState(), this->prevWellState());
-            }
+            //}
 
             const auto& network = this->schedule()[timeStepIdx].network();
             if (network.active() && !this->node_pressures_.empty()) {
