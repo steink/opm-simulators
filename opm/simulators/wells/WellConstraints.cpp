@@ -503,7 +503,7 @@ estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTra
         }
     }
     // check group constraints if target is given in well-state
-    if (controls.hasControl(Well::ProducerCMode::GRUP) && !ws.prevent_group_control && ws.group_target.has_value()) {
+    if (controls.hasControl(Well::ProducerCMode::GRUP) && !ws.prevent_group_control && ws.group_target.has_value() && ws.production_cmode_group_translated.has_value()) {
         const Scalar scale = getProductionControlModeScale(ws, calcReservoirVoidageRates, ws.production_cmode_group_translated.value(), controls, 
                                                            skip_zero_rate_constraints, deferred_logger, ws.group_target.value());
         if (scale >= 0.0 && scale < most_strict_scale) {

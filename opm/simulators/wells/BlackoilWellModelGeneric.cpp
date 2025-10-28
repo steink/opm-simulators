@@ -1497,7 +1497,7 @@ updateAndCommunicateGroupData(const int reportStepIdx,
                                             deferred_logger);
                 auto& ws_update = this->wellState().well(well->indexOfWell());
                 ws_update.production_cmode_group_translated = group_target.first;
-                ws_update.group_target = group_target.second;                                            
+                ws_update.group_target = group_target.second;
             } else {
                 const auto& well_controls = well->wellEcl().injectionControls(summaryState_);
                 auto injectorType = well_controls.injector_type;

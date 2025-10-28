@@ -569,7 +569,17 @@ namespace Opm {
                                                                   this->schedule(),
                                                                   timeStepIdx,
                                                                   well_efficiency_factor);
+            if (well_efficiency_factor < 1e-5) {
+                const std::string msg = "Well efficiency factor " + well_name + " is too low: " + std::to_string(well_efficiency_factor)
+                                        + ". The well is not allowed to open during well testing.";
+                deferred_logger.debug(msg);
+                // const Scalar weff1 = wellEcl.getEfficiencyFactor();
+                // const Scalar weff2 = this->wellState().getGlobalEfficiencyScalingFactor(well_name);
+                //deferred_logger.debug("Eff fac check1: " + std::to_string(weff1) + "check2: " +  std::to_string(weff2));
+                continue;
+            }
 
+            
             well->setWellEfficiencyFactor(well_efficiency_factor);
             well->setVFPProperties(this->vfp_properties_.get());
             well->setGuideRate(&this->guideRate_);
@@ -1325,6 +1335,8 @@ namespace Opm {
                                local_deferredLogger,
                                relax_network_tolerance);
 
+        this->updateAndCommunicateGroupData(reportStepIdx, iterationIdx,
+            param_.nupcol_group_rate_tolerance_, /*update_wellgrouptarget*/ true, local_deferredLogger);
 
         bool alq_updated = false;
         OPM_BEGIN_PARALLEL_TRY_CATCH();

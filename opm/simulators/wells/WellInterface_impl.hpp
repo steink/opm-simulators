@@ -311,7 +311,8 @@ namespace Opm
                     // Changing to group controls here may lead to inconsistencies in the group handling which in turn
                     // may result in excessive back and forth switching. However, we currently allow this by default.
                     // The switch check_group_constraints_inner_well_iterations_ is a temporary solution.
-                    if (this->isProducer() && (ws.group_target.has_value() || !prod_controls.hasControl(Well::ProducerCMode::GRUP) )) {
+                    const bool valid_group_target = ws.group_target.has_value() && ws.production_cmode_group_translated.has_value();
+                    if (this->isProducer() && (valid_group_target || !prod_controls.hasControl(Well::ProducerCMode::GRUP) )) {
                         changed = this->updateProducerControlMode(ws, summary_state, prod_controls, deferred_logger);
                     } else {
                         const bool hasGroupControl = this->isInjector() ? inj_controls.hasControl(Well::InjectorCMode::GRUP) :
@@ -402,6 +403,9 @@ namespace Opm
         WellStateType well_state_copy = well_state;
         auto& ws = well_state_copy.well(this->indexOfWell());
 
+        this->operability_status_.resetOperability();
+        this->operability_status_.solvable = true;
+
         const auto& summary_state = simulator.vanguard().summaryState();
         const bool has_thp_limit = this->wellHasTHPConstraints(summary_state);
         if (this->isProducer()) {
@@ -433,6 +437,7 @@ namespace Opm
             const auto report_step = simulator.episodeIndex();
             const auto& glo = schedule.glo(report_step);
             if (glo.active()) {
+                deferred_logger.debug(" GLO is active during well testing for well " + this->name());
                 gliftBeginTimeStepWellTestUpdateALQ(simulator,
                                                     well_state_copy,
                                                     group_state,
@@ -449,11 +454,20 @@ namespace Opm
         // untill the number of closed completions do not increase anymore.
         while (testWell) {
             const std::size_t original_number_closed_completions = welltest_state_temp.num_closed_completions();
+            deferred_logger.debug("WTEST: Testing well " + this->name() + " with "
+                                 + std::to_string(welltest_state_temp.num_closed_completions()) + " closed completions");
+            const bool operable = this->isOperableAndSolvable();
+            const bool isstopped = this->wellIsStopped();
+            deferred_logger.debug("WTEST: Well " + this->name() + " operable: "
+                                 + (operable ? "true" : "false") + ", stopped: "
+                                 + (isstopped ? "true" : "false"));
             bool converged = solveWellForTesting(simulator, well_state_copy, group_state, deferred_logger);
             if (!converged) {
                 const auto msg = fmt::format("WTEST: Well {} is not solvable (physical)", this->name());
                 deferred_logger.debug(msg);
                 return;
+            } else {
+                deferred_logger.info(" well " + this->name() + " solved during testing");
             }
 
 
@@ -548,6 +562,7 @@ namespace Opm
         } catch (NumericalProblem& e ) {
             const std::string msg = "Inner well iterations failed for well " + this->name() + " Treat the well as unconverged. ";
             deferred_logger.warning("INNER_ITERATION_FAILED", msg);
+            deferred_logger.debug("Problem is for well " + this->name() + ": " + e.what());
             converged = false;
         }
         if (converged) {
@@ -595,7 +610,7 @@ namespace Opm
         bool converged = true;
         auto& ws = well_state.well(this->index_of_well_);
         // if well is stopped, check if we can reopen
-        if (this->wellIsStopped()) {
+        if (this->wellIsStopped() || !ws.converged) {
             this->openWell();
             auto bhp_target = estimateOperableBhp(simulator, dt, well_state, prod_controls, summary_state, deferred_logger);
             if (!bhp_target.has_value()) {
@@ -908,7 +923,8 @@ namespace Opm
         auto inj_controls = this->well_ecl_.isInjector() ? this->well_ecl_.injectionControls(summary_state) : Well::InjectionControls(0);
         auto prod_controls = this->well_ecl_.isProducer() ? this->well_ecl_.productionControls(summary_state) : Well::ProductionControls(0);
         this->onlyKeepBHPandTHPcontrols(summary_state, well_state, inj_controls, prod_controls);
-
+        deferred_logger.debug("Solve-stage. bhp-limit: " + std::to_string(prod_controls.bhp_limit) + ", thp-limit: " + std::to_string(this->getTHPConstraint(summary_state)));
+        updateWellStateWithTarget(simulator, group_state, well_state, deferred_logger);
         bool converged = false;
         try {
             // TODO: the following two functions will be refactored to be one to reduce the code duplication
@@ -925,6 +941,7 @@ namespace Opm
         } catch (NumericalProblem& e ) {
             const std::string msg = "Inner well iterations failed for well " + this->name() + " Treat the well as unconverged. ";
             deferred_logger.warning("INNER_ITERATION_FAILED", msg);
+            deferred_logger.debug("Problem is for well " + this->name() + ": " + e.what());
             converged = false;
         }
 
@@ -1675,6 +1692,9 @@ namespace Opm
             }
             case Well::ProducerCMode::THP:
             {
+                ws.thp = this->getTHPConstraint(summaryState);
+                break;
+                /*
                 const bool update_success = updateWellStateWithTHPTargetProd(simulator, well_state, deferred_logger);
 
                 if (!update_success) {
@@ -1698,6 +1718,7 @@ namespace Opm
                     }
                 }
                 break;
+                */
             }
             case Well::ProducerCMode::GRUP:
             {

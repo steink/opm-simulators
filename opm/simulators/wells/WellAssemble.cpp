@@ -67,8 +67,9 @@ assembleControlEqProd(const WellState<Scalar, IndexTraits>& well_state,
     auto current = well_state.well(well_.indexOfWell()).production_cmode;
     const Scalar efficiencyFactor = well_.wellEcl().getEfficiencyFactor() *
                                     well_state[well_.name()].efficiency_scaling_factor;
-    // hack option for setting group control eq directly 
-    const bool alternativeGroupControlEq = true;
+    // hack option for setting group control eq directly
+    const auto ws = well_state.well(well_.indexOfWell());
+    const bool alternativeGroupControlEq = ws.group_target.has_value() && ws.production_cmode_group_translated.has_value();
     std::optional<Scalar> group_target;
     if (alternativeGroupControlEq && current == Well::ProducerCMode::GRUP) {
         current = well_state.well(well_.indexOfWell()).production_cmode_group_translated.value();

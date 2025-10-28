@@ -984,6 +984,7 @@ void WellInterfaceGeneric<Scalar, IndexTraits>::updatePreventGroupControl(const 
         rate_sum = std::accumulate(weighted_rates.begin(), weighted_rates.end(), 0.0);
         if (rate_sum == 0.0) {
             // should not happen, but just in case
+            deferred_logger.warning(fmt::format("Well {} has zero cur/previous surface rate, can't decide valid group control", this->name()));
             return;
         }
     }

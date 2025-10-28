@@ -52,6 +52,60 @@ MultisegmentWellGeneric(WellInterfaceGeneric<Scalar, IndexTraits>& baseif)
 template<typename Scalar, typename IndexTraits>
 void
 MultisegmentWellGeneric<Scalar, IndexTraits>::
+initializeSegmentRatesWithWellRates(const std::vector<std::vector<int>>& segment_inlets,
+                                    const std::vector<std::vector<int>>& segment_perforations,
+                                    WellState<Scalar, IndexTraits>& well_state) const
+{
+    auto& ws = well_state.well(baseif_.indexOfWell());
+    auto& segments = ws.segments;
+    auto& segment_rates = segments.rates;
+    Scalar sumTw = 0;
+    // We can not scale this rate directly. The following approach is used to initialize the segment rates.
+    for (int perf = 0; perf < baseif_.numLocalPerfs(); ++perf) {
+        sumTw += baseif_.wellIndex()[perf];
+    }
+    // We need to communicate here to scale the perf_phaserate_scaled with the contribution of all segments
+    sumTw = ws.parallel_info.get().communication().sum(sumTw);
+    
+    
+    for (int phase = 0; phase < baseif_.numPhases(); ++phase) {
+        const Scalar well_phase_rate = ws.surface_rates[phase];
+        constexpr Scalar num_single_phase = 1;
+        std::vector<Scalar> perforation_rates(num_single_phase * baseif_.numLocalPerfs(), 0.0);
+        const Scalar perf_phaserate_scaled = well_phase_rate / sumTw;
+        for (int perf = 0; perf < baseif_.numLocalPerfs(); ++perf) {
+            perforation_rates[perf] = baseif_.wellIndex()[perf] * perf_phaserate_scaled;
+        }
+
+        std::vector<Scalar> rates;
+        WellState<Scalar, IndexTraits>::calculateSegmentRates(ws.parallel_info,
+                                                    segment_inlets,
+                                                    segment_perforations,
+                                                    perforation_rates,
+                                                    num_single_phase, 0, rates);
+        for (int seg = 0; seg < numberOfSegments(); ++seg) {
+            segment_rates[baseif_.numPhases() * seg + phase] = rates[seg];
+        }
+    } 
+    // There might still be segments with zero total rate if connections have been closed off
+    // In this case, introduce small rates proportional to top rate to prevent problematic
+    // initialization of primary variables
+    for (int seg = 0; seg < numberOfSegments(); ++seg) {
+        Scalar seg_rate_sum = 0.0;
+        for (int phase = 0; phase < baseif_.numPhases(); ++phase) {
+            seg_rate_sum += std::abs(segment_rates[baseif_.numPhases() * seg + phase]);
+        }
+        if (std::abs(seg_rate_sum) < 1e-12) {
+            for (int phase = 0; phase < baseif_.numPhases(); ++phase) {
+                segment_rates[baseif_.numPhases() * seg + phase] = 1e-6 * segments.rates[phase];
+            }
+        }
+    }
+}
+
+template<typename Scalar, typename IndexTraits>
+void
+MultisegmentWellGeneric<Scalar, IndexTraits>::
 scaleSegmentRatesWithWellRates(const std::vector<std::vector<int>>& segment_inlets,
                                const std::vector<std::vector<int>>& segment_perforations,
                                WellState<Scalar, IndexTraits>& well_state) const
@@ -96,6 +150,20 @@ scaleSegmentRatesWithWellRates(const std::vector<std::vector<int>>& segment_inle
                                                      num_single_phase, 0, rates);
             for (int seg = 0; seg < numberOfSegments(); ++seg) {
                 segment_rates[baseif_.numPhases() * seg + phase] = rates[seg];
+            }
+        }
+    } 
+    // There might still be segments with zero total rate if connections have been closed off
+    // In this case, introduce small rates proportional to top rate to prevent problematic
+    // initialization of primary variables
+    for (int seg = 0; seg < numberOfSegments(); ++seg) {
+        Scalar seg_rate_sum = 0.0;
+        for (int phase = 0; phase < baseif_.numPhases(); ++phase) {
+            seg_rate_sum += std::abs(segment_rates[baseif_.numPhases() * seg + phase]);
+        }
+        if (std::abs(seg_rate_sum) < 1e-12) {
+            for (int phase = 0; phase < baseif_.numPhases(); ++phase) {
+                segment_rates[baseif_.numPhases() * seg + phase] = 1e-6 * segments.rates[phase];
             }
         }
     }

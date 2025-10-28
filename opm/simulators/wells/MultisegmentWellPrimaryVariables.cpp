@@ -72,8 +72,8 @@ update(const WellState<Scalar, IndexTraits>& well_state,
 {
     // TODO: to test using rate conversion coefficients to see if it will be better than
     // this default one
-    if (!well_.isOperableAndSolvable() && !well_.wellIsStopped())
-        return;
+    //if (!well_.isOperableAndSolvable() && !well_.wellIsStopped())
+    //    return;
 
     const Well& well = well_.wellEcl();
 
@@ -109,7 +109,7 @@ update(const WellState<Scalar, IndexTraits>& well_state,
         }
 
         // todo to map old fraction to new perforations for now start from scratch.
-        if (ws.primaryvar.size() == value_.size() * numWellEq) {
+        if (false || ws.primaryvar.size() == value_.size() * numWellEq) {
             if (has_wfrac_variable) {
                 value_[seg][WFrac] = ws.primaryvar[seg * numWellEq + WFrac];
             }
@@ -701,6 +701,49 @@ outputLowLimitPressureSegments(DeferredLogger& deferred_logger) const
         deferred_logger.debug(msg);
     }
 }
+
+template<class FluidSystem, class Indices>
+void
+MultisegmentWellPrimaryVariables<FluidSystem,Indices>::
+outputPressureSegments(DeferredLogger& deferred_logger) const
+{
+    std::string msg = fmt::format("outputting the segment pressures for well {} for debugging purpose \n", this->well_.name());
+    for (std::size_t seg = 0; seg < value_.size(); ++seg) {
+        //const double lower_limit = (seg == 0) ? bhp_lower_limit : seg_pres_lower_limit;
+        const double pres = Opm::getValue(this->getSegmentPressure(seg));
+        fmt::format_to(std::back_inserter(msg), "seg {} : pressure {}\n", seg, pres / unit::barsa);
+    }
+    deferred_logger.debug(msg);
+}
+
+template<class FluidSystem, class Indices>
+void
+MultisegmentWellPrimaryVariables<FluidSystem,Indices>::
+outputFractionsSegments(DeferredLogger& deferred_logger) const
+{
+    std::string msg = fmt::format("outputting the segment fractions for well {} for debugging purpose \n", this->well_.name());
+    for (std::size_t seg = 0; seg < value_.size(); ++seg) {
+        //const double lower_limit = (seg == 0) ? bhp_lower_limit : seg_pres_lower_limit;
+
+        const double f0 = Opm::getValue(this->volumeFraction(seg, 0));
+        const double f1 = Opm::getValue(this->volumeFraction(seg, 1));
+        const double f2 = Opm::getValue(this->volumeFraction(seg, 2));
+        const double v = Opm::getValue(evaluation_[seg][WQTotal]);
+        fmt::format_to(std::back_inserter(msg), "seg {} : fractions/rate {} {} {} {}\n", seg, f0, f1, f2, v);
+    }
+    deferred_logger.debug(msg);
+    // wqtotal
+    const auto wqtotal = getWQTotal();
+    deferred_logger.debug(fmt::format("well {} : WQTotal {} , derivatives: [{} {} {} {}]\n", this->well_.name(), wqtotal.value(), wqtotal.derivative(3), wqtotal.derivative(4), wqtotal.derivative(5), wqtotal.derivative(6)));
+    const auto f0 = volumeFraction(0, 0);
+    deferred_logger.debug(fmt::format("well {} : F0 {} , derivatives: [{} {} {} {}]\n", this->well_.name(), f0.value(), f0.derivative(3), f0.derivative(4), f0.derivative(5), f0.derivative(6)));
+    const auto f1 = volumeFraction(0, 1);
+    deferred_logger.debug(fmt::format("well {} : F1 {} , derivatives: [{} {} {} {}]\n", this->well_.name(), f1.value(), f1.derivative(3), f1.derivative(4), f1.derivative(5), f1.derivative(6)));
+    const auto f2 = volumeFraction(0, 2);
+    deferred_logger.debug(fmt::format("well {} : F2 {} , derivatives: [{} {} {} {}]\n", this->well_.name(), f2.value(), f2.derivative(3), f2.derivative(4), f2.derivative(5), f2.derivative(6)));
+}
+
+
 
 #include <opm/simulators/utils/InstantiationIndicesMacros.hpp>
 

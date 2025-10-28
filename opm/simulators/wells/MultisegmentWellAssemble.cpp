@@ -37,6 +37,7 @@
 #include <opm/simulators/wells/WellInterfaceIndices.hpp>
 #include <opm/simulators/wells/WellState.hpp>
 
+#include <dune/istl/matrixmarket.hh>
 namespace Opm {
 
 //! \brief Class administering assembler access to equation system.
@@ -418,6 +419,18 @@ assemblePerforationEq(const int seg,
         // also need to consider the efficiency factor when manipulating the jacobians.
         eqns.B()[seg][local_perf_index][comp_idx][pv_idx] += cq_s_effective.derivative(pv_idx);
     }
+}
+
+template<class FluidSystem, class Indices>
+void MultisegmentWellAssemble<FluidSystem,Indices>::
+OutputWellLinearSystem(Equations& eqns1, 
+                       const std::string name) const
+{
+    MultisegmentWellEquationAccess<Scalar,IndexTraits,numWellEq,Indices::numEq> eqns(eqns1);
+    const std::string matrix_name = "/home/steink/debug_output/matrix_" + name;
+    const std::string residual_name = "/home/steink/debug_output/residual_" + name;
+    Dune::storeMatrixMarket(eqns.D(), matrix_name);
+    Dune::storeMatrixMarket(eqns.residual(), residual_name);
 }
 
 

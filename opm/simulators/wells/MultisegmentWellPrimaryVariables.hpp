@@ -146,6 +146,10 @@ public:
     //! output the segments with pressure close to lower pressure limit for debugging purpose
     void outputLowLimitPressureSegments(DeferredLogger& deferred_logger) const;
 
+    void outputPressureSegments(DeferredLogger& deferred_logger) const;
+
+    void outputFractionsSegments(DeferredLogger& deferred_logger) const;
+
 private:
     //! \brief Initialize evaluations from values.
     void setEvaluationsFromValues();

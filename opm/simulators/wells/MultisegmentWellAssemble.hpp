@@ -135,6 +135,9 @@ public:
                                const EvalWell& cq_s_effective,
                                Equations& eqns) const;
 
+    void OutputWellLinearSystem(Equations& eqns1, 
+                                const std::string name) const;
+
 private:
     const WellInterfaceIndices<FluidSystem,Indices>& well_; //!< Reference to well
 };

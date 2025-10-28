@@ -172,7 +172,24 @@ applyUMFPack(Dune::UMFPack<MatrixType>& linsolver,
         for (std::size_t i_block = 0; i_block < y.size(); ++i_block) {
             for (std::size_t i_elem = 0; i_elem < y[i_block].size(); ++i_elem) {
                 if (std::isinf(y[i_block][i_elem]) || std::isnan(y[i_block][i_elem]) ) {
-                    const std::string msg{"nan or inf value found after UMFPack solve due to singular matrix"};
+                    const std::string msg{"nan or inf value found after UMFPack solve due to singular matrix. Problem at block "
+                                          + std::to_string(i_block) + " element " + std::to_string(i_elem) + "."};
+                    for (std::size_t i_block_tmp = 0; i_block_tmp < y.size(); ++i_block_tmp) {
+                        std::string line = "solution vector at block " + std::to_string(i_block_tmp) + ": ";
+                        for (std::size_t i_elem_tmp = 0; i_elem_tmp < y[i_block_tmp].size(); ++i_elem_tmp) {
+                            line += std::to_string(y[i_block_tmp][i_elem_tmp]) + " ";
+                        }
+                        OpmLog::debug(line);
+                    }
+                    /*
+                    for (std::size_t i_block_tmp = 0; i_block_tmp < res.size(); ++i_block_tmp) {
+                        std::string line = "residual vector at block " + std::to_string(i_block_tmp) + ": ";
+                        for (std::size_t i_elem_tmp = 0; i_elem_tmp < res[i_block_tmp].size(); ++i_elem_tmp) {
+                            line += std::to_string(res[i_block_tmp][i_elem_tmp]) + " ";
+                        }
+                        OpmLog::debug(line);
+                    }
+                    */
                     OpmLog::debug(msg);
                     OPM_THROW_NOLOG(NumericalProblem, msg);
                 }

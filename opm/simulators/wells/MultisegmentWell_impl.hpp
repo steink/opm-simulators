@@ -172,7 +172,7 @@ namespace Opm
     MultisegmentWell<TypeTag>::
     scaleSegmentRatesAndPressure(WellStateType& well_state) const
     {
-        this->scaleSegmentRatesWithWellRates(this->segments_.inlets(),
+        this->initializeSegmentRatesWithWellRates(this->segments_.inlets(),
                                              this->segments_.perforations(),
                                              well_state);
         this->scaleSegmentPressuresWithBhp(well_state);
@@ -1624,7 +1624,7 @@ namespace Opm
             if(!isFinite)
                 return false;
         }
-        const auto& q_s = well_state.well(this->index_of_well_).surface_rates;
+        //const auto& q_s = well_state.well(this->index_of_well_).surface_rates;
         /*
         deferred_logger.debug("Well " + this->name() + " surface rates before solving: "
                               + std::to_string(q_s[0]) + " "
@@ -1645,7 +1645,6 @@ namespace Opm
                 this->initializeProducerWellStateRates(simulator, well_state, deferred_logger, prod_controls);
             }
         }
-        updatePrimaryVariables(simulator, well_state, deferred_logger);
 
         std::vector<std::vector<Scalar> > residual_history;
         std::vector<Scalar> measure_history;
@@ -1688,6 +1687,7 @@ namespace Opm
         // well needs to be set operable or else solving/updating of re-opened wells is skipped
         this->operability_status_.resetOperability();
         this->operability_status_.solvable = true;
+        updatePrimaryVariables(simulator, well_state, deferred_logger);
 
         // update flag for preventing group control
         this->updatePreventGroupControl(summary_state, well_state, prod_controls, Base::B_avg_, deferred_logger);
@@ -1708,6 +1708,7 @@ namespace Opm
                         status_switch_count++;
                         // if a well is re-opened, we need to re-initialize the rates
                         if (this->isProducer() && well_status_cur == WellStatus::OPEN && !this->stoppedOrZeroRateTarget(simulator, well_state, deferred_logger)) {
+                            //std::cout << "Re-initializing rates for re-opened well " << this->name() << " at local it: " << it << std::endl;
                             this->initializeProducerWellStateRates(simulator, well_state, deferred_logger, prod_controls);
                             updatePrimaryVariables(simulator, well_state, deferred_logger);
                         }
@@ -1775,12 +1776,32 @@ namespace Opm
                 const BVectorWell dx_well = this->linSys_.solve();
                 updateWellState(simulator, dx_well, well_state, deferred_logger, relaxation_factor);
             }
-            catch(const NumericalProblem& exp) {
+            catch(NumericalProblem& exp) {
                 // Add information about the well and log to deferred logger
                 // (Logging done inside of solve() method will only be seen if
                 // this is the process with rank zero)
                 deferred_logger.problem("In MultisegmentWell::iterateWellEqWithSwitching for well "
                                         + this->name() +": "+exp.what());
+                this->primary_variables_.outputPressureSegments(deferred_logger);
+                this->primary_variables_.outputFractionsSegments(deferred_logger);
+                std::cout << "Writing system for failed well:" << this->name() << " at local it: " << it << std::endl; 
+                const std::string case_name = "failed" + this->name() + "_" + std::to_string(it);
+                deferred_logger.debug("Well " + this->name() + " efficiency factor: " + std::to_string(this->well_efficiency_factor_));
+                MultisegmentWellAssemble(*this).OutputWellLinearSystem(this->linSys_, case_name);
+                const auto& ws = well_state.well(this->index_of_well_);
+                if (!ws.group_target.has_value()) {
+                    deferred_logger.debug("Well has no group-target");
+                } else {
+                    deferred_logger.debug("Well mode: " + WellProducerCMode2String(ws.production_cmode));
+                    deferred_logger.debug("Well group-target: " + std::to_string(ws.group_target.value()));
+                    deferred_logger.debug("Well group-mode: " + WellProducerCMode2String(ws.production_cmode_group_translated.value()));
+                    if (ws.prevent_group_control) {
+                        deferred_logger.debug("Well prevent-group-control is true");
+                    } else {
+                        deferred_logger.debug("Well prevent-group-control is false");
+                    }
+                }
+                converged = false;
                 throw;
             }
         }
