@@ -2431,8 +2431,15 @@ namespace Opm
                                const bool fixed_control /*false*/,
                                const bool fixed_status /*false*/)
     {
+        if (this->isProducer()) {
+            // if well is not stopped/has zero rate target, and all rates are zero, we re-initialize the rates
+            auto& rates = well_state.well(this->index_of_well_).surface_rates;
+            const bool zero_rates = none_of(rates.begin(), rates.end(), [](Scalar q) {return q < 0.0;});
+            if (zero_rates && !this->stoppedOrZeroRateTarget(simulator, well_state, deferred_logger)) {
+                this->initializeProducerWellStateRates(simulator, well_state, deferred_logger, prod_controls);
+            }
+        }
         const auto& group_state = wgHelper.groupState();
-        updatePrimaryVariables(simulator, well_state, deferred_logger);
 
         const int max_iter = this->param_.max_inner_iter_wells_;
         int it = 0;
@@ -2466,6 +2473,9 @@ namespace Opm
         // well needs to be set operable or else solving/updating of re-opened wells is skipped
         this->operability_status_.resetOperability();
         this->operability_status_.solvable = true;
+        updatePrimaryVariables(simulator, well_state, deferred_logger);
+        // update flag for preventing group control
+        this->updatePreventGroupControl(summary_state, well_state, prod_controls, Base::B_avg_, deferred_logger);
         do {
             its_since_last_switch++;
             if (allow_switching && its_since_last_switch >= min_its_after_switch && status_switch_count < max_status_switch){
@@ -2480,6 +2490,11 @@ namespace Opm
                     if (well_status_cur != this->wellStatus_) {
                         well_status_cur = this->wellStatus_;
                         status_switch_count++;
+                        // if a well is re-opened, we need to re-initialize the rates
+                        if (this->isProducer() && well_status_cur == WellStatus::OPEN && !this->stoppedOrZeroRateTarget(simulator, well_state, deferred_logger)) {
+                            this->initializeProducerWellStateRates(simulator, well_state, deferred_logger, prod_controls);
+                            updatePrimaryVariables(simulator, well_state, deferred_logger);
+                        }
                     }
                 }
                 if (!changed && final_check) {
@@ -2503,12 +2518,14 @@ namespace Opm
 
             converged = report.converged();
             if (converged) {
+                well_state.well(this->index_of_well_).converged = true;
                 // if equations are sufficiently linear they might converge in less than min_its_after_switch
                 // in this case, make sure all constraints are satisfied before returning
                 if (switch_count > 0 && its_since_last_switch < min_its_after_switch) {
                     final_check = true;
                     its_since_last_switch = min_its_after_switch;
                 } else {
+                    well_state.well(this->index_of_well_).converged = false;
                     break;
                 }
             }

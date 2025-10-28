@@ -111,6 +111,14 @@ public:
                     const std::vector<Scalar>& rates,
                     const Scalar rho,
                     const SummaryState& summaryState) const;
+    
+  bool intersectVFPWithIPR(const WellState<Scalar, IndexTraits>& well_state,
+                           const Well& well,
+                           const std::vector<Scalar>& rates,
+                           const Scalar rho,
+                           const SummaryState& summaryState,
+                           std::pair<Scalar, Scalar>& intersect_rate_scale,
+                           std::pair<Scalar, Scalar>& intersect_bhp) const;
 
   std::pair<Scalar, Scalar>
   getFloIPR(const WellState<Scalar, IndexTraits>& well_state,

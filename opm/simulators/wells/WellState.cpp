@@ -238,6 +238,7 @@ initSingleInjector(const Well& well,
     }
 
     ws.update_injector_targets(well, summary_state);
+    ws.converged = false;
 }
 
 template<typename Scalar, typename IndexTraits>

@@ -104,6 +104,26 @@ protected:
                           WellStateType& well_state,
                           DeferredLogger& deferred_logger) const;
 
+    bool updateProducerControlMode(SingleWellState<Scalar, IndexTraits>& ws,
+                                   const SummaryState& summaryState,
+                                   const Well::ProductionControls& controls,
+                                   DeferredLogger& deferred_logger) const;
+
+    std::pair<Well::ProducerCMode, Scalar>
+    estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
+                                          const SummaryState& summaryState,
+                                          const Well::ProductionControls& controls,
+                                          const bool skip_zero_rate_constraints,
+                                          DeferredLogger& deferred_logger,
+                                          const std::optional<Scalar> bhp_at_thp_limit = std::nullopt) const;
+
+    std::pair<Well::ProducerCMode, Scalar>
+    estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
+                                              const SummaryState& summaryState,
+                                              const Well::ProductionControls& controls,
+                                              const bool skip_zero_rate_constraints,
+                                              DeferredLogger& deferred_logger) const;
+
     std::optional<Scalar>
     getGroupInjectionTargetRate(const Group& group,
                                 const WellState<Scalar, IndexTraits>& well_state,

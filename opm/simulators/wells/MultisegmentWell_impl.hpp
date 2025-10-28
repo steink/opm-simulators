@@ -165,7 +165,16 @@ namespace Opm
 
 
 
-
+    template <typename TypeTag>
+    void
+    MultisegmentWell<TypeTag>::
+    initializeSegmentRatesAndPressure(WellStateType& well_state) const
+    {
+        this->initializeSegmentRatesWithWellRates(this->segments_.inlets(),
+                                             this->segments_.perforations(),
+                                             well_state);
+        this->scaleSegmentPressuresWithBhp(well_state);
+    }
 
     template <typename TypeTag>
     void
@@ -1637,9 +1646,14 @@ namespace Opm
             if(!isFinite)
                 return false;
         }
-
-        updatePrimaryVariables(simulator, well_state, deferred_logger);
-
+        if (this->isProducer()) {
+            // if well is not stopped/has zero rate target, and all rates are zero, we re-initialize the rates
+            auto& rates = well_state.well(this->index_of_well_).surface_rates;
+            const bool zero_rates = none_of(rates.begin(), rates.end(), [](Scalar q) {return q < 0.0;});
+            if (zero_rates && !this->stoppedOrZeroRateTarget(simulator, well_state, deferred_logger)) {
+                this->initializeProducerWellStateRates(simulator, well_state, deferred_logger, prod_controls);
+            }
+        }
         std::vector<std::vector<Scalar> > residual_history;
         std::vector<Scalar> measure_history;
         int it = 0;
@@ -1672,7 +1686,9 @@ namespace Opm
         // well needs to be set operable or else solving/updating of re-opened wells is skipped
         this->operability_status_.resetOperability();
         this->operability_status_.solvable = true;
-
+        updatePrimaryVariables(simulator, well_state, deferred_logger);
+        // update flag for preventing group control
+        this->updatePreventGroupControl(summary_state, well_state, prod_controls, Base::B_avg_, deferred_logger);
         for (; it < max_iter_number; ++it, ++debug_cost_counter_) {
             ++its_since_last_switch;
             if (allow_switching && its_since_last_switch >= min_its_after_switch && status_switch_count < max_status_switch){
@@ -1687,6 +1703,12 @@ namespace Opm
                     if (well_status_cur != this->wellStatus_) {
                         well_status_cur = this->wellStatus_;
                         status_switch_count++;
+                        // if a well is re-opened, we need to re-initialize the rates
+                        if (this->isProducer() && well_status_cur == WellStatus::OPEN && !this->stoppedOrZeroRateTarget(simulator, well_state, deferred_logger)) {
+                            //std::cout << "Re-initializing rates for re-opened well " << this->name() << " at local it: " << it << std::endl;
+                            this->initializeProducerWellStateRates(simulator, well_state, deferred_logger, prod_controls);
+                            updatePrimaryVariables(simulator, well_state, deferred_logger);
+                        }
                     }
                 }
                 if (!changed && final_check) {
@@ -1756,11 +1778,13 @@ namespace Opm
                 // this is the process with rank zero)
                 deferred_logger.problem("In MultisegmentWell::iterateWellEqWithSwitching for well "
                                         + this->name() +": "+exp.what());
+                well_state.well(this->index_of_well_).converged = false;
                 throw;
             }
         }
 
         if (converged) {
+            well_state.well(this->index_of_well_).converged = true;
             if (allow_switching){
                 // update operability if status change
                 const bool is_stopped = this->wellIsStopped();
@@ -1779,6 +1803,7 @@ namespace Opm
             }
             deferred_logger.debug(message, OpmLog::defaultDebugVerbosityLevel + ((it == 0) && (switch_count == 0)));
         } else {
+            well_state.well(this->index_of_well_).converged = false;
             this->wellStatus_ = well_status_orig;
             this->operability_status_ = operability_orig;
             const std::string message = fmt::format("   Well {} did not converge in {} inner iterations ("

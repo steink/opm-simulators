@@ -433,22 +433,27 @@ namespace Opm {
             // This is done only for producers, as injectors will only have a single
             // nonzero phase anyway.
             for (const auto& well : well_container_) {
-                if (well->isProducer() && !well->wellIsStopped()) {
-                    well->initializeProducerWellState(simulator_, this->wellState(), local_deferredLogger);
+                if (well->isProducer()) {
+                    well->initializeProducerWellStateRates(simulator_, this->wellState(), local_deferredLogger);
                 }
             }
         }
 
         for (const auto& well : well_container_) {
-            if (well->isVFPActive(local_deferredLogger)){
-                well->setPrevSurfaceRates(this->wellState(), this->prevWellState());
-            }
+            well->setPrevSurfaceRates(this->wellState(), this->prevWellState());
         }
         try {
             this->updateWellPotentials(reportStepIdx,
                                        /*onlyAfterEvent*/true,
                                        simulator_.vanguard().summaryConfig(),
                                        local_deferredLogger);
+            // For new/non-converged wells, reset scaled rates to potentials if more restrictive
+            for (const auto& well : well_container_) {
+                if (well->isProducer()) {
+                    well->scaleProducerRatesWithStrictestConstraint(simulator_, this->wellState(), 
+                                local_deferredLogger, /*skip_zero_rate_constraints*/ true);
+                }
+            }
         } catch ( std::runtime_error& e ) {
             const std::string msg = "A zero well potential is returned for output purposes. ";
             local_deferredLogger.warning("WELL_POTENTIAL_CALCULATION_FAILED", msg);
@@ -503,7 +508,7 @@ namespace Opm {
 
                 if (event || dyn_status_change) {
                     try {
-                        well->scaleSegmentRatesAndPressure(this->wellState());
+                        //well->scaleSegmentRatesAndPressure(this->wellState());
                         well->calculateExplicitQuantities(simulator_, this->wellState(), local_deferredLogger);
                         well->updateWellStateWithTarget(simulator_, this->wgHelper(), this->wellState(), local_deferredLogger);
                         well->updatePrimaryVariables(simulator_, this->wellState(), local_deferredLogger);
@@ -552,6 +557,12 @@ namespace Opm {
                 this->schedule().getGroup(wellEcl.groupName(), timeStepIdx),
                 well_efficiency_factor
             );
+            if (well_efficiency_factor < 1e-5) {
+                const std::string msg = "Well efficiency factor " + well_name + " is too low: " + std::to_string(well_efficiency_factor)
+                                        + ". The well is not allowed to open during well testing.";
+                deferred_logger.debug(msg);
+                continue;
+            }
 
             well->setWellEfficiencyFactor(well_efficiency_factor);
             well->setVFPProperties(this->vfp_properties_.get());
@@ -559,11 +570,9 @@ namespace Opm {
 
             // initialize rates/previous rates to prevent zero fractions in vfp-interpolation
             if (well->isProducer() && alternative_well_rate_init_) {
-                well->initializeProducerWellState(simulator_, this->wellState(), deferred_logger);
+                well->initializeProducerWellStateRates(simulator_, this->wellState(), deferred_logger);
             }
-            if (well->isVFPActive(deferred_logger)) {
-                well->setPrevSurfaceRates(this->wellState(), this->prevWellState());
-            }
+            well->setPrevSurfaceRates(this->wellState(), this->prevWellState());
 
             const auto& network = this->schedule()[timeStepIdx].network();
             if (network.active() && !this->node_pressures_.empty()) {
@@ -1271,7 +1280,8 @@ namespace Opm {
                 updateNetworks(mandatory_network_balance,
                                local_deferredLogger,
                                relax_network_tolerance);
-
+        this->updateAndCommunicateGroupData(reportStepIdx, iterationIdx,
+            param_.nupcol_group_rate_tolerance_, /*update_wellgrouptarget*/ true, local_deferredLogger);
 
         bool alq_updated = false;
         OPM_BEGIN_PARALLEL_TRY_CATCH();

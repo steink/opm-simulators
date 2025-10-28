@@ -617,6 +617,112 @@ intersectWithIPR(const VFPProdTable& table,
     }
 }
 
+template<class Scalar>
+std::optional<std::pair<Scalar, Scalar>> VFPHelpers<Scalar>::
+rateLimitsFromIPRIntersections(const VFPProdTable& table,
+                               const Scalar thp,
+                               const Scalar wfr,
+                               const Scalar gfr,
+                               const Scalar alq,
+                               const Scalar ipr_a,
+                               const Scalar ipr_b,
+                               const std::function<Scalar(const Scalar)>& adjust_bhp)
+{
+    // 1. (rate, bhp) for minimal flowing rate (unstable)
+    // 2. (rate, bhp) for minimal rates (stable)
+    // 3. (rate, bhp) for maximal rate (stable solution at thp)
+
+    // Given fixed thp, wfr, gfr and alq, this function finds (-flo_min, -flo_max) corresponding to
+    // rates at first and last (typically there are two or none) intersection between the ipr-line 
+    // and bhp(flo) from table, if such intersections exists. The one corresponding the largest 
+    // magnitude flo is returned as long as this intersection lies within the tabulated values. 
+    // If the ipr-line lies above all (flo, bhp) points, the intersection
+    // is determined by extrapolation based on the last two points.
+    // The adjust_bhp-function is used to adjust the vfp-table bhp-values to actual bhp-values due
+    // to vfp/well ref-depth differences and/or WVFPDP-related pressure adjustments.
+
+    // NOTE: ipr-line is q=b*bhp - a!
+    // ipr is given for negative flo, so
+    // flo = -b*bhp + a, i.e., bhp = -(flo-a)/b
+    auto thp_i = findInterpData( thp, table.getTHPAxis());
+    auto wfr_i = findInterpData( wfr, table.getWFRAxis());
+    auto gfr_i = findInterpData( gfr, table.getGFRAxis());
+    auto alq_i = findInterpData( alq, table.getALQAxis());
+
+    if (ipr_b == 0.0) {
+        // this shouldn't happen, but deal with it to be safe
+        //auto flo_i = findInterpData(ipr_a, table.getFloAxis());
+        //detail::VFPEvaluation bhp_i = interpolate(table, flo_i, thp_i, wfr_i, gfr_i, alq_i);
+        //return std::make_pair(-ipr_a, adjust_bhp(bhp_i.value));
+        return std::nullopt;
+    }
+    // find largest flo (flo_x) for which y = bhp(flo) + (flo-a)/b = 0 and dy/dflo > 0
+    //std::vector<Scalar> bhps(3);
+    std::vector<Scalar> rates({0.0, 1.0, 1.0});
+    //Scalar flo_max = -1.0;
+    Scalar flo0, flo1;
+    Scalar y0, y1;
+    //Scalar bhp0, bhp1;
+    flo0 = 0.0; // start by checking flo=0
+    //Scalar flo_min = flo0;
+    //Scalar flo_min_stable = flo0;
+    auto flo_i = findInterpData(flo0, table.getFloAxis());
+    detail::VFPEvaluation bhp_i = interpolate(table, flo_i, thp_i, wfr_i, gfr_i, alq_i);
+    y0 = adjust_bhp(bhp_i.value) - ipr_a/ipr_b; // +0.0/ipr_b
+    Scalar y_min = y0;
+    Scalar w;
+    const std::vector<double>& flos = table.getFloAxis();
+    for (size_t i = 0; i < flos.size(); ++i) {
+        flo1 = flos[i];
+        flo_i = findInterpData(flo1, flos);
+        bhp_i = interpolate(table, flo_i, thp_i, wfr_i, gfr_i, alq_i);
+        y1 = adjust_bhp(bhp_i.value) + (flo1 - ipr_a)/ipr_b;
+        w = -y0/(y1-y0);
+        // might need to extrapolate to get first intersection
+        if (i ==0 && y0 < 0 && y1 < y0) {
+            //Scalar w = -y0/(y1-y0); // w < 0.0
+            rates[0] = -(flo0 + w*(flo1 - flo0));
+        } else if (y0 >= 0 && y1 < 0){
+            // crossing with negative slope
+            //Scalar w = -y0/(y1-y0);
+            w = std::clamp(w, Scalar{0.0}, Scalar{1.0}); // just to be safe (if y0~y1~0)
+            rates[0] = -(flo0 + w*(flo1 - flo0));
+        }
+        if (y1 < y_min) {
+            // minimum stable
+            rates[1] = -flo1;
+            y_min = y1;
+        }
+        if (y0 < 0 && y1 >= 0){
+            // crossing with positive slope
+            //Scalar w = -y0/(y1-y0);
+            w = std::clamp(w, Scalar{0.0}, Scalar{1.0}); // just to be safe (if y0~y1~0)
+            rates[2] = -(flo0 + w*(flo1 - flo0));
+        }
+        if (i < flos.size()-1) { // check next interval
+            flo0 = flo1;
+            y0 = y1;
+        } else if (y1 < 0 && y0 < y1 && rates[2] > 0) { // at last interval
+            // If y0 < y1 < 0, there is a stable intersection above the largest flo-value by 
+            // extrapolation. If no previous stable intersections were found, i.e., ipr-line lies 
+            // above all (flo, bhp) points, then we return this intersection. Otherwise, we don't 
+            // trust it (avoid vfp-extrapolation whenever possible)
+            //Scalar w = -y0/(y1-y0); // w > 1.0
+            rates[2] = -(flo0 + w*(flo1 - flo0));
+        }
+    }
+    if (rates[2] <= 0.0) {
+        if (false) {
+            return std::make_pair(rates[1], rates[2]);
+        } else {
+            return std::make_pair(rates[0], rates[2]);
+        }
+        //return std::make_pair(-flo_x, -(flo_x - ipr_a)/ipr_b);
+    } else {
+        return std::nullopt;
+    }
+}
+
 namespace detail {
 
 template<class Scalar>

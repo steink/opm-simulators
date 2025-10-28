@@ -72,8 +72,8 @@ update(const WellState<Scalar, IndexTraits>& well_state,
 {
     // TODO: to test using rate conversion coefficients to see if it will be better than
     // this default one
-    if (!well_.isOperableAndSolvable() && !well_.wellIsStopped())
-        return;
+    // if (!well_.isOperableAndSolvable() && !well_.wellIsStopped())
+    //     return;
 
     const Well& well = well_.wellEcl();
 

@@ -224,6 +224,8 @@ public:
                                            WellStateType& well_state,
                                            DeferredLogger& deferred_logger) const;
 
+    virtual void initializeSegmentRatesAndPressure(WellStateType& well_state) const;
+
     virtual void scaleSegmentRatesAndPressure(WellStateType& well_state) const;
 
     virtual void computeWellRatesWithBhpIterations(const Simulator& simulator,
@@ -343,6 +345,17 @@ public:
                                      WellStateType& well_state,
                                      DeferredLogger& deferred_logger) const;
 
+    bool initializeProducerWellStateRates(const Simulator& simulator,
+                                        WellStateType& well_state,
+                                        DeferredLogger& deferred_logger,
+                                        const std::optional<Well::ProductionControls>& prod_controls = std::nullopt) const;
+
+    bool scaleProducerRatesWithStrictestConstraint(const Simulator& simulator,
+                                                   WellStateType& well_state,
+                                                   DeferredLogger& deferred_logger,
+                                                   const bool skip_zero_rate_constraints,
+                                                   const std::optional<Well::ProductionControls>& prod_controls = std::nullopt) const;
+
     void solveWellEquation(const Simulator& simulator,
                            const WellGroupHelperType& wgHelper,
                            WellStateType& well_state,
@@ -444,11 +457,20 @@ protected:
                                        DeferredLogger& deferred_logger);
 
     std::optional<Scalar>
-    estimateOperableBhp(const Simulator& ebos_simulator,
+    estimateOperableBhpOrig(const Simulator& ebos_simulator,
                         const double dt,
                         const WellGroupHelperType& wgHelper,
                         const SummaryState& summary_state,
                         WellStateType& well_state,
+                        DeferredLogger& deferred_logger);
+
+    std::optional<Scalar>
+    estimateOperableBhp(const Simulator& simulator,
+                        const double dt,
+                        const WellGroupHelperType& wgHelper,
+                        WellStateType& well_state,
+                        const Well::ProductionControls& controls,
+                        const SummaryState& summary_state,
                         DeferredLogger& deferred_logger);
 
     bool solveWellWithBhp(const Simulator& simulator,

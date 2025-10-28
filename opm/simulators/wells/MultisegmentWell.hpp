@@ -97,7 +97,8 @@ namespace Opm {
 
         /// updating the segment pressure and rates based the current bhp and well rates
         void scaleSegmentRatesAndPressure(WellStateType& well_state) const override;
-
+        
+        void initializeSegmentRatesAndPressure(WellStateType& well_state) const override;
         /// check whether the well equations get converged for this well
         ConvergenceReport getWellConvergence(const Simulator& simulator,
                                              const WellStateType& well_state,
