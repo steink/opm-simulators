@@ -1463,7 +1463,15 @@ namespace Opm
         updateWellState(simulator, xw, well_state, deferred_logger);
     }
 
-
+    template<typename TypeTag>
+    void
+    StandardWell<TypeTag>::
+    computeWellRatesWithBhpDebug(const Simulator& simulator,
+                            const Scalar& bhp,
+                            std::vector<Scalar>& well_flux,
+                            DeferredLogger& deferred_logger) const
+    {
+    }
 
 
     template<typename TypeTag>

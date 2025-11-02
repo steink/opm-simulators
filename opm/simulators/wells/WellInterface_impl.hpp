@@ -425,6 +425,7 @@ namespace Opm
         }
         // We test the well as an open well during the well testing
         ws.open();
+        ws.converged = false; // in cased it was copied from a previous state
 
         // initialize rates/previous rates to prevent zero fractions in vfp-interpolation
         if (this->isProducer()) {
@@ -467,8 +468,8 @@ namespace Opm
             }
 
 
-            updateWellOperability(simulator, well_state_copy, wgHelper_copy, deferred_logger);
-            if ( !this->isOperableAndSolvable() ) {
+            //updateWellOperability(simulator, well_state_copy, wgHelper_copy, deferred_logger);
+            if ( this->wellIsStopped() ) {
                 const auto msg = fmt::format("WTEST: Well {} is not operable (physical)", this->name());
                 deferred_logger.debug(msg);
                 return;
@@ -611,7 +612,7 @@ namespace Opm
         // if well is stopped, check if we can reopen
         if (this->wellIsStopped() || !ws.converged) {
             this->openWell();
-            auto bhp_target = estimateOperableBhp(
+            auto bhp_target = estimateOperableBhpVersion2(
                 simulator, dt, wgHelper, well_state, prod_controls,  summary_state, deferred_logger
             );
             if (!bhp_target.has_value()) {
@@ -672,7 +673,7 @@ namespace Opm
             // Well did not converge, switch to explicit fractions
             this->operability_status_.use_vfpexplicit = true;
             this->openWell();
-            auto bhp_target = estimateOperableBhp(
+            auto bhp_target = estimateOperableBhpVersion2(
                 simulator, dt, wgHelper, well_state, prod_controls, summary_state, deferred_logger
             );
             if (!bhp_target.has_value()) {
@@ -753,6 +754,79 @@ namespace Opm
     template<typename TypeTag>
     std::optional<typename WellInterface<TypeTag>::Scalar>
     WellInterface<TypeTag>::
+    estimateOperableBhpVersion2(const Simulator& simulator,
+                                const double dt,
+                                const WellGroupHelperType& wgHelper,
+                                WellStateType& well_state,
+                                const Well::ProductionControls& controls,
+                                const SummaryState& summary_state,
+                                DeferredLogger& deferred_logger)
+    {
+        if (!this->wellHasTHPConstraints(summary_state)) {
+            const Scalar bhp_limit = WellBhpThpCalculator(*this).mostStrictBhpFromBhpLimits(summary_state);
+            const bool converged = solveWellWithBhp(
+                simulator, dt, bhp_limit, wgHelper, well_state, deferred_logger
+            );
+            if (!converged || this->wellIsStopped()) {
+                return std::nullopt;
+            }
+            return bhp_limit;
+        }
+        OPM_TIMEFUNCTION();
+        // Given an unconverged well or closed well, estimate an operable bhp (if any)
+        // Get minimal bhp from vfp-curve
+        Scalar bhp_min =  WellBhpThpCalculator(*this).calculateMinimumBhpFromThp(well_state, this->well_ecl_, summary_state, this->getRefDensity());
+        // Solve
+        const bool converged = solveProducerWithBhpAndRateLimits(simulator, dt, bhp_min, wgHelper, well_state, controls, deferred_logger);
+        //const bool converged = solveWellWithBhp(simulator, dt, bhp_min, wgHelper, well_state, deferred_logger);
+        if (!converged || this->wellIsStopped()) {
+            if (!converged) {
+                deferred_logger.debug(fmt::format("estimateOperableBhp: solveProducerWithBhpAndRateLimits did not converge for well {}", this->name()));
+            } else {
+                deferred_logger.debug(fmt::format("estimateOperableBhp: Well {} stopped after solveProducerWithBhpAndRateLimits", this->name()));
+            }
+            return std::nullopt;
+        }
+        this->updateIPRImplicit(simulator, well_state, deferred_logger);
+        auto& ws = well_state.well(this->index_of_well_);
+        // obtain corresponding vfp/ipr intersections
+        std::pair<Scalar, Scalar> intersect_rate_scale;
+        std::pair<Scalar, Scalar> intersect_bhp;
+        auto rates = ws.surface_rates;
+        this->adaptRatesForVFP(rates);
+        const bool success = WellBhpThpCalculator(*this).intersectVFPWithIPR(well_state, this->well_ecl_, rates, this->getRefDensity(), 
+                                                                             summary_state, intersect_rate_scale, intersect_bhp);
+        if (!success) {
+            // no intersection, not operable
+            deferred_logger.debug(fmt::format("estimateOperableBhp: Well {} has no VFP/IPR intersections at current conditions", this->name()));
+            return std::nullopt;
+        }
+        // determine operability bhp-estimate based on mode for converged state
+        if (ws.production_cmode == Well::ProducerCMode::BHP) {
+            // most strict control is bhp or (most likely) thp
+            // bhp at thp-limit is given by second intersection 
+            const Scalar bhp_limit = WellBhpThpCalculator(*this).mostStrictBhpFromBhpLimits(summary_state);
+            return std::max(bhp_limit, intersect_bhp.second);
+        } else {
+            // most strict control is individual/group rate
+            // we need to check if resulting thp is below thp-limit
+            const Scalar thp_limit = this->getTHPConstraint(summary_state);
+            if (thp_limit < ws.thp) {
+                // solution has valid thp, return bhp for current solution
+                return ws.bhp;
+            } else {
+                // thp-limit violated, well can't operate at current (low) rate
+                const std::string mode = WellProducerCMode2String(ws.production_cmode);
+                deferred_logger.debug(fmt::format("estimateOperableBhp: Well {} can't operate at rate-limit given by {} ",
+                    this->name(), mode));
+                return std::nullopt;
+            }
+        }
+    }
+
+    template<typename TypeTag>
+    std::optional<typename WellInterface<TypeTag>::Scalar>
+    WellInterface<TypeTag>::
     estimateOperableBhp(const Simulator& simulator,
                         const double dt,
                         const WellGroupHelperType& wgHelper,
@@ -801,11 +875,12 @@ namespace Opm
                                                                                     /*skip_zero_rate_constraints*/ false,
                                                                                     deferred_logger, 
                                                                                     /*bhp_at_thp_limit*/ intersect_bhp.second);
-            deferred_logger.debug(fmt::format("estimateOperableBhp: Well {} strictest control mode is {} at scale {}", this->name(), WellProducerCMode2String(cmode), cmode_scale));
             if (cmode == Well::ProducerCMode::CMODE_UNDEFINED) {
                 // should not happen, report and return
                 deferred_logger.info(fmt::format("estimateOperableBhp: found no valid control mode for well {}", this->name()));
                 return std::nullopt;
+            } else {
+                deferred_logger.debug(fmt::format("estimateOperableBhp: Well {} strictest control mode is {} at scale {}", this->name(), WellProducerCMode2String(cmode), cmode_scale));
             }
             if (!(cmode == Well::ProducerCMode::BHP) && !(cmode == Well::ProducerCMode::THP)) {
                 // most strict control is rate or group
@@ -882,6 +957,39 @@ namespace Opm
         );
         ws.injection_cmode = cmode_inj;
         ws.production_cmode = cmode_prod;
+        return converged;
+    }
+
+    template<typename TypeTag>
+    bool
+    WellInterface<TypeTag>::
+    solveProducerWithBhpAndRateLimits(const Simulator& simulator,
+                                      const double dt,
+                                      const Scalar bhp,
+                                      const WellGroupHelperType& wgHelper,
+                                      WellStateType& well_state,
+                                      const Well::ProductionControls& prod_controls,
+                                      DeferredLogger& deferred_logger)
+    {
+        OPM_TIMEFUNCTION();
+        // Solve a well using a bhp-constraint and existing group/individual rate limits
+        auto inj_controls = Well::InjectionControls(0);
+        auto prod_controls_tmp = prod_controls;
+        prod_controls_tmp.bhp_limit = bhp;
+
+        auto& ws = well_state.well(this->index_of_well_);
+        // prevent switching to thp if thp-constraint exists
+        // thp-limit is approximated by input bhp
+        ws.prevent_thp_control = true;
+        ws.bhp = bhp;
+        ws.production_cmode = Well::ProducerCMode::BHP;
+        // solve
+        const bool converged =  this->iterateWellEqWithSwitching(
+            simulator, dt, inj_controls, prod_controls_tmp, wgHelper,
+            well_state, deferred_logger
+        );
+        // reset prevent flag
+        ws.prevent_thp_control = false;
         return converged;
     }
 
@@ -1891,7 +1999,6 @@ namespace Opm
         if (ws.converged) {
             return false;
         }
-        const auto well_status = this->wellStatus_;
         const auto& well_name = this->name();
         // Calculate rates at bhp limit, or 1 bar if no limit.
         std::vector<Scalar> well_q_s(this->number_of_phases_, 0.0);
@@ -1918,6 +2025,11 @@ namespace Opm
         // report problem if only zeros
         if (none_of(well_q_s.begin(), well_q_s.end(), [](Scalar q) {return q < 0.0; })) {
             deferred_logger.debug("initializeProducerWellStateRates was not able to provide non-zero rates for well " + this->name());
+            deferred_logger.debug("  Number of local perforations: " + std::to_string(this->number_of_local_perforations_));
+            this->computeWellRatesWithBhpDebug(simulator, 1.0 * unit::barsa, well_q_s, deferred_logger);
+            deferred_logger.debug("  Rates at 1 bar: " + std::to_string(well_q_s[0]) + ", " + std::to_string(well_q_s[1]) + ", " + std::to_string(well_q_s[2]) + ". ");
+            deferred_logger.debug("  Well bhp: " + std::to_string(ws.bhp) + ". ");
+            return false;
         }
         ws.surface_rates = well_q_s;
         // Estimate most restrictive (currently available) control, and scale accordingly

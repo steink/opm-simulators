@@ -54,6 +54,7 @@ SingleWellState(const std::string& name_,
     , perf_data(perf_input.size(), pressure_first_connection, !is_producer, pu.numActivePhases())
     , trivial_group_target(false)
     , prevent_group_control(false)
+    , prevent_thp_control(false)
     , converged(false)
 {
     for (std::size_t perf = 0; perf < perf_input.size(); perf++) {
@@ -416,6 +417,7 @@ bool SingleWellState<Scalar, IndexTraits>::operator==(const SingleWellState& rhs
            this->injection_cmode_group_translated == rhs.injection_cmode_group_translated &&
            this->production_cmode_group_translated == rhs.production_cmode_group_translated &&
            this->prevent_group_control == rhs.prevent_group_control &&
+           this->prevent_thp_control == rhs.prevent_thp_control &&
            this->converged == rhs.converged;
 }
 

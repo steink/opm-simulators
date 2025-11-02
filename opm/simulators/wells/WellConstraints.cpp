@@ -286,7 +286,7 @@ activeProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
         }
     }
 
-    if (well_.wellHasTHPConstraints(summaryState) && currentControl != Well::ProducerCMode::THP) {
+    if (well_.wellHasTHPConstraints(summaryState) && !ws.prevent_thp_control && currentControl != Well::ProducerCMode::THP) {
         const auto& thp = well_.getTHPConstraint(summaryState);
         Scalar current_thp = ws.thp;
         // For trivial group targets (for instance caused by NETV) we dont want to flip to THP control.
@@ -348,7 +348,7 @@ updateProducerControlMode(SingleWellState<Scalar, IndexTraits>& ws,
         }
     }
 
-    if (well_.wellHasTHPConstraints(summaryState) && currentControl != Well::ProducerCMode::THP) {
+    if (well_.wellHasTHPConstraints(summaryState) && !ws.prevent_thp_control && currentControl != Well::ProducerCMode::THP) {
         const auto& thp = well_.getTHPConstraint(summaryState);
         Scalar current_thp = ws.thp;
         // For trivial group targets (for instance caused by NETV) we dont want to flip to THP control.

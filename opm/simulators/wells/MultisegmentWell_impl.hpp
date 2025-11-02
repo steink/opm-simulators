@@ -409,6 +409,63 @@ namespace Opm
         this->parallel_well_info_.communication().sum(well_flux.data(), well_flux.size());
     }
 
+    template<typename TypeTag>
+    void
+    MultisegmentWell<TypeTag>::
+    computeWellRatesWithBhpDebug(const Simulator& simulator,
+                            const Scalar& bhp,
+                            std::vector<Scalar>& well_flux,
+                            DeferredLogger& deferred_logger) const
+    {
+        const int np = this->number_of_phases_;
+
+        well_flux.resize(np, 0.0);
+        const bool allow_cf = this->getAllowCrossFlow();
+        const int nseg = this->numberOfSegments();
+        const WellStateType& well_state = simulator.problem().wellModel().wellState();
+        const auto& ws = well_state.well(this->indexOfWell());
+        auto segments_copy = ws.segments;
+        segments_copy.scale_pressure(bhp);
+        const auto& segment_pressure = segments_copy.pressure;
+        for (int seg = 0; seg < nseg; ++seg) {
+            const Scalar tmp = segment_pressure[seg];
+            const Scalar tmp2 = ws.segments.pressure[seg];
+            deferred_logger.debug(" Segment " + std::to_string(seg) +
+                                  " Seg Press " + std::to_string(tmp) +
+                                  " Orig Seg Press " + std::to_string(tmp2));
+            for (const int perf : this->segments_.perforations()[seg]) {
+                const int local_perf_index = this->pw_info_.activePerfToLocalPerf(perf);
+                if (local_perf_index < 0) // then the perforation is not on this process
+                    continue;
+                const int cell_idx = this->well_cells_[local_perf_index];
+                const auto& intQuants = simulator.model().intensiveQuantities(cell_idx, /*timeIdx=*/ 0);
+                // flux for each perforation
+                std::vector<Scalar> mob(this->num_conservation_quantities_, 0.);
+                getMobility(simulator, local_perf_index, mob, deferred_logger);
+                const Scalar trans_mult = simulator.problem().template wellTransMultiplier<Scalar>(intQuants, cell_idx);
+                const auto& wellstate_nupcol = simulator.problem().wellModel().nupcolWellState().well(this->index_of_well_);
+                const std::vector<Scalar> Tw = this->wellIndex(local_perf_index, intQuants, trans_mult, wellstate_nupcol);
+                const Scalar seg_pressure = segment_pressure[seg];
+                std::vector<Scalar> cq_s(this->num_conservation_quantities_, 0.);
+                Scalar perf_press = 0.0;
+                PerforationRates<Scalar> perf_rates;
+                computePerfRate(intQuants, mob, Tw, seg, perf, seg_pressure,
+                                allow_cf, cq_s, perf_press, perf_rates, deferred_logger);
+                const auto& fs = intQuants.fluidState();
+
+                const Scalar pressure_cell = getValue(this->getPerfCellPressure(fs));
+                deferred_logger.debug(" Perf " + std::to_string(perf) +
+                                      " Perf Press " + std::to_string(perf_press) +
+                                      " Cell Press " + std::to_string(pressure_cell));
+
+                for(int p = 0; p < np; ++p) {
+                    well_flux[FluidSystem::activeCompToActivePhaseIdx(p)] += cq_s[p];
+                }
+            }
+        }
+        this->parallel_well_info_.communication().sum(well_flux.data(), well_flux.size());
+    }
+
 
     template<typename TypeTag>
     void
@@ -1688,10 +1745,15 @@ namespace Opm
         this->operability_status_.solvable = true;
         updatePrimaryVariables(simulator, well_state, deferred_logger);
         // update flag for preventing group control
-        this->updatePreventGroupControl(summary_state, well_state, prod_controls, Base::B_avg_, deferred_logger);
         for (; it < max_iter_number; ++it, ++debug_cost_counter_) {
             ++its_since_last_switch;
-            if (allow_switching && its_since_last_switch >= min_its_after_switch && status_switch_count < max_status_switch){
+            const bool preventStatus = well_state.well(this->index_of_well_).prevent_group_control;
+            bool update_now = false;
+            if (!preventStatus) {
+                this->updatePreventGroupControl(summary_state, well_state, prod_controls, Base::B_avg_, deferred_logger);
+                update_now = well_state.well(this->index_of_well_).prevent_group_control;
+            }
+            if (allow_switching && (update_now || (its_since_last_switch >= min_its_after_switch && status_switch_count < max_status_switch))){
                 const Scalar wqTotal = this->primary_variables_.getWQTotal().value();
                 bool changed = this->updateWellControlAndStatusLocalIteration(
                     simulator, wgHelper, inj_controls, prod_controls, wqTotal,
@@ -1704,7 +1766,7 @@ namespace Opm
                         well_status_cur = this->wellStatus_;
                         status_switch_count++;
                         // if a well is re-opened, we need to re-initialize the rates
-                        if (this->isProducer() && well_status_cur == WellStatus::OPEN && !this->stoppedOrZeroRateTarget(simulator, well_state, deferred_logger)) {
+                        if (this->isProducer() && !this->stoppedOrZeroRateTarget(simulator, well_state, deferred_logger)) {
                             //std::cout << "Re-initializing rates for re-opened well " << this->name() << " at local it: " << it << std::endl;
                             this->initializeProducerWellStateRates(simulator, well_state, deferred_logger, prod_controls);
                             updatePrimaryVariables(simulator, well_state, deferred_logger);

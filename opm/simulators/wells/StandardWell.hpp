@@ -246,6 +246,11 @@ namespace Opm
                                      std::vector<Scalar>& well_flux,
                                      DeferredLogger& deferred_logger) const override;
 
+        void computeWellRatesWithBhpDebug(const Simulator& ebosSimulator,
+                                     const Scalar& bhp,
+                                     std::vector<Scalar>& well_flux,
+                                     DeferredLogger& deferred_logger) const override;
+
         // NOTE: These cannot be protected since they are used by GasLiftRuntime
         using Base::vfp_properties_;
 

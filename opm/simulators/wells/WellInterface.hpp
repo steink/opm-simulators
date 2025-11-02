@@ -191,6 +191,11 @@ public:
                                          std::vector<Scalar>& well_flux,
                                          DeferredLogger& deferred_logger) const = 0;
 
+    virtual void computeWellRatesWithBhpDebug(const Simulator& ebosSimulator,
+                                         const Scalar& bhp,
+                                         std::vector<Scalar>& well_flux,
+                                         DeferredLogger& deferred_logger) const = 0;
+
     virtual std::optional<Scalar>
     computeBhpAtThpLimitProdWithAlq(const Simulator& ebos_simulator,
                                     const WellGroupHelperType& wgHelper,
@@ -465,6 +470,15 @@ protected:
                         DeferredLogger& deferred_logger);
 
     std::optional<Scalar>
+    estimateOperableBhpVersion2(const Simulator& simulator,
+                                const double dt,
+                                const WellGroupHelperType& wgHelper,
+                                WellStateType& well_state,
+                                const Well::ProductionControls& controls,
+                                const SummaryState& summary_state,
+                                DeferredLogger& deferred_logger);
+
+    std::optional<Scalar>
     estimateOperableBhp(const Simulator& simulator,
                         const double dt,
                         const WellGroupHelperType& wgHelper,
@@ -479,6 +493,14 @@ protected:
                           const WellGroupHelperType& wgHelper,
                           WellStateType& well_state,
                           DeferredLogger& deferred_logger);
+
+    bool solveProducerWithBhpAndRateLimits(const Simulator& simulator,
+                                           const double dt,
+                                           const Scalar bhp,
+                                           const WellGroupHelperType& wgHelper,
+                                           WellStateType& well_state,
+                                           const Well::ProductionControls& prod_controls,
+                                           DeferredLogger& deferred_logger);
 
     bool solveWellWithZeroRate(const Simulator& simulator,
                                const double dt,

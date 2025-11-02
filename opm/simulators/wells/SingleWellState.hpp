@@ -88,6 +88,7 @@ public:
         serializer(injection_cmode_group_translated);
         serializer(production_cmode_group_translated);
         serializer(prevent_group_control);
+        serializer(prevent_thp_control);
         serializer(converged);
     }
 
@@ -132,6 +133,7 @@ public:
     std::optional<WellInjectorCMode> injection_cmode_group_translated{WellInjectorCMode::CMODE_UNDEFINED};
     std::optional<WellProducerCMode> production_cmode_group_translated{WellProducerCMode::CMODE_UNDEFINED};
     bool prevent_group_control;
+    bool prevent_thp_control;
     bool converged;
     SegmentState<Scalar> segments;
     Events events;
