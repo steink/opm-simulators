@@ -349,7 +349,7 @@ namespace Opm
             const Scalar bhp = well_state.well(this->index_of_well_).bhp;
             Scalar prod_limit = prod_controls.bhp_limit;
             Scalar inj_limit = inj_controls.bhp_limit;
-            const bool has_thp = this->wellHasTHPConstraints(summary_state);
+            const bool has_thp = this->wellHasTHPConstraints(summary_state) && !ws.prevent_thp_control;
             const bool current_is_thp = this->isInjector() ? ws.injection_cmode == Well::InjectorCMode::THP :
                                                             ws.production_cmode == Well::ProducerCMode::THP;
             if (has_thp && (current_is_thp || !fixed_control)){
@@ -801,14 +801,13 @@ namespace Opm
             deferred_logger.debug(fmt::format("estimateOperableBhp: Well {} has no VFP/IPR intersections at current conditions", this->name()));
             return std::nullopt;
         }
-        // determine operability bhp-estimate based on mode for converged state
-        if (ws.production_cmode == Well::ProducerCMode::BHP) {
-            // most strict control is bhp or (most likely) thp
-            // bhp at thp-limit is given by second intersection 
-            const Scalar bhp_limit = WellBhpThpCalculator(*this).mostStrictBhpFromBhpLimits(summary_state);
-            return std::max(bhp_limit, intersect_bhp.second);
+        // if second intersection rate_scale < 1, the strictest control is thp
+        if (intersect_rate_scale.second < 1.0) {
+            ws.production_cmode = Well::ProducerCMode::THP;
+            // return estimate of bhp at thp-limit
+            return intersect_bhp.second;
         } else {
-            // most strict control is individual/group rate
+            // most strict control is individual/group rate or bhp
             // we need to check if resulting thp is below thp-limit
             const Scalar thp_limit = this->getTHPConstraint(summary_state);
             if (thp_limit < ws.thp) {
@@ -817,7 +816,7 @@ namespace Opm
             } else {
                 // thp-limit violated, well can't operate at current (low) rate
                 const std::string mode = WellProducerCMode2String(ws.production_cmode);
-                deferred_logger.debug(fmt::format("estimateOperableBhp: Well {} can't operate at rate-limit given by {} ",
+                deferred_logger.debug(fmt::format("estimateOperableBhp: Well {} can't operate at limit given by {} ",
                     this->name(), mode));
                 return std::nullopt;
             }

@@ -424,7 +424,7 @@ estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>
         const auto tot_potential = std::accumulate(ws.well_potentials.begin(), ws.well_potentials.end(), 0.0);
         if (std::abs(tot_potential) > 0.0) {
             most_strict_scale = -tot_potential/tot_rates;
-            if (well_.wellHasTHPConstraints(summaryState)) {
+            if (well_.wellHasTHPConstraints(summaryState) && !ws.prevent_thp_control) {
                 // not neccessarily true, but most likely
                 most_strict_control = Well::ProducerCMode::THP;
             } else {
