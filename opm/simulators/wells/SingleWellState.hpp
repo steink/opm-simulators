@@ -87,6 +87,7 @@ public:
         serializer(alq_state);
         serializer(group_target);
         serializer(was_shut_before_action_applied);
+        serializer(freeze_connection_status);
     }
 
     bool operator==(const SingleWellState&) const;
@@ -142,6 +143,7 @@ public:
     std::vector<Scalar> prev_surface_rates;
     PerfData<Scalar> perf_data;
     bool trivial_group_target;
+    bool freeze_connection_status;
     std::optional<GroupTarget> group_target;
     SegmentState<Scalar> segments;
     Events events;

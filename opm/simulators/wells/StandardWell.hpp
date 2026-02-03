@@ -282,6 +282,7 @@ namespace Opm
                              const bool allow_cf,
                              std::vector<Value>& cq_s,
                              PerforationRates<Scalar>& perf_rates,
+                             WellStateType* well_state,
                              DeferredLogger& deferred_logger) const;
 
         template<class Value>
@@ -300,6 +301,7 @@ namespace Opm
                              const std::vector<Value>& cmix_s,
                              std::vector<Value>& cq_s,
                              PerforationRates<Scalar>& perf_rates,
+                             WellStateType* well_state,
                              DeferredLogger& deferred_logger) const;
 
         void computeWellRatesWithBhpIterations(const Simulator& ebosSimulator,

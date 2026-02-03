@@ -98,6 +98,7 @@ namespace Opm
                     const bool allow_cf,
                     std::vector<Value>& cq_s,
                     PerforationRates<Scalar>& perf_rates,
+                    WellStateType* well_state,
                     DeferredLogger& deferred_logger) const
     {
         auto obtain = [this](const Eval& value)
@@ -183,6 +184,7 @@ namespace Opm
                         cmix_s,
                         cq_s,
                         perf_rates,
+                        well_state,
                         deferred_logger);
     }
 
@@ -207,8 +209,16 @@ namespace Opm
                     const std::vector<Value>& cmix_s,
                     std::vector<Value>& cq_s,
                     PerforationRates<Scalar>& perf_rates,
+                    WellStateType* well_state,
                     DeferredLogger& deferred_logger) const
     {
+        bool freeze_status = false;
+        //bool status = true; 
+        const bool handle_status = (well_state != nullptr);
+        if (well_state != nullptr) {
+            freeze_status = well_state->well(this->index_of_well_).freeze_connection_status;
+            //bool& status = well_state->well(this->index_of_well_).perf_data.status[perf]; 
+        }
         // Pressure drawdown (also used to determine direction of flow)
         const Value well_pressure = bhp + this->connections_.pressure_diff(perf);
         Value drawdown = pressure - well_pressure;
@@ -231,11 +241,23 @@ namespace Opm
 
         // producing perforations
         if (drawdown > 0)  {
-            // Do nothing if crossflow is not allowed
-            if (!allow_cf && this->isInjector()) {
+            if (!handle_status) {
+                if (!allow_cf && this->isInjector()) {
+                // Do nothing if crossflow is not allowed
                 return;
+                }
+            } else {
+                if (freeze_status) {
+                    if (well_state->well(this->index_of_well_).perf_data.status[perf] == false) {
+                        // closed, do nothing
+                        return;
+                    }
+                } else if (!allow_cf && this->isInjector()) {
+                    // update status to closed
+                    well_state->well(this->index_of_well_).perf_data.status[perf] = false;
+                    return;
+                }
             }
-
             // compute component volumetric rates at standard conditions
             for (int componentIdx = 0; componentIdx < this->numConservationQuantities(); ++componentIdx) {
                 const Value cq_p = - Tw[componentIdx] * (mob[componentIdx] * drawdown);
@@ -254,11 +276,23 @@ namespace Opm
                 ratioCalc.gasWaterPerfRateProd(cq_s, perf_rates, rvw, rsw, this->isProducer());
             }
         } else {
-            // Do nothing if crossflow is not allowed
-            if (!allow_cf && this->isProducer()) {
+            if (!handle_status) {
+                if (!allow_cf && this->isProducer()) {
+                // Do nothing if crossflow is not allowed
                 return;
+                }
+            } else {
+                if (freeze_status) {
+                    if (well_state->well(this->index_of_well_).perf_data.status[perf] == false) {
+                        // closed, do nothing
+                        return;
+                    }
+                } else if (!allow_cf && this->isProducer()) {
+                    // update status to closed
+                    well_state->well(this->index_of_well_).perf_data.status[perf] = false;
+                    return;
+                }
             }
-
             // Using total mobilities
             Value total_mob_dense = mob[0];
             for (int componentIdx = 1; componentIdx < this->numConservationQuantities(); ++componentIdx) {
@@ -523,7 +557,7 @@ namespace Opm
         std::vector<EvalWell> Tw(this->num_conservation_quantities_, this->well_index_[perf] * trans_mult);
         this->getTw(Tw, perf, intQuants, trans_mult, wellstate_nupcol);
         computePerfRate(intQuants, mob, bhp, Tw, perf, allow_cf,
-                        cq_s, perf_rates, deferred_logger);
+                        cq_s, perf_rates, &well_state, deferred_logger);
 
         auto& ws = well_state.well(this->index_of_well_);
         auto& perf_data = ws.perf_data;
@@ -1522,7 +1556,7 @@ namespace Opm
             std::vector<Scalar> cq_s(this->num_conservation_quantities_, 0.);
             PerforationRates<Scalar> perf_rates;
             computePerfRate(intQuants, mob, bhp, Tw, perf, allow_cf,
-                            cq_s, perf_rates, deferred_logger);
+                            cq_s, perf_rates, nullptr, deferred_logger);
 
             for(int p = 0; p < np; ++p) {
                 well_flux[FluidSystem::activeCompToActivePhaseIdx(p)] += cq_s[p];
@@ -1936,7 +1970,7 @@ namespace Opm
             std::vector<EvalWell> Tw(this->num_conservation_quantities_, this->well_index_[perf] * trans_mult);
             this->getTw(Tw, perf, int_quant, trans_mult, wellstate_nupcol);
             computePerfRate(int_quant, mob, bhp, Tw, perf, allow_cf, cq_s,
-                            perf_rates, deferred_logger);
+                            perf_rates, nullptr, deferred_logger);
             // TODO: make area a member
             const Scalar area = 2 * M_PI * this->perf_rep_radius_[perf] * this->perf_length_[perf];
             const auto& material_law_manager = simulator.problem().materialLawManager();
@@ -2597,7 +2631,7 @@ namespace Opm
             this->getTw(Tw, perf, intQuants, trans_mult, wellstate_nupcol);
             PerforationRates<Scalar> perf_rates;
             computePerfRate(intQuants, mob, bhp.value(), Tw, perf, allow_cf,
-                            cq_s, perf_rates, deferred_logger);
+                            cq_s, perf_rates, nullptr, deferred_logger);
             for (int comp = 0; comp < this->num_conservation_quantities_; ++comp) {
                 well_q_s[comp] += cq_s[comp];
             }

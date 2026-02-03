@@ -80,6 +80,7 @@ public:
         serializer(connFracStatistics);
         serializer(gas_mass_rates);
         serializer(wat_mass_rates);
+        serializer(status);
     }
 
     bool operator==(const PerfData&) const;
@@ -118,6 +119,7 @@ public:
 
     ConnFiltrateData<Scalar> filtrate_data{};
     std::vector<ConnFracStatistics<Scalar>> connFracStatistics{};
+    std::vector<bool> status{};
 };
 
 } // namespace Opm

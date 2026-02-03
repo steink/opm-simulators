@@ -54,6 +54,7 @@ SingleWellState(const std::string& name_,
     , prev_surface_rates(pu.numActivePhases())
     , perf_data(perf_input.size(), !is_producer, pu.numActivePhases())
     , trivial_group_target(false)
+    , freeze_connection_status(false)
 {
     for (std::size_t perf = 0; perf < perf_input.size(); perf++) {
         this->perf_data.cell_index[perf] = perf_input[perf].cell_index;
@@ -406,6 +407,7 @@ bool SingleWellState<Scalar, IndexTraits>::operator==(const SingleWellState& rhs
            this->perf_data == rhs.perf_data &&
            this->filtrate_conc == rhs.filtrate_conc &&
            this->trivial_group_target == rhs.trivial_group_target &&
+           this->freeze_connection_status == rhs.freeze_connection_status &&
            this->segments == rhs.segments &&
            this->events == rhs.events &&
            this->injection_cmode == rhs.injection_cmode &&
