@@ -342,6 +342,11 @@ public:
      void updateNonzeroValues(const GpuSparseMatrixGeneric<T>& matrix);
 
     /**
+     * @brief setToZero resets the matrix to zero values.
+     */
+     void setToZero();
+
+    /**
      * @brief Dispatches a function based on the block size of the matrix.
      *
      * This method allows executing different code paths depending on the block size
@@ -399,7 +404,7 @@ private:
         if constexpr (blockSizeCompileTime > 1) {
             return dispatchOnBlocksizeImpl<blockSizeCompileTime - 1>(function);
         } else {
-            OPM_THROW(std::runtime_error, fmt::format("Unsupported block size: {}", m_blockSize));
+            OPM_THROW(std::runtime_error, fmt::format(fmt::runtime("Unsupported block size: {}"), m_blockSize));
         }
     }
 };

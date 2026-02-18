@@ -676,7 +676,9 @@ namespace Opm {
                                   ecl_well_map,
                                   this->well_open_times_);
             } catch (const std::exception& e) {
-                const std::string msg = fmt::format("Exception during testing of well: {}. The well will not open.\n Exception message: {}", wellEcl.name(), e.what());
+                const std::string msg =
+                  fmt::format(fmt::runtime("Exception during testing of well: {}. The well will not open.\n"
+                                           "Exception message: {}"), wellEcl.name(), e.what());
                 deferred_logger.warning("WELL_TESTING_FAILED", msg);
             }
         }
@@ -1003,7 +1005,7 @@ namespace Opm {
                         : well_ecl.injectionControls(this->summaryState_).anyZeroRateConstraint();
                     if (any_zero_rate_constraint) {
                         // Treat as shut, do not add to container.
-                        local_deferredLogger.debug(fmt::format("  Well {} gets shut due to having zero rate constraint and disallowing crossflow ", well_ecl.name()) );
+                        local_deferredLogger.debug(fmt::format(fmt::runtime("  Well {} gets shut due to having zero rate constraint and disallowing crossflow "), well_ecl.name()));
                         this->wellState().shutWell(w);
                         this->well_close_times_.erase(well_name);
                         this->well_open_times_.erase(well_name);
@@ -1140,7 +1142,7 @@ namespace Opm {
         // It should be able to find in wells_ecl.
         if (it == this->wells_ecl_.end()) {
             OPM_DEFLOG_THROW(std::logic_error,
-                             fmt::format("Could not find well {} in wells_ecl ", well_name),
+                             fmt::format(fmt::runtime("Could not find well {} in wells_ecl"), well_name),
                              deferred_logger);
         }
 
@@ -1163,7 +1165,7 @@ namespace Opm {
         if constexpr (BlackoilWellModelGasLift<TypeTag>::glift_debug) {
             if (gaslift_.terminalOutput()) {
                 const std::string msg =
-                    fmt::format("assemble() : iteration {}" , iterationIdx);
+                    fmt::format(fmt::runtime("assemble() : iteration {}"), iterationIdx);
                 gaslift_.gliftDebug(msg, local_deferredLogger);
             }
         }
@@ -1243,8 +1245,8 @@ namespace Opm {
                 if (this->network_.shouldBalance(episodeIdx, iterationIdx + 1)) {
                     if (this->terminal_output_) {
                         const std::string msg = fmt::format("Maximum of {:d} network iterations has been used and we stop the update, \n"
-                            "and try again after the next Newton iteration (imbalance = {:.2e} bar, ctrl_change = {})",
-                            max_iteration, network_imbalance*1.0e-5, well_group_control_changed);
+                            "and try again after the next Newton iteration (imbalance = {:.2e} bar)",
+                            max_iteration, network_imbalance*1.0e-5);
                         local_deferredLogger.debug(msg);
                     }
                     // To avoid stopping the newton iterations too early, before the network is converged,
@@ -1253,8 +1255,8 @@ namespace Opm {
                 } else {
                     if (this->terminal_output_) {
                         const std::string msg = fmt::format("Maximum of {:d} network iterations has been used and we stop the update. \n"
-                            "The simulator will continue with unconverged network results (imbalance = {:.2e} bar, ctrl_change = {})",
-                            max_iteration, network_imbalance*1.0e-5, well_group_control_changed);
+                            "The simulator will continue with unconverged network results (imbalance = {:.2e} bar)",
+                            max_iteration, network_imbalance*1.0e-5);
                         local_deferredLogger.info(msg);
                     }
                 }
@@ -1336,7 +1338,7 @@ namespace Opm {
         // we need to re-iterate the network when the well group controls changed or gaslift/alq is changed or
         // the inner iterations are did not converge
         const bool more_network_update = this->network_.shouldBalance(reportStepIdx, iterationIdx) &&
-                    (more_inner_network_update || well_group_control_changed || alq_updated);
+                    (more_inner_network_update || alq_updated);
         return {well_group_control_changed, more_network_update, network_imbalance};
     }
 
