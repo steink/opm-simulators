@@ -497,16 +497,17 @@ private:
     //! \param local_fraction_lambda Functor to get local fraction for a child group
     //! \param do_addback Whether to perform add-back at local_reduction_level
     //! \return Target after applying reductions and fractions (before efficiency factor division)
-    template<typename ReductionLambda, typename FractionLambda>
-    Scalar applyReductionsAndFractions_(const std::vector<std::string>& chain,
-                                        Scalar orig_target,
-                                        Scalar current_rate_available,
-                                        std::size_t local_reduction_level,
-                                        bool is_production_group,
-                                        Phase injection_phase,
-                                        ReductionLambda&& local_reduction_lambda,
-                                        FractionLambda&& local_fraction_lambda,
-                                        bool do_addback) const;
+    template<typename ReductionLambda, typename FractionLambda, typename FractionGuideRatesLambda>
+    std::pair<Scalar, Scalar> applyReductionsAndFractions_(const std::vector<std::string>& chain,
+                                                           Scalar orig_target,
+                                                           Scalar current_rate_available,
+                                                           std::size_t local_reduction_level,
+                                                           bool is_production_group,
+                                                           Phase injection_phase,
+                                                           ReductionLambda&& local_reduction_lambda,
+                                                           FractionLambda&& local_fraction_lambda,
+                                                           bool do_addback, 
+                                                           std::optional<FractionGuideRatesLambda>&& local_fraction_guide_rates_lambda = std::nullopt) const;
 
     //! \brief Compute partial efficiency factor for addback calculation.
     //!

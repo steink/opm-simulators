@@ -200,7 +200,7 @@ GroupStateHelper<Scalar, IndexTraits>::checkGroupConstraintsInj(const std::strin
                                                              injection_phase,
                                                              local_reduction_lambda,
                                                              local_fraction_lambda,
-                                                             /*do_addback=*/true);
+                                                             /*do_addback=*/true).first;
 
     // Avoid negative target rates coming from too large local reductions.
     const Scalar target_rate_available = std::max(Scalar(1e-12), target / efficiency_factor);
@@ -341,7 +341,7 @@ GroupStateHelper<Scalar, IndexTraits>::checkGroupConstraintsProd(const std::stri
                                                              /*injection_phase=*/Phase::OIL,
                                                              local_reduction_lambda,
                                                              local_fraction_lambda,
-                                                             /*do_addback=*/true);
+                                                             /*do_addback=*/true).first;
 
     // Avoid negative target rates coming from too large local reductions.
     const Scalar target_rate_available = std::max(Scalar(1e-12), target / efficiency_factor);
@@ -685,7 +685,7 @@ GroupStateHelper<Scalar, IndexTraits>::getWellGroupTargetInjector(const std::str
                                                              injection_phase,
                                                              local_reduction_lambda,
                                                              local_fraction_lambda,
-                                                             do_addback);
+                                                             do_addback).first;
 
     // Avoid negative target rates coming from too large local reductions.
     return GroupTarget{group.name(), std::max(Scalar(0.0), target / efficiency_factor)};
@@ -761,6 +761,10 @@ GroupStateHelper<Scalar, IndexTraits>::getWellGroupTargetProducer(const std::str
         const std::string& always_included = is_grup_control ? child : name;
         return fcalc.localFraction(child, always_included);
     };
+    auto local_fraction_guide_rates_lambda = [&](const std::string& child) {
+        const std::string& always_included = is_grup_control ? child : name;
+        return fcalc.localFractionGuideRates(child, always_included);
+    };
 
     const Scalar orig_target = tcalc.groupTarget();
     // Switch sign since 'rates' are negative for producers.
@@ -773,7 +777,7 @@ GroupStateHelper<Scalar, IndexTraits>::getWellGroupTargetProducer(const std::str
     // Add-back is only performed when the well is under individual control (not GRUP)
     const bool do_addback = !is_grup_control;
 
-    const Scalar target = this->applyReductionsAndFractions_(chain,
+    const auto [target, guide_rate_multiplier] = this->applyReductionsAndFractions_(chain,
                                                              orig_target,
                                                              current_rate_available,
                                                              local_reduction_level,
@@ -781,6 +785,7 @@ GroupStateHelper<Scalar, IndexTraits>::getWellGroupTargetProducer(const std::str
                                                              /*injection_phase=*/Phase::OIL,
                                                              local_reduction_lambda,
                                                              local_fraction_lambda,
+                                                             local_fraction_guide_rates_lambda,
                                                              do_addback);
 
     // Avoid negative target rates coming from too large local reductions.
@@ -1482,8 +1487,8 @@ activePhaseIdxToRescoupPhase_(int phase_pos) const
 #endif
 
 template <typename Scalar, typename IndexTraits>
-template <typename ReductionLambda, typename FractionLambda>
-Scalar
+template <typename ReductionLambda, typename FractionLambda, typename FractionGuideRatesLambda>
+std::pair<Scalar, Scalar>
 GroupStateHelper<Scalar, IndexTraits>::applyReductionsAndFractions_(const std::vector<std::string>& chain,
                                                                     const Scalar orig_target,
                                                                     const Scalar current_rate_available,
@@ -1492,7 +1497,8 @@ GroupStateHelper<Scalar, IndexTraits>::applyReductionsAndFractions_(const std::v
                                                                     const Phase injection_phase,
                                                                     ReductionLambda&& local_reduction_lambda,
                                                                     FractionLambda&& local_fraction_lambda,
-                                                                    const bool do_addback) const
+                                                                    const bool do_addback, 
+                                                                    std::optional<FractionGuideRatesLambda>&& local_fraction_guide_rates_lambda) const
 {
     // Compute portion of target corresponding to current_rate_available.
     // The chain is ordered [control_group (top), ..., bottom_group].
@@ -1501,6 +1507,7 @@ GroupStateHelper<Scalar, IndexTraits>::applyReductionsAndFractions_(const std::v
     // the correct guide rate sum for a group under individual control.
     const std::size_t num_ancestors = chain.size() - 1;
     Scalar target = orig_target;
+    std::optional<Scalar> guide_rate_multiplier = std::nullopt; 
     for (std::size_t ii = 0; ii < num_ancestors; ++ii) {
         // Check if this level has a guide rate (or is the top level)
         const bool has_guide_rate = is_production_group
@@ -1521,9 +1528,17 @@ GroupStateHelper<Scalar, IndexTraits>::applyReductionsAndFractions_(const std::v
             }
         }
         // Apply guide rate fraction to get portion for next level
-        target *= local_fraction_lambda(chain[ii + 1]);
+        if (ii < num_ancestors -1 || !local_fraction_guide_rates_lambda.has_value()) {
+            target *= local_fraction_lambda(chain[ii + 1]);
+        } else {
+            // We pay special attention to the last level and compute the guide-rate multiplier
+            // for potential later use in case my_guide_rate is \approx 0
+            auto [my_guide_rate, total_guide_rate] = (*local_fraction_guide_rates_lambda)(chain[ii + 1]);
+            guide_rate_multiplier = target / total_guide_rate;
+            target = my_guide_rate * guide_rate_multiplier.value();
+        }
     }
-    return target;
+    return std::make_pair(target, guide_rate_multiplier);
 }
 
 template <typename Scalar, typename IndexTraits>

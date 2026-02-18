@@ -78,6 +78,16 @@ FractionCalculator<Scalar, IndexTraits>::
 localFraction(const std::string& name,
               const std::string& always_included_child)
 {
+    auto [my_guide_rate, total_guide_rate] = localFractionGuideRates(name, always_included_child);
+    return my_guide_rate / total_guide_rate;
+}
+
+template<typename Scalar, typename IndexTraits>
+std::pair<Scalar, Scalar>
+FractionCalculator<Scalar, IndexTraits>::
+localFractionGuideRates(const std::string& name,
+                        const std::string& always_included_child)
+{
     bool always_use_potentials = false;
     const Scalar my_guide_rate = guideRate(name, always_included_child, always_use_potentials);
 
@@ -87,7 +97,7 @@ localFraction(const std::string& name,
     // the group/well "name" is the only active group/well we therefore return 1 as the fraction
     // even though my_guide_rate may be zero
     if (num_active_groups == 1)
-        return 1.0;
+        return {1.0, 1.0};
 
     if (total_guide_rate == 0 ) {
         // if the total guide rate is zero (for instance due to netv = 0) we use the potentials
@@ -97,12 +107,12 @@ localFraction(const std::string& name,
         const Scalar my_total_pot = guideRateSum(parent_group, always_included_child, always_use_potentials).first;
         // if there are no wells on group-control, potential will still be zero
         if (my_total_pot == 0) {
-            return 1.0;
+            return {1.0, 1.0};
         }
 
-        return my_pot / my_total_pot;
+        return {my_pot, my_total_pot};
     }
-    return my_guide_rate / total_guide_rate;
+    return {my_guide_rate, total_guide_rate};
 }
 
 template<typename Scalar, typename IndexTraits>
