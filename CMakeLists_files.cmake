@@ -230,6 +230,7 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/wells/GroupEconomicLimitsChecker.cpp
   opm/simulators/wells/GroupState.cpp
   opm/simulators/wells/GroupStateHelper.cpp
+  opm/simulators/wells/GroupTreeRates.cpp
   opm/simulators/wells/MSWellHelpers.cpp
   opm/simulators/wells/MultisegmentWellAssemble.cpp
   opm/simulators/wells/MultisegmentWellEquations.cpp
@@ -489,6 +490,7 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_glift1.cpp
   tests/test_graphcoloring.cpp
   tests/test_GroupState.cpp
+  tests/test_GroupTreeRates.cpp
   tests/test_interregflows.cpp
   tests/test_invert.cpp
   tests/test_keyword_validator.cpp
@@ -1179,6 +1181,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/GroupEconomicLimitsChecker.hpp
   opm/simulators/wells/GroupState.hpp
   opm/simulators/wells/GroupStateHelper.hpp
+  opm/simulators/wells/GroupTreeRates.hpp
   opm/simulators/wells/GuideRateHandler.hpp
   opm/simulators/wells/MSWellHelpers.hpp
   opm/simulators/wells/MultisegmentWell.hpp
