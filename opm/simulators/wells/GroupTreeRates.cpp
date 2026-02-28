@@ -93,6 +93,7 @@ void setSubRates(std::vector<GroupTreeNode<Scalar>>& tree,
     }
 
     const Scalar availRate = tree[nodeIndex].rate - fixedRate;
+    assert(availRate >= Scalar{0});
     assert(availRate > Scalar{0} || guideSum == Scalar{0});
 
     for (const int ci : children) {
@@ -124,10 +125,10 @@ int findWorstOffendingChild(const std::vector<GroupTreeNode<Scalar>>& tree,
     // Recurse into children that have subtrees
     for (const int ci : children) {
         if (!tree[ci].children.empty()) {
-            Scalar childExcess = worstExcess;
-            const int childWorst = findWorstOffendingChild(tree, ci, childExcess);
-            if (childExcess > worstExcess) {
-                worstExcess = childExcess;
+            Scalar subtreeExcess = worstExcess;
+            const int childWorst = findWorstOffendingChild(tree, ci, subtreeExcess);
+            if (subtreeExcess > worstExcess) {
+                worstExcess = subtreeExcess;
                 worstIndex = childWorst;
             }
         }
