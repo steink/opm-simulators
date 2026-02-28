@@ -346,7 +346,7 @@ BOOST_AUTO_TEST_CASE(ZeroIterations_NoViolation)
 
     // Should converge immediately (no violations since rates are 0)
     BOOST_CHECK_EQUAL(iter, 0);
-    BOOST_CHECK_CLOSE(tree[1].rate, 0.0, 1e-10);
+    BOOST_CHECK_SMALL(tree[1].rate, 1e-10);
 }
 
 BOOST_AUTO_TEST_CASE(EqualGuideRates)
