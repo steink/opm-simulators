@@ -249,7 +249,7 @@ public:
     /// @return The corresponding GuideRateModel::Target for the injection phase
     GuideRateModel::Target getInjectionGuideTargetMode(Phase injection_phase) const;
 
-    Scalar getProductionGroupTarget(const Group& group) const;
+    Scalar getProductionGroupTarget(const Group& group, std::optional<Group::ProductionCMode> cmode_opt = std::nullopt) const;
 
     /// Get the production target for a specific control mode (not necessarily the active one).
     Scalar getProductionGroupTargetForMode(const Group& group,
@@ -268,7 +268,7 @@ public:
 
     GuideRate::RateVector getProductionGroupRateVector(const std::string& group_name) const;
 
-    std::optional<GroupTarget> getWellGroupTargetInjector(const std::string& name,
+    std::optional<std::pair<Scalar, std::string>> getWellGroupTargetInjector(const std::string& name,
                                                           const std::string& parent,
                                                           const Group& group,
                                                           const Scalar* rates,
@@ -276,12 +276,13 @@ public:
                                                           const Scalar efficiency_factor,
                                                           const std::vector<Scalar>& resv_coeff) const;
 
-    std::optional<GroupTarget> getWellGroupTargetProducer(const std::string& name,
-                                                          const std::string& parent,
-                                                          const Group& group,
-                                                          const Scalar* rates,
-                                                          const Scalar efficiency_factor,
-                                                          const std::vector<Scalar>& resv_coeff) const;
+    std::optional<std::pair<Scalar, std::string>> getWellGroupTargetProducer(const std::string& name,
+                                                                 const std::string& parent,
+                                                                 const Group& group,
+                                                                 const Scalar* rates,
+                                                                 const Scalar efficiency_factor,
+                                                                 const std::vector<Scalar>& resv_coeff,
+                                                                 std::optional<Group::ProductionCMode> target_cmode = std::nullopt) const;
 
     GuideRate::RateVector getWellRateVector(const std::string& name) const;
 
@@ -444,6 +445,8 @@ public:
                                    const Phase injection_phase);
 
     void updateGroupProductionRates(const Group& group);
+
+    void updatePreviousGroupProductionRates(const Group& group);
 
     void updateGroupTargetReduction(const Group& group,
                                     const bool is_injector);
