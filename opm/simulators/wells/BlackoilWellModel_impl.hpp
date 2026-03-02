@@ -1734,6 +1734,8 @@ namespace Opm {
             if (this->guideRate().has(group.name())) {
                 node.guide_rate = this->guideRate().get(group.name(), guide_target, grv);
             } else {
+                // Default to 1.0 so that children without explicit guide rates
+                // share the parent's rate equally.
                 node.guide_rate = Scalar{1};
             }
 
@@ -1782,6 +1784,8 @@ namespace Opm {
                 if (this->guideRate().has(well_name) || this->guideRate().hasPotentials(well_name)) {
                     well_node.guide_rate = this->guideRate().get(well_name, guide_target, wrv);
                 } else {
+                    // Default to 1.0 so that wells without explicit guide rates
+                    // share the group's rate equally.
                     well_node.guide_rate = Scalar{1};
                 }
 
