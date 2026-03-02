@@ -174,10 +174,10 @@ update_parent_status(std::vector<GroupTreeNode<Scalar>>& tree,
 }
 
 // Explicit template instantiations
-template class GroupTreeRates<double>;
-template class GroupTreeRates<float>;
-
 template struct GroupTreeNode<double>;
 template struct GroupTreeNode<float>;
+
+template class GroupTreeRates<double>;
+template class GroupTreeRates<float>;
 
 } // namespace Opm
