@@ -274,6 +274,9 @@ template<class Scalar> class WellContributions;
             bool
             updateWellControls(DeferredLogger& deferred_logger);
 
+            bool
+            updateWellControlsOriginal(DeferredLogger& deferred_logger);
+
             void updateAndCommunicate(const int reportStepIdx);
 
             bool updateGroupControls(const Group& group,

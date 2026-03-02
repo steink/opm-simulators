@@ -42,6 +42,7 @@
 
 #include <opm/simulators/wells/BlackoilWellModelConstraints.hpp>
 #include <opm/simulators/wells/BlackoilWellModelNldd.hpp>
+#include <opm/simulators/wells/GroupTreeRates.hpp>
 #include <opm/simulators/wells/GuideRateHandler.hpp>
 #include <opm/simulators/wells/ParallelPAvgDynamicSourceData.hpp>
 #include <opm/simulators/wells/ParallelWBPCalculation.hpp>
@@ -64,7 +65,9 @@
 
 #include <algorithm>
 #include <cassert>
+#include <functional>
 #include <iomanip>
+#include <limits>
 #include <utility>
 #include <optional>
 
@@ -1651,6 +1654,187 @@ namespace Opm {
     bool
     BlackoilWellModel<TypeTag>::
     updateWellControls(DeferredLogger& deferred_logger)
+    {
+        OPM_TIMEFUNCTION();
+        const bool changed = updateWellControlsOriginal(deferred_logger);
+
+        if (!this->wellsActive()) {
+            return changed;
+        }
+
+        const int episodeIdx = simulator_.episodeIndex();
+        const Group& fieldGroup = this->schedule().getGroup("FIELD", episodeIdx);
+        const auto& pu = this->phaseUsage();
+
+        // Determine the target phase based on the FIELD group production control
+        const auto cmode = this->groupState().production_control(fieldGroup.name());
+        int target_phase_idx = -1;
+        switch (cmode) {
+        case Group::ProductionCMode::ORAT:
+            if (pu.phaseIsActive(IndexTraits::oilPhaseIdx))
+                target_phase_idx = pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx);
+            break;
+        case Group::ProductionCMode::WRAT:
+            if (pu.phaseIsActive(IndexTraits::waterPhaseIdx))
+                target_phase_idx = pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx);
+            break;
+        case Group::ProductionCMode::GRAT:
+            if (pu.phaseIsActive(IndexTraits::gasPhaseIdx))
+                target_phase_idx = pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx);
+            break;
+        default:
+            // For LRAT, RESV, FLD or other modes the simplified tree
+            // distribution is not applicable.
+            break;
+        }
+
+        if (target_phase_idx < 0) {
+            return changed;
+        }
+
+        // Determine the guide-rate target matching the production control mode
+        const auto guide_target = this->groupStateHelper().getProductionGuideTargetMode(fieldGroup);
+        if (guide_target == GuideRateModel::Target::NONE) {
+            return changed;
+        }
+
+        // Step 1: Build a flat GroupTreeNode vector from the current group hierarchy
+        std::vector<GroupTreeNode<Scalar>> tree;
+
+        // Recursive lambda to traverse the group hierarchy and populate the flat vector
+        std::function<int(const Group&, int)> buildTree =
+            [&](const Group& group, int parent_idx) -> int
+        {
+            const int node_idx = static_cast<int>(tree.size());
+            tree.push_back(GroupTreeNode<Scalar>{});
+            auto& node = tree[node_idx];
+            node.index = node_idx;
+            node.parent = parent_idx;
+            node.name = group.name();
+
+            // Get group rate limit from production controls
+            const auto controls = group.productionControls(this->summaryState());
+            switch (cmode) {
+            case Group::ProductionCMode::ORAT: node.limit = controls.oil_target; break;
+            case Group::ProductionCMode::WRAT: node.limit = controls.water_target; break;
+            case Group::ProductionCMode::GRAT: node.limit = controls.gas_target; break;
+            default: node.limit = std::numeric_limits<Scalar>::max(); break;
+            }
+
+            // Get current rate from group state
+            if (this->groupState().has_production_rates(group.name())) {
+                const auto& rates = this->groupState().production_rates(group.name());
+                if (target_phase_idx < static_cast<int>(rates.size())) {
+                    node.rate = rates[target_phase_idx];
+                }
+            }
+
+            // Get guide rate for this group
+            const auto grv = this->groupStateHelper().getProductionGroupRateVector(group.name());
+            if (this->guideRate().has(group.name())) {
+                node.guide_rate = this->guideRate().get(group.name(), guide_target, grv);
+            } else {
+                // Default to 1.0 so that children without explicit guide rates
+                // share the parent's rate equally.
+                node.guide_rate = Scalar{1};
+            }
+
+            // Process child groups
+            for (const std::string& child_group_name : group.groups()) {
+                const auto& child_group = this->schedule().getGroup(child_group_name, episodeIdx);
+                const int child_idx = buildTree(child_group, node_idx);
+                tree[node_idx].children.push_back(child_idx);
+            }
+
+            // Process child wells (leaf nodes)
+            for (const std::string& well_name : group.wells()) {
+                const auto& well_ecl = this->schedule().getWell(well_name, episodeIdx);
+                if (!well_ecl.isProducer()) {
+                    continue;
+                }
+
+                const int well_node_idx = static_cast<int>(tree.size());
+                tree.push_back(GroupTreeNode<Scalar>{});
+                auto& well_node = tree[well_node_idx];
+                well_node.index = well_node_idx;
+                well_node.parent = node_idx;
+                well_node.name = well_name;
+                well_node.children = {};
+
+                // Get well rate limit from production controls
+                const auto well_controls = well_ecl.productionControls(this->summaryState());
+                switch (cmode) {
+                case Group::ProductionCMode::ORAT: well_node.limit = well_controls.oil_rate; break;
+                case Group::ProductionCMode::WRAT: well_node.limit = well_controls.water_rate; break;
+                case Group::ProductionCMode::GRAT: well_node.limit = well_controls.gas_rate; break;
+                default: well_node.limit = std::numeric_limits<Scalar>::max(); break;
+                }
+
+                // Get current well rate from well state
+                if (this->wellState().has(well_name)) {
+                    const auto& ws = this->wellState().well(well_name);
+                    if (target_phase_idx < static_cast<int>(ws.surface_rates.size())) {
+                        // Production rates are negative in OPM convention
+                        well_node.rate = -ws.surface_rates[target_phase_idx];
+                    }
+                }
+
+                // Get guide rate for this well
+                const auto wrv = this->groupStateHelper().getWellRateVector(well_name);
+                if (this->guideRate().has(well_name) || this->guideRate().hasPotentials(well_name)) {
+                    well_node.guide_rate = this->guideRate().get(well_name, guide_target, wrv);
+                } else {
+                    // Default to 1.0 so that wells without explicit guide rates
+                    // share the group's rate equally.
+                    well_node.guide_rate = Scalar{1};
+                }
+
+                tree[node_idx].children.push_back(well_node_idx);
+            }
+
+            return node_idx;
+        };
+
+        buildTree(fieldGroup, -1);
+
+        if (tree.empty()) {
+            return changed;
+        }
+
+        // Step 2: Distribute rates through the group tree
+        GroupTreeRates<Scalar>::distribute(tree);
+
+        // Step 3: Apply the resulting rates back to the well/group state
+        for (const auto& node : tree) {
+            if (node.children.empty()) {
+                // Leaf node = well: apply rate back to well state
+                if (this->wellState().has(node.name)) {
+                    auto& ws = this->wellState().well(node.name);
+                    if (target_phase_idx < static_cast<int>(ws.surface_rates.size())) {
+                        // Store as negative (production convention)
+                        ws.surface_rates[target_phase_idx] = -node.rate;
+                    }
+                }
+            } else {
+                // Group node: update group state production rates
+                if (this->groupState().has_production_rates(node.name)) {
+                    auto rates = this->groupState().production_rates(node.name);
+                    if (target_phase_idx < static_cast<int>(rates.size())) {
+                        rates[target_phase_idx] = node.rate;
+                        this->groupState().update_production_rates(node.name, rates);
+                    }
+                }
+            }
+        }
+
+        return changed;
+    }
+
+
+    template<typename TypeTag>
+    bool
+    BlackoilWellModel<TypeTag>::
+    updateWellControlsOriginal(DeferredLogger& deferred_logger)
     {
         OPM_TIMEFUNCTION();
         if (!this->wellsActive()) {
