@@ -782,10 +782,7 @@ GroupStateHelper<Scalar, IndexTraits>::getWellGroupTargetProducer(const std::str
         return fcalc.localFraction(child, always_included);
     };
 
-<<<<<<< HEAD
-    const Scalar orig_target = this->getProductionGroupTarget(group);
-=======
-    Scalar orig_target = tcalc.groupTarget(current_group_control);
+    Scalar orig_target = this->getProductionGroupTarget(group);
     if (target_cmode.has_value() && target_cmode.value() != current_group_control) {
         // translate orig_target to target_cmode using "previous" group rate fractions
         const auto& prev_rates = this->groupState().prev_production_rates(group.name());
@@ -799,7 +796,6 @@ GroupStateHelper<Scalar, IndexTraits>::getWellGroupTargetProducer(const std::str
         const Scalar ratio = (prev_rate_current != 0.0) ? prev_rate_target / prev_rate_current : 1.0;
         orig_target *= ratio;
     }
->>>>>>> 1c0bb29f9 (squashing commits)
     // Switch sign since 'rates' are negative for producers.
     const Scalar current_rate_available = -tcalc.calcModeRateFromRates(rates);
     const auto chain = this->groupChainTopBot(name, group.name());
@@ -822,7 +818,6 @@ GroupStateHelper<Scalar, IndexTraits>::getWellGroupTargetProducer(const std::str
 
     // Avoid negative target rates coming from too large local reductions.
     return std::make_pair(std::max(Scalar(0.0), target / efficiency_factor), group.name());
-    //return GroupTarget{group.name(), std::max(Scalar(0.0), target / efficiency_factor)};
 }
 
 template <typename Scalar, typename IndexTraits>
