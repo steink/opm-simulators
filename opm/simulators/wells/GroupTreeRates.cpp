@@ -21,30 +21,30 @@
 #include <opm/simulators/wells/GroupTreeRates.hpp>
 
 #include <cassert>
-#include <numeric>
 
 namespace Opm {
 
 template<class Scalar>
-int distributeGroupTreeRates(std::vector<GroupTreeNode<Scalar>>& tree,
-                             int rootIndex,
-                             int maxIter)
+int GroupTreeRates<Scalar>::
+distribute(std::vector<GroupTreeNode<Scalar>>& tree,
+           int root_index,
+           int max_iter)
 {
-    if (rootIndex == 0) {
+    if (root_index == 0) {
         // Initialise: all nodes group-controlled except root
         for (auto& node : tree) {
             node.status = -1;
         }
-        tree[rootIndex].status = 1;
-        tree[rootIndex].rate = tree[rootIndex].limit;
+        tree[root_index].status = 1;
+        tree[root_index].rate = tree[root_index].limit;
     }
 
     int iter = 0;
-    for (; iter < maxIter; ++iter) {
-        setSubRates(tree, rootIndex);
+    for (; iter < max_iter; ++iter) {
+        set_sub_rates(tree, root_index);
 
-        Scalar worstExcess{0};
-        const int ix = findWorstOffendingChild(tree, rootIndex, worstExcess);
+        Scalar worst_excess{0};
+        const int ix = find_worst_offending_child(tree, root_index, worst_excess);
         if (ix < 0) {
             break; // converged
         }
@@ -55,143 +55,129 @@ int distributeGroupTreeRates(std::vector<GroupTreeNode<Scalar>>& tree,
 
         // If it has children, recursively solve its subtree
         if (!tree[ix].children.empty()) {
-            distributeGroupTreeRates(tree, ix, maxIter);
+            distribute(tree, ix, max_iter);
         }
 
-        updateParentStatus(tree, ix);
+        update_parent_status(tree, ix);
     }
     return iter;
 }
 
 template<class Scalar>
-void setSubRates(std::vector<GroupTreeNode<Scalar>>& tree,
-                 int nodeIndex)
+void GroupTreeRates<Scalar>::
+set_sub_rates(std::vector<GroupTreeNode<Scalar>>& tree,
+              int node_index)
 {
-    const auto& children = tree[nodeIndex].children;
+    const auto& children = tree[node_index].children;
     if (children.empty()) {
         return; // leaf (well) node
     }
 
     // Separate children into fixed (status != -1) and group-controlled
-    Scalar fixedRate{0};
-    Scalar guideSum{0};
-    bool allFixed = true;
+    Scalar fixed_rate{0};
+    Scalar guide_sum{0};
+    bool all_fixed = true;
 
     for (const int ci : children) {
         if (tree[ci].status != -1) {
-            fixedRate += tree[ci].rate;
+            fixed_rate += tree[ci].rate;
         } else {
-            guideSum += tree[ci].guideRate;
-            allFixed = false;
+            guide_sum += tree[ci].guide_rate;
+            all_fixed = false;
         }
     }
 
-    if (allFixed) {
-        tree[nodeIndex].status = 0;
-        tree[nodeIndex].rate = fixedRate;
+    if (all_fixed) {
+        tree[node_index].status = 0;
+        tree[node_index].rate = fixed_rate;
         return;
     }
 
-    const Scalar availRate = tree[nodeIndex].rate - fixedRate;
-    assert(availRate >= Scalar{0});
-    assert(availRate > Scalar{0} || guideSum == Scalar{0});
+    const Scalar avail_rate = tree[node_index].rate - fixed_rate;
+    assert(avail_rate >= Scalar{0});
+    assert(avail_rate > Scalar{0} || guide_sum == Scalar{0});
 
     for (const int ci : children) {
         if (tree[ci].status == -1) {
-            tree[ci].rate = (guideSum > Scalar{0})
-                ? availRate * tree[ci].guideRate / guideSum
+            tree[ci].rate = (guide_sum > Scalar{0})
+                ? avail_rate * tree[ci].guide_rate / guide_sum
                 : Scalar{0};
-            setSubRates(tree, ci);
+            set_sub_rates(tree, ci);
         }
     }
 }
 
 template<class Scalar>
-int findWorstOffendingChild(const std::vector<GroupTreeNode<Scalar>>& tree,
-                            int nodeIndex,
-                            Scalar& worstExcess)
+int GroupTreeRates<Scalar>::
+find_worst_offending_child(const std::vector<GroupTreeNode<Scalar>>& tree,
+                           int node_index,
+                           Scalar& worst_excess)
 {
-    const auto& children = tree[nodeIndex].children;
-    int worstIndex = -1;
+    const auto& children = tree[node_index].children;
+    int worst_index = -1;
 
     for (const int ci : children) {
         const Scalar excess = tree[ci].rate - tree[ci].limit;
-        if (excess > worstExcess) {
-            worstExcess = excess;
-            worstIndex = ci;
+        if (excess > worst_excess) {
+            worst_excess = excess;
+            worst_index = ci;
         }
     }
 
     // Recurse into children that have subtrees
     for (const int ci : children) {
         if (!tree[ci].children.empty()) {
-            Scalar subtreeExcess = worstExcess;
-            const int childWorst = findWorstOffendingChild(tree, ci, subtreeExcess);
-            if (subtreeExcess > worstExcess) {
-                worstExcess = subtreeExcess;
-                worstIndex = childWorst;
+            Scalar subtree_excess = worst_excess;
+            const int child_worst = find_worst_offending_child(tree, ci, subtree_excess);
+            if (subtree_excess > worst_excess) {
+                worst_excess = subtree_excess;
+                worst_index = child_worst;
             }
         }
     }
 
-    if (worstExcess > Scalar{0} && worstIndex >= 0) {
-        assert(tree[worstIndex].status == -1);
+    if (worst_excess > Scalar{0} && worst_index >= 0) {
+        assert(tree[worst_index].status == -1);
     } else {
-        worstIndex = -1;
+        worst_index = -1;
     }
-    return worstIndex;
+    return worst_index;
 }
 
 template<class Scalar>
-void updateParentStatus(std::vector<GroupTreeNode<Scalar>>& tree,
-                        int nodeIndex)
+void GroupTreeRates<Scalar>::
+update_parent_status(std::vector<GroupTreeNode<Scalar>>& tree,
+                     int node_index)
 {
-    const int pix = tree[nodeIndex].parent;
+    const int pix = tree[node_index].parent;
     if (pix < 0) {
         return;
     }
 
     const auto& siblings = tree[pix].children;
-    bool allFixed = true;
-    Scalar totalRate{0};
+    bool all_fixed = true;
+    Scalar total_rate{0};
 
     for (const int ci : siblings) {
         if (tree[ci].status == -1) {
-            allFixed = false;
+            all_fixed = false;
             break;
         }
-        totalRate += tree[ci].rate;
+        total_rate += tree[ci].rate;
     }
 
-    if (allFixed) {
+    if (all_fixed) {
         tree[pix].status = 0;
-        tree[pix].rate = totalRate;
-        updateParentStatus(tree, pix);
+        tree[pix].rate = total_rate;
+        update_parent_status(tree, pix);
     }
 }
 
 // Explicit template instantiations
+template class GroupTreeRates<double>;
+template class GroupTreeRates<float>;
+
 template struct GroupTreeNode<double>;
 template struct GroupTreeNode<float>;
-
-template int distributeGroupTreeRates<double>(
-    std::vector<GroupTreeNode<double>>&, int, int);
-template int distributeGroupTreeRates<float>(
-    std::vector<GroupTreeNode<float>>&, int, int);
-
-template void setSubRates<double>(
-    std::vector<GroupTreeNode<double>>&, int);
-template void setSubRates<float>(
-    std::vector<GroupTreeNode<float>>&, int);
-
-template int findWorstOffendingChild<double>(
-    const std::vector<GroupTreeNode<double>>&, int, double&);
-template int findWorstOffendingChild<float>(
-    const std::vector<GroupTreeNode<float>>&, int, float&);
-
-template void updateParentStatus<double>(
-    std::vector<GroupTreeNode<double>>&, int);
-template void updateParentStatus<float>(
-    std::vector<GroupTreeNode<float>>&, int);
 
 } // namespace Opm

@@ -42,6 +42,7 @@
 
 #include <opm/simulators/wells/BlackoilWellModelConstraints.hpp>
 #include <opm/simulators/wells/BlackoilWellModelNldd.hpp>
+#include <opm/simulators/wells/GroupTreeRates.hpp>
 #include <opm/simulators/wells/GuideRateHandler.hpp>
 #include <opm/simulators/wells/ParallelPAvgDynamicSourceData.hpp>
 #include <opm/simulators/wells/ParallelWBPCalculation.hpp>
@@ -1722,6 +1723,16 @@ namespace Opm {
 
         // update wsolvent fraction for REIN wells
         this->updateWsolvent(fieldGroup, episodeIdx,  this->nupcolWellState());
+
+        // TODO: Consider using GroupTreeRates<Scalar>::distribute() here to solve
+        // the group-tree rates to a more converged state under the simplifying
+        // assumption of constant well-rate fractions. This would involve:
+        //   1. Building a flat GroupTreeNode vector from the current group hierarchy
+        //      (using fieldGroup, schedule, guide rates, and current well/group rates)
+        //   2. Calling GroupTreeRates<Scalar>::distribute(tree)
+        //   3. Applying the resulting rates back to the well/group state
+        // This approach could improve convergence of group-tree rate balancing
+        // without requiring network pressure recalculation.
 
         return changed_well_group;
     }

@@ -112,7 +112,7 @@ BOOST_AUTO_TEST_CASE(SingleWell_WellLimitBinding)
 {
     auto tree = makeSingleWellTree();
     // FIELD limit = 500, W1 limit = 300 => W1 should be limited to 300
-    const int iter = distributeGroupTreeRates(tree);
+    const int iter = GroupTreeRates<double>::distribute(tree);
 
     BOOST_CHECK(iter > 0);
     // W1 should be at its limit
@@ -129,7 +129,7 @@ BOOST_AUTO_TEST_CASE(SingleWell_FieldLimitBinding)
 {
     auto tree = makeSingleWellTree();
     tree[1].limit = 800.0; // W1 limit > FIELD limit
-    const int iter = distributeGroupTreeRates(tree);
+    const int iter = GroupTreeRates<double>::distribute(tree);
 
     BOOST_CHECK(iter >= 0);
     // W1 rate should equal FIELD limit since it is the only well
@@ -139,7 +139,7 @@ BOOST_AUTO_TEST_CASE(SingleWell_FieldLimitBinding)
 BOOST_AUTO_TEST_CASE(Unconstrained_RatesFollowGuideRates)
 {
     auto tree = makeUnconstrainedTree();
-    distributeGroupTreeRates(tree);
+    GroupTreeRates<double>::distribute(tree);
 
     // FIELD rate = 1000 (its limit)
     const double fieldRate = 1000.0;
@@ -157,7 +157,7 @@ BOOST_AUTO_TEST_CASE(Unconstrained_RatesFollowGuideRates)
 BOOST_AUTO_TEST_CASE(SimpleTree_GroupAndWellLimits)
 {
     auto tree = makeSimpleTree();
-    distributeGroupTreeRates(tree);
+    GroupTreeRates<double>::distribute(tree);
 
     // All well rates must not exceed their limits
     for (const auto& node : tree) {
@@ -175,7 +175,7 @@ BOOST_AUTO_TEST_CASE(SimpleTree_GroupAndWellLimits)
 BOOST_AUTO_TEST_CASE(SimpleTree_RateConsistency)
 {
     auto tree = makeSimpleTree();
-    distributeGroupTreeRates(tree);
+    GroupTreeRates<double>::distribute(tree);
 
     // G1 rate == W1 rate + W2 rate
     BOOST_CHECK_CLOSE(tree[1].rate, tree[3].rate + tree[4].rate, 1e-10);
@@ -188,7 +188,7 @@ BOOST_AUTO_TEST_CASE(SimpleTree_RateConsistency)
 BOOST_AUTO_TEST_CASE(SimpleTree_StatusConsistency)
 {
     auto tree = makeSimpleTree();
-    distributeGroupTreeRates(tree);
+    GroupTreeRates<double>::distribute(tree);
 
     // Root should be individually limited (status 1)
     BOOST_CHECK_EQUAL(tree[0].status, 1);
@@ -215,7 +215,7 @@ BOOST_AUTO_TEST_CASE(TightWellLimit)
     auto tree = makeUnconstrainedTree();
     tree[3].limit = 10.0; // W1 has tight limit
 
-    distributeGroupTreeRates(tree);
+    GroupTreeRates<double>::distribute(tree);
 
     // W1 must be at its limit
     BOOST_CHECK_CLOSE(tree[3].rate, 10.0, 1e-10);
@@ -237,7 +237,7 @@ BOOST_AUTO_TEST_CASE(AllWellsTight)
     tree[5].limit = 100.0;  // W3
     tree[6].limit = 100.0;  // W4
 
-    distributeGroupTreeRates(tree);
+    GroupTreeRates<double>::distribute(tree);
 
     // Each well should be at its limit
     BOOST_CHECK_CLOSE(tree[3].rate, 100.0, 1e-10);
@@ -262,7 +262,7 @@ BOOST_AUTO_TEST_CASE(GroupLimitViolation)
     tree[3] = {3, 1, 0.0, 5000.0, -1, 1.0, "W1", {}};
     tree[4] = {4, 2, 0.0, 9000.0, -1, 1.0, "W2", {}};
 
-    const int iter = distributeGroupTreeRates(tree);
+    const int iter = GroupTreeRates<double>::distribute(tree);
 
     // Should take at least 1 iteration to fix the G1 violation
     BOOST_CHECK(iter >= 1);
@@ -299,7 +299,7 @@ BOOST_AUTO_TEST_CASE(CascadingViolations)
     tree[5] = {5, 2, 0.0, 3000.0, -1, 0.5, "W3", {}};
     tree[6] = {6, 2, 0.0, 9000.0, -1, 0.5, "W4", {}};
 
-    const int iter = distributeGroupTreeRates(tree);
+    const int iter = GroupTreeRates<double>::distribute(tree);
     BOOST_CHECK(iter >= 1);
 
     // All limits respected
@@ -326,7 +326,7 @@ BOOST_AUTO_TEST_CASE(DeepTree)
     tree[2] = {2, 1, 0.0, 2000.0, -1, 1.0, "G2", {3}};
     tree[3] = {3, 2, 0.0, 1500.0, -1, 1.0, "W1", {}};
 
-    distributeGroupTreeRates(tree);
+    GroupTreeRates<double>::distribute(tree);
 
     // W1 is the tightest at 1500
     BOOST_CHECK_CLOSE(tree[3].rate, 1500.0, 1e-10);
@@ -342,7 +342,7 @@ BOOST_AUTO_TEST_CASE(ZeroIterations_NoViolation)
     tree[0] = {0, -1, 0.0, 0.0, -1, 1.0, "FIELD", {1}};
     tree[1] = {1, 0, 0.0, 100.0, -1, 1.0, "W1", {}};
 
-    const int iter = distributeGroupTreeRates(tree);
+    const int iter = GroupTreeRates<double>::distribute(tree);
 
     // Should converge immediately (no violations since rates are 0)
     BOOST_CHECK_EQUAL(iter, 0);
@@ -358,7 +358,7 @@ BOOST_AUTO_TEST_CASE(EqualGuideRates)
     tree[2] = {2, 0, 0.0, 500.0, -1, 1.0, "W2", {}};
     tree[3] = {3, 0, 0.0, 500.0, -1, 1.0, "W3", {}};
 
-    distributeGroupTreeRates(tree);
+    GroupTreeRates<double>::distribute(tree);
 
     // Each well gets 300
     BOOST_CHECK_CLOSE(tree[1].rate, 300.0, 1e-10);
@@ -373,7 +373,7 @@ BOOST_AUTO_TEST_CASE(SetSubRates_Basic)
     tree[0].status = 1;
     tree[0].rate = 1000.0;
 
-    setSubRates(tree, 0);
+    GroupTreeRates<double>::set_sub_rates(tree, 0);
 
     BOOST_CHECK_CLOSE(tree[1].rate, 600.0, 1e-10);
     BOOST_CHECK_CLOSE(tree[2].rate, 400.0, 1e-10);
@@ -387,13 +387,13 @@ BOOST_AUTO_TEST_CASE(FindWorstOffending_Basic)
     // Set FIELD rate and distribute
     tree[0].status = 1;
     tree[0].rate = 10000.0;
-    setSubRates(tree, 0);
+    GroupTreeRates<double>::set_sub_rates(tree, 0);
 
-    double worstExcess = 0.0;
-    const int ix = findWorstOffendingChild(tree, 0, worstExcess);
+    double worst_excess = 0.0;
+    const int ix = GroupTreeRates<double>::find_worst_offending_child(tree, 0, worst_excess);
 
     // At least one child should be offending since rates > limits for some
-    BOOST_CHECK(ix >= 0 || worstExcess <= 0.0);
+    BOOST_CHECK(ix >= 0 || worst_excess <= 0.0);
 }
 
 BOOST_AUTO_TEST_CASE(UpdateParentStatus_AllFixed)
@@ -406,7 +406,7 @@ BOOST_AUTO_TEST_CASE(UpdateParentStatus_AllFixed)
     tree[2].rate = 300.0;
     tree[0].status = -1;
 
-    updateParentStatus(tree, 1);
+    GroupTreeRates<double>::update_parent_status(tree, 1);
 
     BOOST_CHECK_EQUAL(tree[0].status, 0);
     BOOST_CHECK_CLOSE(tree[0].rate, 800.0, 1e-10);
@@ -420,7 +420,7 @@ BOOST_AUTO_TEST_CASE(UpdateParentStatus_NotAllFixed)
     tree[2].status = -1; // still group-controlled
     tree[0].status = -1;
 
-    updateParentStatus(tree, 1);
+    GroupTreeRates<double>::update_parent_status(tree, 1);
 
     // Parent should NOT be updated since not all children are fixed
     BOOST_CHECK_EQUAL(tree[0].status, -1);

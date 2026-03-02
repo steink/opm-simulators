@@ -17,16 +17,15 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef OPM_GROUP_TREE_RATES_HPP
-#define OPM_GROUP_TREE_RATES_HPP
+#ifndef OPM_GROUP_TREE_RATES_HEADER_INCLUDED
+#define OPM_GROUP_TREE_RATES_HEADER_INCLUDED
 
-#include <cstddef>
 #include <string>
 #include <vector>
 
 namespace Opm {
 
-/// Simplified node in the group/well hierarchy used for rate distribution.
+/// \brief Simplified node in the group/well hierarchy used for rate distribution.
 ///
 /// Each node represents either a group or a well.  Wells are leaf nodes
 /// (children is empty).  The root node typically represents the FIELD group.
@@ -42,66 +41,79 @@ struct GroupTreeNode {
     Scalar rate{0};               ///< Current allocated rate
     Scalar limit{0};              ///< Rate limit for this node
     int status{-1};               ///< Control status (-1, 0, or 1)
-    Scalar guideRate{0};          ///< Guide rate used for allocation
+    Scalar guide_rate{0};         ///< Guide rate used for allocation
     std::string name;             ///< Group or well name
     std::vector<int> children;    ///< Indices of child nodes
 };
 
-/// Distribute rates through a group tree respecting individual node limits.
+/// \brief Distribute rates through a group tree respecting individual node limits.
 ///
-/// Starting from the root node (at @p rootIndex), rates are distributed
-/// top-down to children according to their guide-rate fractions.  Whenever
-/// a child's allocated rate exceeds its limit, that child is fixed at its
-/// limit and the distribution is recomputed for the remaining
-/// group-controlled children.  The process repeats until no limit
-/// violations remain.
-///
-/// @param tree      Flat vector of tree nodes (modified in-place).
-/// @param rootIndex Index of the subtree root in @p tree.
-/// @param maxIter   Maximum number of outer iterations (safety limit).
-/// @return          Number of outer iterations used.
+/// Under the simplifying assumption that well-rate fractions are constant,
+/// this class iteratively solves the group tree to a converged state.
+/// Starting from the root node, rates are distributed top-down to children
+/// according to their guide-rate fractions.  Whenever a child's allocated
+/// rate exceeds its limit, that child is fixed at its limit and the
+/// distribution is recomputed for the remaining group-controlled children.
+/// The process repeats until no limit violations remain.
 template<class Scalar>
-int distributeGroupTreeRates(std::vector<GroupTreeNode<Scalar>>& tree,
-                             int rootIndex = 0,
-                             int maxIter = 1000);
+class GroupTreeRates
+{
+public:
+    /// \brief Distribute rates through a group tree respecting individual node limits.
+    ///
+    /// Starting from the root node (at \p root_index), rates are distributed
+    /// top-down to children according to their guide-rate fractions.  Whenever
+    /// a child's allocated rate exceeds its limit, that child is fixed at its
+    /// limit and the distribution is recomputed for the remaining
+    /// group-controlled children.  The process repeats until no limit
+    /// violations remain.
+    ///
+    /// \param[in,out] tree       Flat vector of tree nodes (modified in-place).
+    /// \param[in]     root_index Index of the subtree root in \p tree.
+    /// \param[in]     max_iter   Maximum number of outer iterations (safety limit).
+    /// \return                   Number of outer iterations used.
+    static int distribute(std::vector<GroupTreeNode<Scalar>>& tree,
+                          int root_index = 0,
+                          int max_iter = 1000);
 
-/// Distribute the rate of node @p nodeIndex to its children.
-///
-/// Children that are already individually limited (status != -1) keep
-/// their current rate.  The remaining (available) rate is split among
-/// group-controlled children proportionally to their guide rates.
-/// If all children are fixed, the parent's status becomes 0 and its
-/// rate is set to the sum of the children's rates.
-///
-/// @param tree      Flat vector of tree nodes (modified in-place).
-/// @param nodeIndex Index of the node whose children are updated.
-template<class Scalar>
-void setSubRates(std::vector<GroupTreeNode<Scalar>>& tree,
-                 int nodeIndex);
+    /// \brief Distribute the rate of a node to its children.
+    ///
+    /// Children that are already individually limited (status != -1) keep
+    /// their current rate.  The remaining (available) rate is split among
+    /// group-controlled children proportionally to their guide rates.
+    /// If all children are fixed, the parent's status becomes 0 and its
+    /// rate is set to the sum of the children's rates.
+    ///
+    /// \param[in,out] tree       Flat vector of tree nodes (modified in-place).
+    /// \param[in]     node_index Index of the node whose children are updated.
+    static void set_sub_rates(std::vector<GroupTreeNode<Scalar>>& tree,
+                              int node_index);
 
-/// Find the child (in the subtree rooted at @p nodeIndex) whose rate
-/// most exceeds its limit.
-///
-/// @param tree      Flat vector of tree nodes (read-only access).
-/// @param nodeIndex Root of the subtree to search.
-/// @param[out] worstExcess  The largest (rate - limit) value found.
-/// @return          Index of the worst offending node, or -1 if no
-///                  violation exists.
-template<class Scalar>
-int findWorstOffendingChild(const std::vector<GroupTreeNode<Scalar>>& tree,
-                            int nodeIndex,
-                            Scalar& worstExcess);
+    /// \brief Find the child whose rate most exceeds its limit.
+    ///
+    /// Searches the subtree rooted at \p node_index for the node whose
+    /// rate most exceeds its limit.
+    ///
+    /// \param[in]     tree          Flat vector of tree nodes (read-only access).
+    /// \param[in]     node_index    Root of the subtree to search.
+    /// \param[in,out] worst_excess  The largest (rate - limit) value found.
+    /// \return                      Index of the worst offending node, or -1
+    ///                              if no violation exists.
+    static int find_worst_offending_child(const std::vector<GroupTreeNode<Scalar>>& tree,
+                                          int node_index,
+                                          Scalar& worst_excess);
 
-/// After fixing a child node, propagate upward: if all siblings are
-/// also fixed, the parent becomes fully determined (status 0) with
-/// rate equal to the sum of its children.
-///
-/// @param tree      Flat vector of tree nodes (modified in-place).
-/// @param nodeIndex Index of the node whose parent is updated.
-template<class Scalar>
-void updateParentStatus(std::vector<GroupTreeNode<Scalar>>& tree,
-                        int nodeIndex);
+    /// \brief Update parent status after fixing a child node.
+    ///
+    /// If all siblings are also fixed, the parent becomes fully determined
+    /// (status 0) with rate equal to the sum of its children.
+    ///
+    /// \param[in,out] tree       Flat vector of tree nodes (modified in-place).
+    /// \param[in]     node_index Index of the node whose parent is updated.
+    static void update_parent_status(std::vector<GroupTreeNode<Scalar>>& tree,
+                                     int node_index);
+};
 
 } // namespace Opm
 
-#endif // OPM_GROUP_TREE_RATES_HPP
+#endif // OPM_GROUP_TREE_RATES_HEADER_INCLUDED
