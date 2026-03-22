@@ -420,6 +420,14 @@ protected:
                                        const GroupStateHelperType& groupStateHelper,
                                        WellStateType& well_state);
 
+    bool solveProblematicWellFromBhpEstimate(const Simulator& simulator,
+                                             const double dt,
+                                             const Scalar bhp,
+                                             const Well::InjectionControls& inj_controls,
+                                             const Well::ProductionControls& prod_controls,
+                                             const GroupStateHelperType& groupStateHelper,
+                                             WellStateType& well_state);
+
     std::optional<Scalar>
     estimateOperableBhp(const Simulator& ebos_simulator,
                         const double dt,

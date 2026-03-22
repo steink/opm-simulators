@@ -86,6 +86,7 @@ public:
         serializer(primaryvar);
         serializer(alq_state);
         serializer(group_target);
+        serializer(forced_bhp_from_thp);
         serializer(was_shut_before_action_applied);
     }
 
@@ -149,6 +150,7 @@ public:
     WellProducerCMode production_cmode{WellProducerCMode::CMODE_UNDEFINED};
     std::vector<Scalar> primaryvar;
     ALQState<Scalar> alq_state;
+    std::optional<Scalar> forced_bhp_from_thp;
     // This is used to indicate whether the well was shut before applying an action
     // if it was SHUT, even the action set the well to OPEN, the data in the well state
     // is not well-defined. We do not use it to overwrite the current well state.
