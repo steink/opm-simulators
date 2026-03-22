@@ -144,17 +144,26 @@ assembleControlEq(const GroupStateHelperType& groupStateHelper,
                                  bhp_from_thp,
                                  control_eq);
     } else {
-             // Find rates.
+        const auto& ws = well_state.well(well_.indexOfWell());
+        // Find rates.
         const auto rates = getRates();
-                                            // Setup function for evaluation of BHP from THP (used only if needed).
-        std::function<EvalWell()> bhp_from_thp = [&]() {
-            return WellBhpThpCalculator(well_).calculateBhpFromThp(well_state,
-                                                                   rates,
-                                                                   well,
-                                                                   summary_state,
-                                                                   rho,
-                                                                   deferred_logger);
-        };
+        std::function<EvalWell()> bhp_from_thp;
+        if (ws.forced_bhp_from_thp.has_value()) {
+            // thp-control is overridden by forced_bhp_from_thp, so we use the provided bhp value as a constant.
+            bhp_from_thp = [&]() { 
+                return EvalWell(ws.forced_bhp_from_thp.value()); 
+            };
+        } else {
+            // Setup function for evaluation of BHP from THP (used only if needed).
+            bhp_from_thp = [&]() {
+                return WellBhpThpCalculator(well_).calculateBhpFromThp(well_state,
+                                                                    rates,
+                                                                    well,
+                                                                    summary_state,
+                                                                    rho,
+                                                                    deferred_logger);
+            };
+        }
         WellAssemble(well_).
             assembleControlEqProd(groupStateHelper,
                                   prod_controls,

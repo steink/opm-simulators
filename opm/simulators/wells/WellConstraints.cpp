@@ -150,6 +150,7 @@ activeInjectionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
     // if (well_.wellHasTHPConstraints(summaryState) && currentControl != Well::InjectorCMode::THP)
     if (controls.hasControl(Well::InjectorCMode::THP) && currentControl != Well::InjectorCMode::THP)
     {
+        assert(!ws.forced_bhp_from_thp.has_value()); // not implemented for injectors for now, so we should not have this case here
         const auto& thp = well_.getTHPConstraint(summaryState);
         Scalar current_thp = ws.thp;
         if (thp < current_thp) {
@@ -287,6 +288,15 @@ activeProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
     }
 
     if (well_.wellHasTHPConstraints(summaryState) && currentControl != Well::ProducerCMode::THP) {
+        if (ws.forced_bhp_from_thp.has_value()) {
+            // THP-limit is overridden by forced_bhp_from_thp, so we check this instead of the thp-limit here.
+            const Scalar bhp_from_thp_limit = ws.forced_bhp_from_thp.value();
+            Scalar current_bhp = ws.bhp;
+            if (bhp_from_thp_limit > current_bhp) {
+                thp_limit_violated_but_not_switched = false;
+                return Well::ProducerCMode::THP;
+            }
+        }
         const auto& thp = well_.getTHPConstraint(summaryState);
         Scalar current_thp = ws.thp;
         // For trivial group targets (for instance caused by NETV) we dont want to flip to THP control.
@@ -318,7 +328,6 @@ activeProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
             }
         }
     }
-
     return currentControl;
 }
 

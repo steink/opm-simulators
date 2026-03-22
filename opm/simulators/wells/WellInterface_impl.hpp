@@ -611,11 +611,10 @@ namespace Opm
         const auto& summary_state = simulator.vanguard().summaryState();
         bool converged = true;
         auto& ws = well_state.well(this->index_of_well_);
+        ws.forced_bhp_from_thp = std::nullopt; // reset forced bhp from thp before solving
         // if well is stopped, check if we can reopen with explicit fraction
         if (this->wellIsStopped()) {
             this->openWell();
-            const bool use_vfpexplicit = this->operability_status_.use_vfpexplicit;
-            this->operability_status_.use_vfpexplicit = true;
             auto bhp_target = estimateOperableBhp(simulator, dt, groupStateHelper, summary_state, well_state);
             if (!bhp_target.has_value()) {
                 // no intersection with ipr
@@ -634,7 +633,6 @@ namespace Opm
                 const Scalar bhp = std::max(bhp_target.value(),
                                             static_cast<Scalar>(prod_controls.bhp_limit));
                 solveWellWithBhp(simulator, dt, bhp, groupStateHelper, well_state);
-                this->operability_status_.use_vfpexplicit = use_vfpexplicit;
             }
         }
         // solve well-equation
@@ -653,37 +651,38 @@ namespace Opm
             bool is_stable = WellBhpThpCalculator(*this).isStableSolution(well_state, this->well_ecl_, rates, summary_state);
             if (!is_stable) {
                 // solution converged to an unstable point!
-                this->operability_status_.use_vfpexplicit = true;
                 auto bhp_stable = WellBhpThpCalculator(*this).estimateStableBhp(well_state, this->well_ecl_, rates, this->getRefDensity(), summary_state);
-                // if we find an intersection with a sufficiently lower bhp, re-solve equations
-                const Scalar reltol = 1e-3;
-                const Scalar cur_bhp = ws.bhp;
-                if (bhp_stable.has_value() && cur_bhp - bhp_stable.value() > cur_bhp*reltol){
-                    const auto msg = fmt::format("Well {} converged to an unstable solution, re-solving", this->name());
-                    deferred_logger.debug(msg);
-                    solveWellWithBhp(
-                        simulator, dt, bhp_stable.value(), groupStateHelper, well_state
-                    );
-                    // re-solve with hopefully good initial guess
-                    ws.thp = this->getTHPConstraint(summary_state);
-                    converged = this->iterateWellEqWithSwitching(
-                        simulator, dt, inj_controls, prod_controls, groupStateHelper, well_state,
-                        /*fixed_control=*/false, /*fixed_status=*/false, /*solving_with_zero_rate=*/false
-                    );
+                if (!bhp_stable.has_value()) {
+                    // well converged, but no intesection with ipr found, this means well is very close to operability limit
+                    // mark well as non-converged to trigger operability check below
+                    converged = false;
+                } else {
+                    // if we find an intersection with a sufficiently lower bhp, re-solve equations
+                    const Scalar reltol = 1e-5;
+                    const Scalar cur_bhp = ws.bhp;
+                    if (bhp_stable.has_value() && cur_bhp - bhp_stable.value() > cur_bhp*reltol){
+                        const auto msg = fmt::format("Well {} converged to an unstable solution, re-solving", this->name());
+                        deferred_logger.debug(msg);
+                        converged = solveProblematicWellFromBhpEstimate(simulator,
+                                                                        dt,
+                                                                        bhp_stable.value(),
+                                                                        inj_controls,
+                                                                        prod_controls,
+                                                                        groupStateHelper,
+                                                                        well_state);
+                    }
                 }
             }
         }
 
         if (!converged) {
-            // Well did not converge, switch to explicit fractions
-            this->operability_status_.use_vfpexplicit = true;
+            // Well did not converge, retry to estimate operable bhp
             this->openWell();
             auto bhp_target = estimateOperableBhp(
                 simulator, dt, groupStateHelper, summary_state, well_state
             );
             if (!bhp_target.has_value()) {
-                // solve with zero rate
-                // well can't operate using explicit fractions stop the well
+                // well can't operate, solve with zero rate
                 converged = solveWellWithZeroRate(simulator, dt, groupStateHelper, well_state);
                 this->stopWell();
                 this->operability_status_.can_obtain_bhp_with_thp_limit = false;
@@ -693,25 +692,99 @@ namespace Opm
                 // solve well with the estimated target bhp (or limit)
                 const Scalar bhp = std::max(bhp_target.value(),
                                             static_cast<Scalar>(prod_controls.bhp_limit));
-                solveWellWithBhp(
-                    simulator, dt, bhp, groupStateHelper, well_state
-                );
-                ws.thp = this->getTHPConstraint(summary_state);
-                const auto msg = fmt::format("Well {} did not converge, re-solving with explicit fractions for VFP caculations.", this->name());
-                deferred_logger.debug(msg);
-                converged = this->iterateWellEqWithSwitching(simulator, dt,
-                                                             inj_controls,
-                                                             prod_controls,
-                                                             groupStateHelper,
-                                                             well_state,
-                                                             /*fixed_control=*/false,
-                                                             /*fixed_status=*/false,
-                                                             /*solving_with_zero_rate=*/false);
+                converged = solveProblematicWellFromBhpEstimate(simulator,
+                                                                dt,
+                                                                bhp,
+                                                                inj_controls,
+                                                                prod_controls,
+                                                                groupStateHelper,
+                                                                well_state);
             }
         }
         // update operability
         this->operability_status_.can_obtain_bhp_with_thp_limit = !this->wellIsStopped();
         this->operability_status_.obey_thp_limit_under_bhp_limit = !this->wellIsStopped();
+        return converged;
+    }
+
+    template<typename TypeTag>
+    bool
+    WellInterface<TypeTag>::
+    solveProblematicWellFromBhpEstimate(const Simulator& simulator,
+                                        const double dt,
+                                        const Scalar bhp,
+                                        const Well::InjectionControls& inj_controls,
+                                        const Well::ProductionControls& prod_controls,
+                                        const GroupStateHelperType& groupStateHelper,
+                                        WellStateType& well_state)
+    {
+        auto& deferred_logger = groupStateHelper.deferredLogger();
+        const auto& summary_state = simulator.vanguard().summaryState();
+        bool converged = false;
+        // Well is in a difficult situation, e.g. converging to an unstable solution or just not converging at all. 
+        // NOTE: if we expreience that the below bhp-solve fails, we migth consider some clean-up/re-initialization
+        // of well-state/primary-variables here
+        converged = solveWellWithBhp(simulator, dt, bhp, groupStateHelper, well_state);
+        if (!converged) {
+            const auto msg = fmt::format("Problematic well {} was not able to converge with bhp estimate {}."
+                                         "Returning unconverged well-state", this->name(), bhp);
+            deferred_logger.debug(msg);
+            return converged;
+        }
+        if (this->wellIsStopped()) {
+            const auto msg = fmt::format("Problematic well {} was not able to operate under bhp estimate {}.", this->name(), bhp);
+            deferred_logger.debug(msg);
+            return converged;
+        }
+        // Above bhp is an approximation based on ipr/fractions at a different bhp-solution, so for better accuracy
+        // we recompute the intersection using the current bhp-solution.
+        auto rates = well_state.well(this->index_of_well_).surface_rates;
+        this->adaptRatesForVFP(rates);
+        this->updateIPRImplicit(simulator, groupStateHelper, well_state);
+        auto bhp_stable = WellBhpThpCalculator(*this).estimateStableBhp(well_state, this->well_ecl_, rates, this->getRefDensity(), summary_state);
+        if (!bhp_stable.has_value()) {
+            // no intesection with ipr found for new estimate, stop and solve with zero rate
+            converged = solveWellWithZeroRate(simulator, dt, groupStateHelper, well_state);
+            this->stopWell();
+            this->operability_status_.can_obtain_bhp_with_thp_limit = false;
+            this->operability_status_.obey_thp_limit_under_bhp_limit = false;
+            const auto msg = fmt::format("Problematic well {}: found no intersection with IPR after solving with bhp estimate {}", this->name(), bhp);
+            deferred_logger.debug(msg);
+            return converged;
+        }
+        // If new bhp_stable differs significantly from bhp, we redo the bhp-solve to improve the initial guess
+        if (std::abs(bhp_stable.value() - bhp) > std::abs(bhp)*1e-5) {
+            converged = solveWellWithBhp(simulator, dt, bhp_stable.value(), groupStateHelper, well_state);
+            if (!converged) {
+                const auto msg = fmt::format("Problematic well {} was not able to converge with updated bhp estimate {}."
+                                             "Returning unconverged well-state", this->name(), bhp_stable.value());
+                deferred_logger.debug(msg);
+                return converged;
+            }
+        }
+        // Likely cause of problematic well behavior is either jumping around in unstable region and/or switching between
+        // thp and rate limits. In attempt to stabilize solution, we override the thp constraint with the corresponding
+        // estimated bhp until next local solve. 
+        auto& ws = well_state.well(this->index_of_well_);
+        ws.forced_bhp_from_thp = bhp_stable.value();
+        ws.thp = this->getTHPConstraint(summary_state);
+
+        // Re-try well-solve with hopefully good initial guess and thp constraint overridden by bhp estimate.
+        converged = this->iterateWellEqWithSwitching(simulator, dt,
+                                                    inj_controls,
+                                                    prod_controls,
+                                                    groupStateHelper,
+                                                    well_state,
+                                                    /*fixed_control=*/false,
+                                                    /*fixed_status=*/false,
+                                                    /*solving_with_zero_rate=*/false);
+        if (!converged) {
+            const auto msg = fmt::format("Problematic well {} was not able to converge in second attempt. Returning unconverged well-state", this->name());
+            deferred_logger.debug(msg);
+        } else {
+            const auto msg = fmt::format("Problematic well {} converged to stable solution in second attempt.", this->name());
+            deferred_logger.debug(msg);
+        }
         return converged;
     }
 
@@ -737,8 +810,11 @@ namespace Opm
         }
         OPM_TIMEFUNCTION();
         // Given an unconverged well or closed well, estimate an operable bhp (if any)
-        // Get minimal bhp from vfp-curve
+        // Get minimal bhp from vfp-curve using explicit fractions (we don't trust current fractions)
+        const bool use_vfpexplicit = this->operability_status_.use_vfpexplicit;
+        this->operability_status_.use_vfpexplicit = true;
         Scalar bhp_min =  WellBhpThpCalculator(*this).calculateMinimumBhpFromThp(well_state, this->well_ecl_, summary_state, this->getRefDensity());
+        this->operability_status_.use_vfpexplicit = use_vfpexplicit;
         // Solve
         const bool converged = solveWellWithBhp(
             simulator, dt, bhp_min, groupStateHelper, well_state
@@ -1021,14 +1097,19 @@ namespace Opm
                                                     "and the well is therefore kept stopped.",
                                                      this->name(), number_of_well_reopenings_);
                     deferred_logger.debug(msg);
+                    changed_to_stopped_this_step_ = true;
+                } else {
+                    changed_to_stopped_this_step_ = false;
                 }
                 this->stopWell();
-                changed_to_stopped_this_step_ = true;
                 bool converged_zero_rate = this->solveWellWithZeroRate(
                     simulator, dt, groupStateHelper, well_state
                 );
                 if (this->param_.shut_unsolvable_wells_ && !converged_zero_rate ) {
                     this->operability_status_.solvable = false;
+                } else {
+                    this->operability_status_.can_obtain_bhp_with_thp_limit = false;
+                    this->operability_status_.obey_thp_limit_under_bhp_limit = false;
                 }
                 // we increse the number of reopenings to avoid output in the next iteration
                 number_of_well_reopenings_++;
