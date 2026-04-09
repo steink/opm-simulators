@@ -63,6 +63,20 @@ public:
                                const std::optional<Well::InjectionControls>& inj_controls = std::nullopt,
                                const std::optional<Well::ProductionControls>& prod_controls = std::nullopt) const;
 
+    std::pair<Well::ProducerCMode, Scalar>
+    estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
+                                              const SummaryState& summaryState,
+                                              const RateConvFunc& calcReservoirVoidageRates,
+                                              const Well::ProductionControls& controls,
+                                              DeferredLogger& deferred_logger) const;
+
+    Scalar getProductionControlModeScale(const SingleWellState<Scalar, IndexTraits>& ws,
+                                         const RateConvFunc& calcReservoirVoidageRates,
+                                         const Well::ProducerCMode& cmode,
+                                         const Well::ProductionControls& controls,
+                                         DeferredLogger& deferred_logger,
+                                         const std::optional<Scalar> target) const;
+
 private:
     WellInjectorCMode
     activeInjectionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,

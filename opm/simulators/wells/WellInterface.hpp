@@ -420,6 +420,20 @@ protected:
                                        const GroupStateHelperType& groupStateHelper,
                                        WellStateType& well_state);
 
+    bool solveWellWithOperabilityCheckNew(const Simulator& simulator,
+                                          const double dt,
+                                          const Well::InjectionControls& inj_controls,
+                                          const Well::ProductionControls& prod_controls,
+                                          const GroupStateHelperType& groupStateHelper,
+                                          WellStateType& well_state);
+
+    bool solveProblematicWell(const Simulator& simulator,
+                              const double dt,
+                              const Well::InjectionControls& inj_controls,
+                              const Well::ProductionControls& prod_controls,
+                              const GroupStateHelperType& groupStateHelper,
+                              WellStateType& well_state);
+
     bool solveProblematicWellFromBhpEstimate(const Simulator& simulator,
                                              const double dt,
                                              const Scalar bhp,
@@ -434,6 +448,24 @@ protected:
                         const GroupStateHelperType& groupStateHelper,
                         const SummaryState& summary_state,
                         WellStateType& well_state);
+
+    bool estimateSolutionFromIPR(const Simulator& simulator,
+                                 const double dt,
+                                 const GroupStateHelperType& groupStateHelper,
+                                 const SummaryState& summary_state,
+                                 WellStateType& well_state,
+                                 const Well::ProductionControls& controls,
+                                 DeferredLogger& deferred_logger,
+                                 std::optional<Scalar> bhp_estimate = std::nullopt);
+
+    bool estimateSolutionFromIPRIteration(const Simulator& simulator,
+                                          const double dt,
+                                          const GroupStateHelperType& groupStateHelper,
+                                          const SummaryState& summary_state,
+                                          WellStateType& well_state,
+                                          const Well::ProductionControls& controls,
+                                          const Scalar bhp_estimate,
+                                          DeferredLogger& deferred_logger);
 
     bool solveWellWithBhp(const Simulator& simulator,
                           const double dt,

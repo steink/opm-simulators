@@ -988,6 +988,66 @@ estimateStableBhp(const WellState<Scalar, IndexTraits>& well_state,
 }
 
 template<typename Scalar, typename IndexTraits>
+std::optional<std::pair<Scalar, Scalar>> WellBhpThpCalculator<Scalar, IndexTraits>::
+estimateStableBhpAndRateScale(const WellState<Scalar, IndexTraits>& well_state,
+                              const Well& well,
+                              const std::vector<Scalar>& rates,
+                              const Scalar rho,
+                              const SummaryState& summaryState) const
+{    
+    return estimateStableBhpAndRateScale(well_state, well, rates, rho, summaryState, well_.getALQ(well_state));
+}
+
+template<typename Scalar, typename IndexTraits>
+std::optional<std::pair<Scalar, Scalar>> WellBhpThpCalculator<Scalar, IndexTraits>::
+estimateStableBhpAndRateScale(const WellState<Scalar, IndexTraits>& well_state,
+                              const Well& well,
+                              const std::vector<Scalar>& rates,
+                              const Scalar rho,
+                              const SummaryState& summaryState,
+                              const Scalar alq) const
+{
+    // Given a *converged* well_state with ipr, estimate bhp of the stable solution
+    const auto& controls = well.productionControls(summaryState);
+    const Scalar thp = well_.getTHPConstraint(summaryState);
+    const auto& table = well_.vfpProperties()->getProd()->getTable(controls.vfp_table_number);
+
+    const Scalar aqua = rates[IndexTraits::waterPhaseIdx];
+    const Scalar liquid = rates[IndexTraits::oilPhaseIdx];
+    const Scalar vapour = rates[IndexTraits::gasPhaseIdx];
+    const Scalar flo = detail::getFlo(table, aqua, liquid, vapour);
+    Scalar wfr, gfr;
+    if (well_.useVfpExplicit() || -flo < table.getFloAxis().front()) {
+        wfr =  well_.vfpProperties()->getExplicitWFR(controls.vfp_table_number, well_.indexOfWell());
+        gfr = well_.vfpProperties()->getExplicitGFR(controls.vfp_table_number, well_.indexOfWell());
+    } else {
+        wfr = detail::getWFR(table, aqua, liquid, vapour);
+        gfr = detail::getGFR(table, aqua, liquid, vapour);
+    }
+
+    auto ipr = getFloIPR(well_state, well, summaryState);
+
+    const Scalar vfp_ref_depth = well_.vfpProperties()->getProd()->getTable(controls.vfp_table_number).getDatumDepth();
+
+    const Scalar dp_hydro = wellhelpers::computeHydrostaticCorrection(well_.refDepth(), vfp_ref_depth,
+                                                                      rho, well_.gravity());
+    auto bhp_adjusted = [this, &thp, &dp_hydro](const Scalar bhp) {
+           return bhp - dp_hydro + getVfpBhpAdjustment(bhp, thp);
+       };
+    const auto retval = VFPHelpers<double>::intersectWithIPR(table, thp, wfr, gfr,
+                                                             alq,
+                                                             ipr.first, ipr.second,
+                                                             bhp_adjusted);
+    if (retval.has_value()) {
+        // retval is (flo, bhp), here we return (bhp, rate_scale)
+        const Scalar rate_scale = flo > 0.0 ? retval.value().first / flo : 0.0;
+        return std::make_pair(retval.value().second, rate_scale);
+    } else {
+        return std::nullopt;
+    }
+}
+
+template<typename Scalar, typename IndexTraits>
 std::pair<Scalar, Scalar> WellBhpThpCalculator<Scalar, IndexTraits>::
 getFloIPR(const WellState<Scalar, IndexTraits>& well_state,
           const Well& well,

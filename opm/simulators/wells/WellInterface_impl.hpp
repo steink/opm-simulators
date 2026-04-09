@@ -32,6 +32,7 @@
 
 #include <opm/input/eclipse/Schedule/ScheduleTypes.hpp>
 #include <opm/input/eclipse/Schedule/Well/WDFAC.hpp>
+#include <opm/input/eclipse/Schedule/Well/WVFPEXP.hpp>
 
 #include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
 
@@ -49,6 +50,7 @@
 #include <utility>
 
 #include <fmt/format.h>
+#include "WellInterface.hpp"
 
 namespace Opm
 {
@@ -710,6 +712,130 @@ namespace Opm
     template<typename TypeTag>
     bool
     WellInterface<TypeTag>::
+    solveWellWithOperabilityCheckNew(const Simulator& simulator,
+                                  const double dt,
+                                  const Well::InjectionControls& inj_controls,
+                                  const Well::ProductionControls& prod_controls,
+                                  const GroupStateHelperType& groupStateHelper,
+                                  WellStateType& well_state)
+    {
+        OPM_TIMEFUNCTION();
+        auto& deferred_logger = groupStateHelper.deferredLogger();
+
+        const auto& summary_state = simulator.vanguard().summaryState();
+        bool converged = true;
+        auto& ws = well_state.well(this->index_of_well_);
+        ws.forced_bhp_from_thp = std::nullopt; // reset forced bhp from thp before solving
+        // if well is stopped, check if we can reopen with explicit fraction
+        if (this->wellIsStopped()) {
+            this->openWell();
+            const bool success = estimateSolutionFromIPR(simulator, dt, groupStateHelper, summary_state, well_state);
+            if (!success) {
+                // no valid intersection with ipr / vfp found
+                const auto msg = fmt::format("estimateOperableBhp: Did not find operable BHP for well {}", this->name());
+                deferred_logger.debug(msg);
+                converged = solveWellWithZeroRate(simulator, dt, groupStateHelper, well_state);
+                this->stopWell();
+                this->operability_status_.can_obtain_bhp_with_thp_limit = false;
+                this->operability_status_.obey_thp_limit_under_bhp_limit = false;
+                return converged;
+            }
+        }
+        // solve well-equation
+        converged = this->iterateWellEqWithSwitching(
+            simulator, dt, inj_controls, prod_controls, groupStateHelper, well_state,
+            /*fixed_control=*/false, /*fixed_status=*/false, /*solving_with_zero_rate=*/false
+        );
+
+        const bool isThp = ws.production_cmode == Well::ProducerCMode::THP;
+        // check stability of solution under thp-control
+        if (converged && !stoppedOrZeroRateTarget(groupStateHelper) && isThp) {
+            auto rates = well_state.well(this->index_of_well_).surface_rates;
+            this->adaptRatesForVFP(rates);
+            this->updateIPRImplicit(simulator, groupStateHelper, well_state);
+            bool is_stable = WellBhpThpCalculator(*this).isStableSolution(well_state, this->well_ecl_, rates, summary_state);
+            if (!is_stable) {
+                // solution converged to an unstable point!
+                auto bhp_stable = WellBhpThpCalculator(*this).estimateStableBhp(well_state, this->well_ecl_, rates, this->getRefDensity(), summary_state);
+                if (!bhp_stable.has_value()) {
+                    // well converged, but no intesection with ipr found, this means well is very close to operability limit
+                    // mark well as non-converged to trigger operability check below
+                    converged = false;
+                } else {
+                    // if we find an intersection with a sufficiently lower bhp, re-solve equations
+                    const Scalar reltol = 1e-5;
+                    const Scalar cur_bhp = ws.bhp;
+                    if (bhp_stable.has_value() && std::abs(cur_bhp - bhp_stable.value()) > cur_bhp*reltol){
+                        const auto msg = fmt::format("Well {} converged to an unstable solution, re-solving", this->name());
+                        deferred_logger.debug(msg);
+                        const bool success = estimateSolutionFromIPR(simulator, dt, groupStateHelper, summary_state, well_state, bhp_stable.value());
+                        if (!success) {
+                            // If we end up here, something is very wrong, so report to debug and return
+                            msg = fmt::format("solveWellWithOperabilityCheck: Was not able to recover a stable solution for well {}."
+                                              "The well will be stopped", this->name());
+                            deferred_logger.debug(msg);
+                            converged = solveWellWithZeroRate(simulator, dt, groupStateHelper, well_state);
+                            this->stopWell();
+                            this->operability_status_.can_obtain_bhp_with_thp_limit = false;
+                            this->operability_status_.obey_thp_limit_under_bhp_limit = false;
+                            return converged;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!converged) {
+            // Well did not converge, make attempt with special treatment for problematic wells
+            this->openWell();
+            converged = solveProblematicWell(simulator, dt, inj_controls, prod_controls, groupStateHelper, well_state);
+        }
+        // update operability
+        this->operability_status_.can_obtain_bhp_with_thp_limit = !this->wellIsStopped();
+        this->operability_status_.obey_thp_limit_under_bhp_limit = !this->wellIsStopped();
+        return converged;
+    }
+
+    template<typename TypeTag>
+    bool
+    WellInterface<TypeTag>::
+    solveProblematicWell(const Simulator& simulator,
+                                        const double dt,
+                                        const Well::InjectionControls& inj_controls,
+                                        const Well::ProductionControls& prod_controls,
+                                        const GroupStateHelperType& groupStateHelper,
+                                        WellStateType& well_state)
+    {
+        auto& deferred_logger = groupStateHelper.deferredLogger();
+        const auto& summary_state = simulator.vanguard().summaryState();
+        const bool success = estimateSolutionFromIPR(simulator, dt, groupStateHelper, summary_state, well_state);
+        if (!success) {
+            // no valid intersection with ipr / vfp found
+            const auto msg = fmt::format("solveProblematicWell: well {} will be stopped.", this->name());
+            deferred_logger.debug(msg);
+            // well can't operate, solve with zero rate
+            const bool converged = solveWellWithZeroRate(simulator, dt, groupStateHelper, well_state);
+            this->stopWell();
+            this->operability_status_.can_obtain_bhp_with_thp_limit = false;
+            this->operability_status_.obey_thp_limit_under_bhp_limit = false;
+            return converged;
+        } else {
+            // we were able to estimate the solution, but we're likely in a problematic region, so alter
+            // the thp constraint until next local solve to prevent oscillations
+            auto& ws = well_state.well(this->index_of_well_);
+            if (ws.production_cmode == Well::ProducerCMode::THP) {
+                ws.forced_bhp_from_thp = ws.bhp;
+            } else if (ws.production_cmode != Well::ProducerCMode::BHP) {
+                // well is constrained by rate, set fored_bhp_from_thp to the wells bhp-limit
+                ws.forced_bhp_from_thp = static_cast<Scalar>(prod_controls.bhp_limit);
+            }
+            return true;
+        }
+    }
+    
+    template<typename TypeTag>
+    bool
+    WellInterface<TypeTag>::
     solveProblematicWellFromBhpEstimate(const Simulator& simulator,
                                         const double dt,
                                         const Scalar bhp,
@@ -826,6 +952,164 @@ namespace Opm
         auto rates = well_state.well(this->index_of_well_).surface_rates;
         this->adaptRatesForVFP(rates);
         return WellBhpThpCalculator(*this).estimateStableBhp(well_state, this->well_ecl_, rates, this->getRefDensity(), summary_state);
+    }
+
+    template<typename TypeTag>
+    bool
+    WellInterface<TypeTag>::
+    estimateSolutionFromIPR(const Simulator& simulator,
+                            const double dt,
+                            const GroupStateHelperType& groupStateHelper,
+                            const SummaryState& summary_state,
+                            WellStateType& well_state,
+                            const Well::ProductionControls& controls,
+                            DeferredLogger& deferred_logger,
+                            std::optional<Scalar> bhp_estimate)
+    {   
+        // This function estimates the solution using two well-solves with a bhp-constraint taken
+        // from the bottom of the VFP-curve using explicit fractions (or bhp-limit if no thp-constraint).
+        // If the well can operate at this bhp, we update the ipr, and based on this compute the strictest
+        // constraint (thp/bhp or rate) and update well-state bhp and rates accordingly. Well-state is
+        // updated status and control mode. If the well can't operate at the estimated bhp, we stop the 
+        // well, return false and let the caller decide how to proceed (e.g. solve with zero). 
+        const bool bhp_tolerance = 1e-5;
+        auto& ws = well_state.well(this->index_of_well_);
+        const bool has_thp = this->wellHasTHPConstraints(summary_state);
+        Scalar bhp; // will be estimated bhp of solution
+        Well::ProducerCMode mode = Well::ProducerCMode::THP; // will be the controlling mode of the solution
+        this->openWell();
+        if (bhp_estimate.has_value()) {
+            bhp = bhp_estimate.value();
+        } else {
+            // start with a bhp estimate based on the bottom of the VFP-curve using explicit fractions 
+            // or bhp-limit if no thp-constraint.
+            if (!has_thp) {
+                bhp = WellBhpThpCalculator(*this).mostStrictBhpFromBhpLimits(summary_state);
+                mode = Well::ProducerCMode::BHP;
+            } else {
+                // Get minimal bhp from vfp-curve using explicit fractions (we don't trust current fractions)
+                const bool use_vfpexplicit = this->operability_status_.use_vfpexplicit;
+                this->operability_status_.use_vfpexplicit = true;
+                bhp =  WellBhpThpCalculator(*this).calculateMinimumBhpFromThp(well_state, this->well_ecl_, summary_state, this->getRefDensity());
+                this->operability_status_.use_vfpexplicit = use_vfpexplicit;
+            }
+        }
+        // Solve for bhp, this is done twice to improve estimate in case above bhp is far from actual solution in which
+        // case rate fractions and IPR is not representative. We first solve with the "minimal" bhp, then update the 
+        // ipr and re-estimate the bhp based on the updated ipr and current fractions, and solve again with the re-estimated bhp.
+        bool converged = false;
+        bool max_iter = 5;
+        for (int iter = 0; iter < max_iter; ++iter) {
+            const bool found_new_estimate = estimateSolutionFromIPRIteration(simulator, dt, groupStateHelper, summary_state, well_state, controls, bhp, deferred_logger);
+            if (!found_new_estimate) {
+                // estimation not sucessful due to one of several reasons (debug output from estimateSolutionFromIPRIteration gives more details)
+                // we stop the well and return false, and let the caller decide how to proceed (e.g. solve with zero rate)
+                return false;
+            }
+            converged = std::abs(ws.bhp - bhp) <= std::abs(bhp)*bhp_tolerance;
+            if (converged) {
+                break;
+            } else {
+                bhp = ws.bhp;
+            }
+        }
+        if (!converged) {
+            const auto msg = fmt::format("estimateSolutionFromIPR: well {} did not converge in {} iterations, last bhp estimate is {} and last solution bhp is {}."
+                                         "We continue with the unconverged solution", this->name(), max_iter, bhp, ws.bhp);
+            deferred_logger.debug(msg);
+        }
+        return true;
+    }
+
+    template<typename TypeTag>
+    bool
+    WellInterface<TypeTag>::
+    estimateSolutionFromIPRIteration(const Simulator& simulator,
+                                     const double dt,
+                                     const GroupStateHelperType& groupStateHelper,
+                                     const SummaryState& summary_state,
+                                     WellStateType& well_state,
+                                     const Well::ProductionControls& controls,
+                                     const Scalar bhp_estimate,
+                                     DeferredLogger& deferred_logger)
+    {
+        const bool converged = solveWellWithBhp(simulator, dt, bhp_estimate, groupStateHelper, well_state);
+        if (!converged) {
+            const auto msg = fmt::format("estimateSolutionFromIPRIteration: well {} failed to converge when solving with bhp estimate {}."
+                                         "The well will be stopped", this->name(), bhp_estimate);
+            deferred_logger.debug(msg);
+            this->stopWell();
+            return false;
+        }
+        if (this->wellIsStopped()) {
+            const auto msg = fmt::format("estimateSolutionFromIPRIteration: well {} was not able to operate at bhp estimate {} and will be stopped."
+                                         , this->name(), bhp_estimate);
+            deferred_logger.debug(msg);
+            return false;
+        }
+        const bool has_thp = this->wellHasTHPConstraints(summary_state);
+        Scalar bhp = bhp_estimate;
+        Scalar rate_scale = 1.0;
+        auto& ws = well_state.well(this->index_of_well_);
+        auto rates = ws.surface_rates;
+        this->updateIPRImplicit(simulator, groupStateHelper, well_state);
+        WellProducerCMode mode = Well::ProducerCMode::BHP;
+        if (has_thp) {
+            mode = Well::ProducerCMode::THP;
+            this->adaptRatesForVFP(rates);
+            const auto result = WellBhpThpCalculator(*this).estimateStableBhpAndRateScale(well_state, this->well_ecl_, rates, this->getRefDensity(), summary_state);
+            if (!result.has_value()) {
+                const auto msg = fmt::format("estimateSolutionFromIPRIteration: well {} IPR has no intersection with VFP-curve for bhp estimate {}."
+                                             "The well will be stopped", this->name(), bhp_estimate);
+                deferred_logger.debug(msg);
+                this->stopWell();
+                return false;
+            }
+            std::tie(bhp, rate_scale) = result.value();
+        }
+        // Get strictest rate limit for current fractions
+        const auto& [mode_lim, rate_scale_lim] = this->estimateStrictestProductionRateConstraint(ws, summary_state, controls, deferred_logger);
+        bool has_active_rate_limit = false;
+        if (rate_scale_lim < rate_scale) {
+            mode = mode_lim;
+            rate_scale = rate_scale_lim;
+            has_active_rate_limit = true;
+            // estimate bhp at rate-limit from ipr
+            // bhp = -b*rate + a, bhp_new = -b*scale*rate + a
+            // => bhp_new = scale*bhp + (1-scale)*a/b
+            const Scalar ipr_a = std::accumulate(ws.implicit_ipr_a.begin(), ws.implicit_ipr_a.end(), 0.0);
+            const Scalar ipr_b = std::accumulate(ws.implicit_ipr_b.begin(), ws.implicit_ipr_b.end(), 0.0);
+            if (ipr_b > 0.0) {
+                bhp = rate_scale*bhp + (1.0 - rate_scale)*ipr_a/ipr_b;
+            }
+        }
+        // update well-state with estimated bhp and controlling mode, and scale rates according to IPR-estimated bhp
+        ws.bhp = bhp;
+        ws.production_cmode = mode;
+        // scale rates to meet the rate limit at the estimated bhp solution
+        for (auto& r : ws.surface_rates) {
+            r *= rate_scale;
+        }
+        // scale multisegment rates and pressures accordingly to keep the same distribution
+        this->scaleSegmentRatesAndPressure(well_state);
+        // Finally check if rate-limit (if active) is feasible. If wvfpexp.prevent() is true,
+        // a broken thp-constraint is disregarded and the well is allowed to operate at the 
+        // rate-limit
+        const auto& wvfpexp = this->wellEcl().getWVFPEXP();
+        if (has_active_rate_limit && has_thp && !wvfpexp.prevent()) {
+            rates = ws.surface_rates;
+            this->adaptRatesForVFP(rates);
+            const Scalar bhp_from_thp = WellBhpThpCalculator(*this).calculateBhpFromThp(well_state, rates, *this, summary_state, this->getRefDensity(), deferred_logger);
+            if (bhp_from_thp > bhp) {
+                const std::string smode = WellProducerCMode2String(ws.production_cmode);
+                const auto msg = fmt::format("estimateSolutionFromIPRIteration: estimated solution for well {} with active mode {} and bhp {}"
+                    " lies below feasible region (bhp from thp {}) and will be stopped", this->name(), smode, bhp, bhp_from_thp);
+                deferred_logger.debug(msg);
+                this->stopWell();
+                return false;
+            }
+        }
+        return true;
     }
 
     template<typename TypeTag>

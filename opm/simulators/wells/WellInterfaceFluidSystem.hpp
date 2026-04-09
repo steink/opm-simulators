@@ -91,6 +91,12 @@ protected:
                                     const std::optional<Well::InjectionControls>& inj_controls = std::nullopt,
                                     const std::optional<Well::ProductionControls>& prod_controls = std::nullopt) const;
 
+    std::pair<Well::ProducerCMode, typename FluidSystem::Scalar>
+    estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
+                                              const SummaryState& summaryState,
+                                              const Well::ProductionControls& controls,
+                                              DeferredLogger& deferred_logger) const;
+
     bool checkGroupConstraints(const GroupStateHelperType& groupStateHelper,
                                const Schedule& schedule,
                                const SummaryState& summaryState,

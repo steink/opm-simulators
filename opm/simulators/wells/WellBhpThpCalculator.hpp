@@ -120,6 +120,21 @@ public:
                     const SummaryState& summaryState,
                     const Scalar alq) const;
 
+  std::optional<std::pair<Scalar, Scalar>>
+  estimateStableBhpAndRateScale(const WellState<Scalar, IndexTraits>& well_state,
+                                const Well& well,
+                                const std::vector<Scalar>& rates,
+                                const Scalar rho,
+                                const SummaryState& summaryState) const;
+
+  std::optional<std::pair<Scalar, Scalar>>
+  estimateStableBhpAndRateScale(const WellState<Scalar, IndexTraits>& well_state,
+                                const Well& well,
+                                const std::vector<Scalar>& rates,
+                                const Scalar rho,
+                                const SummaryState& summaryState,
+                                const Scalar alq) const;
+
   std::pair<Scalar, Scalar>
   getFloIPR(const WellState<Scalar, IndexTraits>& well_state,
             const Well& well,
