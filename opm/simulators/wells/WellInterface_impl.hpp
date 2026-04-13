@@ -593,6 +593,15 @@ namespace Opm
                 }
             }
         }
+        // Add debug info for problematic group targets
+        if (this->isProducer() &&  ws.production_cmode == Well::ProducerCMode::GRUP && ws.use_group_target_fallback) {
+            assert(ws.group_target && ws.group_target_fallback);
+            const std::string cmode = Group::ProductionCMode2String(ws.group_target->production_cmode);
+            const std::string cmode_fallback = Group::ProductionCMode2String(ws.group_target_fallback->production_cmode);
+            const auto msg = fmt::format("    Well {} was solved using group target fallback mode {} as current group mode {} was not feasible.",
+                                            this->name(), cmode_fallback, cmode);
+            deferred_logger.debug(msg);
+        }
 
         return converged;
     }
@@ -1351,6 +1360,21 @@ namespace Opm
     template<typename TypeTag>
     void
     WellInterface<TypeTag>::
+    updateGroupTargetFallbackFlag(WellStateType& well_state,
+                                   DeferredLogger& deferred_logger) const
+    {
+        // Get scaled well fractions from derived class
+        std::vector<Scalar> scaled_well_fractions(FluidSystem::numPhases, 0.0);
+        this->getScaledWellFractions(scaled_well_fractions, deferred_logger);
+        // Call the base class method
+        this->Base::updateGroupTargetFallbackFlag(well_state, scaled_well_fractions, deferred_logger);
+    }
+
+
+
+    template<typename TypeTag>
+    void
+    WellInterface<TypeTag>::
     prepareWellBeforeAssembling(const Simulator& simulator,
                                 const double dt,
                                 const GroupStateHelperType& groupStateHelper,
@@ -2024,6 +2048,7 @@ namespace Opm
             case Well::ProducerCMode::GRUP:
             {
                 assert(well.isAvailableForGroupControl());
+                this->updateGroupTargetFallbackFlag(well_state, deferred_logger);
                 const auto& group = schedule.getGroup(well.groupName(), this->currentStep());
                 const Scalar efficiencyFactor = well.getEfficiencyFactor() *
                                                 well_state[well.name()].efficiency_scaling_factor;
