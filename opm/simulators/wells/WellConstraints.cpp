@@ -367,15 +367,24 @@ estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTra
             most_strict_control = mode;
         }
     }
-    // !!!!! NEEDS UPDATING !!!!!!
     // check group constraints if target is given in well-state
-    //if (controls.hasControl(Well::ProducerCMode::GRUP) && !ws.prevent_group_control && ws.group_target.has_value() && ws.production_cmode_group_translated.has_value()) {
-    //    const Scalar scale = getProductionControlModeScale(ws, calcReservoirVoidageRates, ws.production_cmode_group_translated.value(), controls, deferred_logger, ws.group_target.value());
-    //    if (scale >= 0.0 && scale < most_strict_scale) {
-    //        most_strict_scale = scale;
-    //        most_strict_control = Well::ProducerCMode::GRUP;
-    //    }
-    //}
+    if (controls.hasControl(Well::ProducerCMode::GRUP) && ws.group_target.has_value()) {
+        const bool use_fallback = ws.group_target_fallback.has_value() && ws.use_group_target_fallback;
+        const Scalar target = use_fallback 
+            ? ws.group_target_fallback.value().target_value 
+            : ws.group_target.value().target_value;
+        const Group::ProductionCMode gmode = use_fallback 
+            ? ws.group_target_fallback.value().production_cmode 
+            : ws.group_target.value().production_cmode;
+        // Convert group cmode to well cmode, should be a valid conversion at this stage
+        const auto str = Group::ProductionCMode2String(gmode);
+        const auto cmode = WellProducerCModeFromString(str);
+        const Scalar scale = getProductionControlModeScale(ws, calcReservoirVoidageRates, cmode, controls, deferred_logger, target);
+        if (scale >= 0.0 && scale < most_strict_scale) {
+            most_strict_scale = scale;
+            most_strict_control = Well::ProducerCMode::GRUP;
+        }
+    }
     return std::make_pair(most_strict_control, most_strict_scale);
 }
 

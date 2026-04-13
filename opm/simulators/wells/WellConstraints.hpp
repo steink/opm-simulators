@@ -75,7 +75,7 @@ public:
                                          const Well::ProducerCMode& cmode,
                                          const Well::ProductionControls& controls,
                                          DeferredLogger& deferred_logger,
-                                         const std::optional<Scalar> target) const;
+                                         const std::optional<Scalar> target = std::nullopt) const;
 
 private:
     WellInjectorCMode
