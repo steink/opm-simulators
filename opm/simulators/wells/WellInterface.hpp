@@ -422,14 +422,14 @@ protected:
                               const GroupStateHelperType& groupStateHelper,
                               WellStateType& well_state);
 
-    bool solveWellWithOperabilityCheck(const Simulator& simulator,
+    bool solveWellWithOperabilityCheckOld(const Simulator& simulator,
                                        const double dt,
                                        const Well::InjectionControls& inj_controls,
                                        const Well::ProductionControls& prod_controls,
                                        const GroupStateHelperType& groupStateHelper,
                                        WellStateType& well_state);
 
-    bool solveWellWithOperabilityCheckNew(const Simulator& simulator,
+    bool solveWellWithOperabilityCheck(const Simulator& simulator,
                                           const double dt,
                                           const Well::InjectionControls& inj_controls,
                                           const Well::ProductionControls& prod_controls,

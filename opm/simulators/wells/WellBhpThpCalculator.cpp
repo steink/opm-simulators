@@ -1040,7 +1040,7 @@ estimateStableBhpAndRateScale(const WellState<Scalar, IndexTraits>& well_state,
                                                              bhp_adjusted);
     if (retval.has_value()) {
         // retval is (flo, bhp), here we return (bhp, rate_scale)
-        const Scalar rate_scale = flo > 0.0 ? retval.value().first / flo : 0.0;
+        const Scalar rate_scale = flo < 0.0 ? retval.value().first / flo : 0.0;
         return std::make_pair(retval.value().second, rate_scale);
     } else {
         return std::nullopt;
