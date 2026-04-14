@@ -1084,12 +1084,12 @@ namespace Opm
             rate_scale = rate_scale_lim;
             has_active_rate_limit = true;
             // estimate bhp at rate-limit from ipr
-            // bhp = -b*rate + a, bhp_new = -b*scale*rate + a
+            // rate = -b*bhp + a, rate*scale = -b*bhp_new + a
             // => bhp_new = scale*bhp + (1-scale)*a/b
             const Scalar ipr_a = std::accumulate(ws.implicit_ipr_a.begin(), ws.implicit_ipr_a.end(), 0.0);
             const Scalar ipr_b = std::accumulate(ws.implicit_ipr_b.begin(), ws.implicit_ipr_b.end(), 0.0);
             if (ipr_b > 0.0) {
-                bhp = rate_scale*bhp + (1.0 - rate_scale)*ipr_a/ipr_b;
+                bhp = rate_scale*bhp_estimate + (1.0 - rate_scale)*ipr_a/ipr_b;
             }
         }
         // update well-state with estimated bhp and controlling mode, and scale rates according to IPR-estimated bhp
