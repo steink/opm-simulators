@@ -891,7 +891,14 @@ bool makeFeasible(Tree<Scalar>& tree,
                 }
             } else {
                 for (const auto& child : node.children) { seedRates(child); }
-                computeGroupRates(tree, n);
+                // Recompute group rates as sum of children
+                std::array<Scalar, 3> sumRates{};
+                for (const auto& child : node.children) {
+                    if (tree.count(child) > 0) {
+                        for (int c = 0; c < 3; ++c) { sumRates[c] += tree.at(child).rates[c]; }
+                    }
+                }
+                node.rates = sumRates;
             }
         };
         seedRates(topName);
