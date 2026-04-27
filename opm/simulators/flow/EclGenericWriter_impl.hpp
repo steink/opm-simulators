@@ -150,6 +150,8 @@ struct EclWriteTasklet : public Opm::TaskletInterface
     double secondsElapsed_;
     std::vector<Opm::RestartValue> restartValue_;
     bool writeDoublePrecision_;
+    /// \brief True if there was an EXIT keyword in ACTIONX causing a simulation end
+    bool forcedSimulationFinished_;
 
     explicit EclWriteTasklet(const Opm::Action::State& actionState,
                              const Opm::WellTestState& wtestState,
@@ -161,7 +163,8 @@ struct EclWriteTasklet : public Opm::TaskletInterface
                              bool isSubStep,
                              double secondsElapsed,
                              std::vector<Opm::RestartValue> restartValue,
-                             bool writeDoublePrecision)
+                             bool writeDoublePrecision,
+                             bool forcedSimulationFinished)
         : actionState_(actionState)
         , wtestState_(wtestState)
         , summaryState_(summaryState)
@@ -173,6 +176,7 @@ struct EclWriteTasklet : public Opm::TaskletInterface
         , secondsElapsed_(secondsElapsed)
         , restartValue_(std::move(restartValue))
         , writeDoublePrecision_(writeDoublePrecision)
+        , forcedSimulationFinished_(forcedSimulationFinished)
     {}
 
     // callback to eclIO serial writeTimeStep method
@@ -188,7 +192,8 @@ struct EclWriteTasklet : public Opm::TaskletInterface
                                        this->secondsElapsed_,
                                        std::move(this->restartValue_.back()),
                                        this->writeDoublePrecision_,
-                                       this->timeStepNum_);
+                                       this->timeStepNum_,
+                                       forcedSimulationFinished_);
         }
         else{
             this->eclIO_.writeTimeStep(this->actionState_,
@@ -200,7 +205,8 @@ struct EclWriteTasklet : public Opm::TaskletInterface
                                        this->secondsElapsed_,
                                        std::move(this->restartValue_),
                                        this->writeDoublePrecision_,
-                                       this->timeStepNum_);
+                                       this->timeStepNum_,
+                                       forcedSimulationFinished_);
         }
     }
 };
@@ -536,7 +542,7 @@ computeTrans_(const std::vector<std::unordered_map<int,int>>&  levelCartToLevelC
 
             // For level-zero grid, level Cartesian indices coincide with the grid Cartesian indices.
             if (isNumAquCell_(originCartIdxIn) || isNumAquCell_(originCartIdxOut)) {
-                // Check there are no refined aquifer cells. 
+                // Check there are no refined aquifer cells.
                 assert(level == 0);
                 // Connections involving numerical aquifers are always NNCs
                 // for the purpose of file output.  This holds even for
@@ -597,7 +603,7 @@ EclGenericWriter<Grid,EquilGrid,GridView,ElementMapper,Scalar>::
 isDirectNeighbours_(const std::unordered_map<int,int>& levelCartesianToActive,
                     const std::array<int,3>& levelCartDims,
                     const std::size_t levelCartIdx1,
-                    const std::size_t levelCartIdx2) const 
+                    const std::size_t levelCartIdx2) const
 {
     return isCartesianNeighbour_(levelCartDims, levelCartIdx1, levelCartIdx2)
         || directVerticalNeighbors(levelCartDims, levelCartesianToActive, levelCartIdx1, levelCartIdx2);
@@ -607,7 +613,7 @@ template<class Grid, class EquilGrid, class GridView, class ElementMapper, class
 auto
 EclGenericWriter<Grid,EquilGrid,GridView,ElementMapper,Scalar>::
 activeCell_(const std::unordered_map<int,int>& levelCartToLevelCompressed,
-            const std::size_t levelCartIdx) const 
+            const std::size_t levelCartIdx) const
 {
     auto pos = levelCartToLevelCompressed.find(levelCartIdx);
     return (pos == levelCartToLevelCompressed.end()) ? -1 : pos->second;
@@ -634,7 +640,7 @@ allocateAllNncs_(int maxLevel) const
         //          outputAmalgamatedNnc_[0][0] -> NNCs between level 1 and level 2
         //          outputAmalgamatedNnc_[0][1] -> NNCs between level 1 and level 3
         //          outputAmalgamatedNnc_[1][2] -> NNCs between level 2 and level 3
-        this->outputAmalgamatedNnc_.resize(maxLevel-1); 
+        this->outputAmalgamatedNnc_.resize(maxLevel-1);
         for (int i = 0; i < maxLevel-1; ++i) {
             this->outputAmalgamatedNnc_[i].resize(maxLevel-1-i);
         }
@@ -660,7 +666,7 @@ exportNncStructure_(const std::vector<std::unordered_map<int,int>>& levelCartToL
 
     // Cartesian index mapper for the serial I/O grid
     const auto& equilCartMapper = *equilCartMapper_;
-    
+
     const auto& level0CartDims = equilCartMapper.cartesianDimensions();
 
     int maxLevel = this->equilGrid_->maxLevel();
@@ -702,7 +708,7 @@ exportNncStructure_(const std::vector<std::unordered_map<int,int>>& levelCartToL
 
                 const auto& [smallerLevel, smallerLevelCartIdx] = smallerPair;
                 const auto& [largerLevel, largerLevelCartIdx] = largerPair;
-                
+
                 auto t = this->globalTrans().transmissibility(c1, c2);
 
                 // ECLIPSE ignores NNCs with zero transmissibility
@@ -765,13 +771,13 @@ exportNncStructure_(const std::vector<std::unordered_map<int,int>>& levelCartToL
                     // We need to check whether an NNC for this face was also
                     // specified via the NNC keyword in the deck.
                     auto t = this->globalTrans().transmissibility(c1, c2);
-                    
+
                     if (level == 0) {
                         auto candidate = std::lower_bound(nncData.begin(), nncData.end(),
                                                           NNCdata { originCartIdxIn, originCartIdxOut, 0.0 });
                         const auto transMlt = transMult.getRegionMultiplierNNC(originCartIdxIn, originCartIdxOut);
                         bool foundNncEditr = false;
-                    
+
                         while ((candidate != nncData.end()) &&
                                (candidate->cell1 == originCartIdxIn) &&
                                (candidate->cell2 == originCartIdxOut))
@@ -802,7 +808,7 @@ exportNncStructure_(const std::vector<std::unordered_map<int,int>>& levelCartToL
                             continue;
                         }
                     }
-                    
+
                     // ECLIPSE ignores NNCs with zero transmissibility
                     // (different threshold than for NNC with corresponding
                     // EDITNNC above).  In addition we do set small
@@ -894,6 +900,7 @@ void EclGenericWriter<Grid,EquilGrid,GridView,ElementMapper,Scalar>::
 doWriteOutput(const int                          reportStepNum,
               const std::optional<int>           timeStepNum,
               const bool                         isSubStep,
+              const bool                         isForcedFinalOutput,
               data::Solution&&                   localCellData,
               data::Wells&&                      localWellData,
               data::GroupAndNetworkValues&&      localGroupAndNetworkData,
@@ -991,7 +998,8 @@ doWriteOutput(const int                          reportStepNum,
         actionState,
         isParallel ? this->collectOnIORank_.globalWellTestState() : std::move(localWTestState),
         summaryState, udqState, *this->eclIO_,
-        reportStepNum, timeStepNum, isSubStep, curTime, std::move(restartValues), doublePrecision);
+        reportStepNum, timeStepNum, isSubStep, curTime, std::move(restartValues), doublePrecision,
+        isForcedFinalOutput);
 
     // finally, start a new output writing job
     this->taskletRunner_->dispatch(std::move(eclWriteTasklet));
@@ -1012,7 +1020,8 @@ evalSummary(const int                                            reportStepNum,
             const Inplace*                                       initialInPlace,
             const InterRegFlowMap&                               interRegFlows,
             SummaryState&                                        summaryState,
-            UDQState&                                            udqState)
+            UDQState&                                            udqState,
+            const data::ReservoirCouplingGroupRates*             rcGroupRates)
 {
     if (collectOnIORank_.isIORank()) {
         const auto& summary = eclIO_->summary();
@@ -1044,6 +1053,7 @@ evalSummary(const int                                            reportStepNum,
             /* block_values            = */ &blockData,
             /* aquifer_values          = */ &aquiferData,
             /* interreg_flows          = */ &interreg_flows,
+            /* rc_group_rates          = */ rcGroupRates,
             /* inplace                 = */ {
                 /* current = */ &inplace,
                 /* initial = */ initialInPlace

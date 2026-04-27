@@ -188,14 +188,7 @@ registerParameters()
     detail::registerAdaptiveParameters();
 }
 
-/** \brief  step method that acts like the solver::step method
-            in a sub cycle of time steps
-    \param simulator_timer Simulator timer
-    \param solver Solver to use
-    \param is_event True if this is an event
-    \param tuning_updater Function used to update TUNING parameters before each
-                         time step. ACTIONX might change tuning.
-*/
+// See Doxygen comment on the declaration in AdaptiveTimeStepping.hpp.
 template<class TypeTag>
 template <class Solver>
 SimulatorReport
@@ -538,9 +531,9 @@ template<class TypeTag>
 template<class Solver>
 bool
 AdaptiveTimeStepping<TypeTag>::SubStepper<Solver>::
-maybeUpdateTuning_(double elapsed, double dt, int sub_step_number) const
+maybeUpdateTuning_(double elapsed, double substep_length, int sub_step_number) const
 {
-    return this->tuning_updater_(elapsed, dt, sub_step_number);
+    return this->tuning_updater_(elapsed, substep_length, sub_step_number);
 }
 
 template<class TypeTag>
@@ -561,7 +554,7 @@ runStepOriginal_()
     const auto elapsed = this->simulator_timer_.simulationTimeElapsed();
     const auto original_time_step = this->simulator_timer_.currentStepLength();
     const auto report_step = this->simulator_timer_.reportStepNum();
-    maybeUpdateTuning_(elapsed, original_time_step, report_step);
+    maybeUpdateTuning_(elapsed, suggestedNextTimestep_(), /*substep=*/0);
     maybeModifySuggestedTimeStepAtBeginningOfReportStep_(original_time_step);
 
     AdaptiveSimulatorTimer substep_timer{
@@ -664,7 +657,7 @@ runStepReservoirCouplingMaster_()
         ));
         reservoirCouplingMaster_().sendNextTimeStepToSlaves(current_step_length);
         if (start_of_report_step) {
-            maybeUpdateTuning_(current_time, current_step_length, /*substep=*/0);
+            maybeUpdateTuning_(current_time, suggestedNextTimestep_(), /*substep=*/0);
             maybeModifySuggestedTimeStepAtBeginningOfReportStep_(current_step_length);
         }
         AdaptiveSimulatorTimer substep_timer{
@@ -724,7 +717,7 @@ runStepReservoirCouplingSlave_()
         reservoirCouplingSlave_().sendNextReportDateToMasterProcess();
         const auto timestep = reservoirCouplingSlave_().receiveNextTimeStepFromMaster();
         if (start_of_report_step) {
-            maybeUpdateTuning_(current_time, original_time_step, /*substep=*/0);
+            maybeUpdateTuning_(current_time, suggestedNextTimestep_(), /*substep=*/0);
             maybeModifySuggestedTimeStepAtBeginningOfReportStep_(timestep);
         }
         AdaptiveSimulatorTimer substep_timer{
@@ -1164,7 +1157,7 @@ template<class TypeTag>
 template<class Solver>
 void
 AdaptiveTimeStepping<TypeTag>::SubStepIteration<Solver>::
-maybeUpdateLastSubstepOfSyncTimestep_(double dt)
+maybeUpdateLastSubstepOfSyncTimestep_([[maybe_unused]] const double dt)
 {
 #ifdef RESERVOIR_COUPLING_ENABLED
     // For reservoir coupling slaves: predict if this substep will complete
