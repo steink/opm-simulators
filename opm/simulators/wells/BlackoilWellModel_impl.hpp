@@ -45,6 +45,7 @@
 #include <opm/simulators/wells/GuideRateHandler.hpp>
 #include <opm/simulators/wells/ParallelPAvgDynamicSourceData.hpp>
 #include <opm/simulators/wells/ParallelWBPCalculation.hpp>
+#include <opm/simulators/wells/ProdGroupTreeBalancer.hpp>
 #include <opm/simulators/wells/VFPProperties.hpp>
 #include <opm/simulators/wells/GroupStateHelper.hpp>
 
@@ -1707,6 +1708,25 @@ namespace Opm {
         size_t iter = 0;
         bool changed_well_group = false;
         const Group& fieldGroup = this->schedule().getGroup("FIELD", episodeIdx);
+
+        // Run the production group-tree balancing predictor (rank-0 only; result is
+        // broadcast via updateAndCommunicate).  It sets initial control modes and
+        // rates before the existing switching logic runs as a corrector below.
+        if (param_.enable_group_tree_balancer_) {
+            if (comm.rank() == 0) {
+                ProdGroupTreeBalancer::runGroupTreeBalancer(
+                    *this,
+                    this->summaryState(),
+                    episodeIdx,
+                    param_.group_tree_balancer_tolerance_,
+                    param_.group_tree_balancer_max_iterations_,
+                    deferred_logger);
+            }
+            updateAndCommunicate(episodeIdx);
+            // Note: changed_well_group remains false so the corrector loop below
+            // still runs to handle injection, economic limits, and any remaining violations.
+        }
+
         // Check group individual constraints.
         // iterate a few times to make sure all constraints are honored
         const std::size_t max_iter = param_.well_group_constraints_max_iterations_;
