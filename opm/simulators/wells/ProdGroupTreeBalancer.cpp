@@ -58,6 +58,18 @@ namespace {
 template<class Scalar>
 constexpr Scalar kSmallRate = Scalar(1e-4);
 
+/// Tolerance used for capping rate-vs-limit comparisons to avoid floating-point noise.
+template<class Scalar>
+constexpr Scalar kFeasibilityTolerance = Scalar(1e-12);
+
+/// Default uniform weight when a guide rate is unavailable.
+template<class Scalar>
+constexpr Scalar kUniformWeight = Scalar(1.0);
+
+/// Default equal fraction for each active phase when rates are zero.
+template<class Scalar>
+constexpr Scalar kDefaultUniformFraction = Scalar(1.0 / 3);
+
 /// OIL / WATER / GAS canonical indices (always 0/1/2 in the tree).
 constexpr int kOil   = 0;
 constexpr int kWater = 1;
@@ -265,9 +277,9 @@ void populateWellNode(ProdGroupTreeNode<Scalar>& node,
         // Default fractions when no production: equal share of oil and gas (2-component),
         // or uniform 1/3 for 3-component.  The exact value matters only when
         // the algorithm initializes with small rates.
-        node.wellRateFractions[kOil]   = pu.phaseIsActive(IndexTraits::oilPhaseIdx)   ? Scalar(1.0/3) : Scalar(0);
-        node.wellRateFractions[kWater] = pu.phaseIsActive(IndexTraits::waterPhaseIdx) ? Scalar(1.0/3) : Scalar(0);
-        node.wellRateFractions[kGas]   = pu.phaseIsActive(IndexTraits::gasPhaseIdx)   ? Scalar(1.0/3) : Scalar(0);
+        node.wellRateFractions[kOil]   = pu.phaseIsActive(IndexTraits::oilPhaseIdx)   ? kDefaultUniformFraction<Scalar> : Scalar(0);
+        node.wellRateFractions[kWater] = pu.phaseIsActive(IndexTraits::waterPhaseIdx) ? kDefaultUniformFraction<Scalar> : Scalar(0);
+        node.wellRateFractions[kGas]   = pu.phaseIsActive(IndexTraits::gasPhaseIdx)   ? kDefaultUniformFraction<Scalar> : Scalar(0);
         // Re-normalize
         const Scalar sumFrac = node.wellRateFractions[0] + node.wellRateFractions[1] + node.wellRateFractions[2];
         if (sumFrac > Scalar(0)) {
@@ -604,7 +616,7 @@ void parametrizeTree(Tree<Scalar>& tree, const std::string& nodeName)
 
         // Weight by guide rate (use the oil guide rate as a scalar weight)
         const Scalar gr = child.guideRates[kOil] > Scalar(0)
-            ? child.guideRates[kOil] : Scalar(1.0); // fallback uniform weight
+            ? child.guideRates[kOil] : kUniformWeight<Scalar>;
         totalGuideRate += gr;
         for (int c = 0; c < 3; ++c) {
             node.linearTerm[c] += gr * child.linearTerm[c];
@@ -762,7 +774,7 @@ bool capIndividualAndSum(Tree<Scalar>& tree, const std::string& nodeName)
             if (it == node.individualLimits.end()) continue;
             const Scalar limit = it->second;
             const Scalar current = rateForMode(node.rates, mode, node.resvCoeff);
-            if (current > limit * (Scalar(1) + Scalar(1e-12))) {
+            if (current > limit * (Scalar(1) + kFeasibilityTolerance<Scalar>)) {
                 // Scale rates down uniformly to satisfy the limit
                 const Scalar scale = limit / current;
                 for (int c = 0; c < 3; ++c) { node.rates[c] *= scale; }
@@ -777,7 +789,7 @@ bool capIndividualAndSum(Tree<Scalar>& tree, const std::string& nodeName)
                 const Scalar limit = it->second;
                 Scalar currentTotal = Scalar(0);
                 for (int c = 0; c < 3; ++c) { currentTotal += -node.rates[c]; }
-                if (currentTotal > limit * (Scalar(1) + Scalar(1e-12))) {
+                if (currentTotal > limit * (Scalar(1) + kFeasibilityTolerance<Scalar>)) {
                     const Scalar scale = limit / currentTotal;
                     for (int c = 0; c < 3; ++c) { node.rates[c] *= scale; }
                     anyChanged = true;
@@ -824,7 +836,7 @@ void setAndUpdateTargets(Tree<Scalar>& tree, const std::string& nodeName)
         const auto& child = tree.at(childName);
         if (child.ctrlStatus == ProdNodeCtrlStatus::GroupControlled) {
             const Scalar gr = child.guideRates[kOil] > Scalar(0)
-                ? child.guideRates[kOil] : Scalar(1.0);
+                ? child.guideRates[kOil] : kUniformWeight<Scalar>;
             totalGuideRate += gr;
         }
     }
@@ -840,7 +852,7 @@ void setAndUpdateTargets(Tree<Scalar>& tree, const std::string& nodeName)
         if (child.ctrlStatus != ProdNodeCtrlStatus::GroupControlled) continue;
 
         const Scalar gr = child.guideRates[kOil] > Scalar(0)
-            ? child.guideRates[kOil] : Scalar(1.0);
+            ? child.guideRates[kOil] : kUniformWeight<Scalar>;
         const Scalar childTarget = parentTotal * (gr / totalGuideRate);
 
         // Set the child's rates according to its fractions and the target
@@ -955,7 +967,7 @@ void setFinalTargets(Tree<Scalar>& tree, const std::string& topName)
         auto& node = tree.at(nodeName);
 
         const Scalar gr = node.guideRates[kOil] > Scalar(0)
-            ? node.guideRates[kOil] : Scalar(1.0);
+            ? node.guideRates[kOil] : kUniformWeight<Scalar>;
         const Scalar myTarget = (parentGuideRateTotal > Scalar(0))
             ? parentTarget * (gr / parentGuideRateTotal) : Scalar(0);
 
@@ -972,7 +984,7 @@ void setFinalTargets(Tree<Scalar>& tree, const std::string& topName)
                 if (tree.count(childName) == 0) continue;
                 if (tree.at(childName).ctrlStatus == ProdNodeCtrlStatus::GroupControlled) {
                     const Scalar cgr = tree.at(childName).guideRates[kOil] > Scalar(0)
-                        ? tree.at(childName).guideRates[kOil] : Scalar(1.0);
+                        ? tree.at(childName).guideRates[kOil] : kUniformWeight<Scalar>;
                     childGuideTotal += cgr;
                 }
             }
@@ -991,7 +1003,7 @@ void setFinalTargets(Tree<Scalar>& tree, const std::string& topName)
         if (tree.count(childName) == 0) continue;
         if (tree.at(childName).ctrlStatus == ProdNodeCtrlStatus::GroupControlled) {
             const Scalar gr = tree.at(childName).guideRates[kOil] > Scalar(0)
-                ? tree.at(childName).guideRates[kOil] : Scalar(1.0);
+                ? tree.at(childName).guideRates[kOil] : kUniformWeight<Scalar>;
             topChildGuideTotal += gr;
         }
     }
@@ -1070,7 +1082,7 @@ bool checkTreeValidity(const Tree<Scalar>& tree,
                     ? std::accumulate(node.rates.begin(), node.rates.end(), Scalar(0),
                                        [](Scalar s, Scalar r){ return s + (-r); })
                     : rateForMode(node.rates, node.activeIndividualCtrl, node.resvCoeff);
-                const Scalar relErr = std::abs(current - limit) / (std::abs(limit) + Scalar(1e-12));
+                const Scalar relErr = std::abs(current - limit) / (std::abs(limit) + kFeasibilityTolerance<Scalar>);
                 if (relErr > tol) {
                     logger.warning("ProdGroupTreeBalancer",
                         fmt::format("Node '{}' is IndividualControlled but current rate ({:.4g}) "
@@ -1087,7 +1099,7 @@ bool checkTreeValidity(const Tree<Scalar>& tree,
             const Scalar target = node.groupTarget.value;
             const Scalar current = std::accumulate(node.rates.begin(), node.rates.end(), Scalar(0),
                                                     [](Scalar s, Scalar r){ return s + (-r); });
-            const Scalar relErr = std::abs(current - target) / (std::abs(target) + Scalar(1e-12));
+            const Scalar relErr = std::abs(current - target) / (std::abs(target) + kFeasibilityTolerance<Scalar>);
             if (relErr > tol) {
                 logger.warning("ProdGroupTreeBalancer",
                     fmt::format("Node '{}' is GroupControlled but current total rate ({:.4g}) "
