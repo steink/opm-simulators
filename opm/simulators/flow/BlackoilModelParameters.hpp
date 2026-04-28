@@ -106,6 +106,12 @@ struct UpdateEquationsScaling { static constexpr bool value = false; };
 struct UseUpdateStabilization { static constexpr bool value = true; };
 struct MatrixAddWellContributions { static constexpr bool value = false; };
 
+/// When enabled, the production group-tree balancing predictor runs before the
+/// standard constraint-checking loop.  It sets initial control modes and rates
+/// so that every well is at or below its individual limit and every group is
+/// balanced according to guide rates.  The existing loop runs afterwards as a
+/// corrector for injection, economic limits, and any remaining violations.
+/// Default is false (opt-in) because the feature is still under validation.
 struct EnableGroupTreeBalancer { static constexpr bool value = false; };
 
 template<class Scalar>

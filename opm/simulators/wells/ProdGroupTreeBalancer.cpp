@@ -161,6 +161,11 @@ Scalar rateForMode(const std::array<Scalar, 3>& rates,
 /// Corresponding linear-term projection (component of the rate change per
 /// unit alpha for the given control mode).
 /// Rate[mode] = rateForMode(rates, mode); d(Rate[mode])/d(alpha) = linearTermForMode(lt, mode).
+///
+/// Sign derivation: stepAlpha sets rates[c] -= alpha * lt[c], so
+///   d(rates[c])/d(alpha) = -lt[c]
+///   d(Rate[ORAT])/d(alpha) = d(-rates[kOil])/d(alpha) = lt[kOil]  (positive for producers)
+/// Returns are therefore +lt[c] (not -lt[c]).
 template<class Scalar>
 Scalar linearTermForMode(const std::array<Scalar, 3>& lt,
                          Well::ProducerCMode cmode,
@@ -413,8 +418,12 @@ void populateWellNode(ProdGroupTreeNode<Scalar>& node,
                 }
             }
         } else if (ws.forced_bhp_from_thp.has_value()) {
-            // Fallback when the well interface is not available locally (e.g., on a
-            // different MPI rank): use the previously-computed forced_bhp_from_thp.
+            // Fallback when the well's WellInterfaceGeneric is not in the local
+            // container (e.g., in a distributed-wells setup on a non-owner rank).
+            // forced_bhp_from_thp is the BHP computed from the VFP table at the
+            // current operating point under THP control; less accurate than
+            // estimateStableBhp but better than ignoring the THP constraint.
+            // TODO: Remove once all wells are guaranteed to be on rank 0.
             if (ws.forced_bhp_from_thp.value() > effectiveBhpLimit) {
                 effectiveBhpLimit = ws.forced_bhp_from_thp.value();
                 hasBhpConstraint  = true;
