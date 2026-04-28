@@ -88,9 +88,11 @@ struct ProdGroupTreeNode {
     ///          (for wells only; groups do not have a BHP limit)
     std::map<Well::ProducerCMode, Scalar> individualLimits;
 
-    // ---- Guide rates (for wells only, used to split group targets) -------
-    /// [oil, water, gas] guide rates; zero for groups.
-    std::array<Scalar, 3> guideRates{};
+    // ---- Group's own production control mode (for group nodes only) ------
+    /// The group's own scheduled production control mode (from groupState).
+    /// Used in setFinalTargets and for guide-rate computation.
+    /// For wells this is unused (stays NONE).
+    Group::ProductionCMode ownCtrlMode{Group::ProductionCMode::NONE};
 
     /// Fixed phase fractions of the well's current rates (for wells only).
     /// fractions[i] = -rates[i] / total_rate, where total_rate = sum(-rates).
