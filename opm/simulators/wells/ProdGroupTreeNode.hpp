@@ -130,6 +130,45 @@ struct ProdGroupTreeNode {
     ///   resv_rate = sum_p -rates[p] * resvCoeff[p].
     /// Stored in canonical [oil, water, gas] order; zero for inactive phases.
     std::array<Scalar, 3> resvCoeff{};
+
+    // ---- Fields for new sorting-based balancing algorithm ----------------
+    /// Whether this node has a guide rate (false for transparent groups)
+    bool hasGuideRate{true};
+
+    /// Guide rates indexed by canonical phase [oil, water, gas]
+    /// Corresponds to ORAT, WRAT, GRAT guide rates
+    std::array<Scalar, 3> guideRates{};
+
+    /// Accumulated rates during balancing (sum of children's rates)
+    std::array<Scalar, 3> rateSums{};
+
+    /// Accumulated guide rate sums during balancing
+    std::array<Scalar, 3> guideRateSums{};
+
+    /// Flag for fallback mechanism (when mode fraction is too small)
+    bool useFallback{false};
+
+    /// Visited flag for free-path checking
+    bool visited{false};
+
+    /// Whether this subtree is balanced
+    bool isBalanced{false};
+
+    /// Iteration counter for this node
+    int balancingCount{0};
+
+    /// Mode category: mirrors MATLAB categories
+    /// "INDIVIDUAL", "GRUP", "TRANSPARENT", "NONE", "UNDETERMINED"
+    std::string modeCategory{"UNDETERMINED"};
+
+    /// Explicit rates from preprocessing (cap_individual_and_sum)
+    std::array<Scalar, 3> explicitRates{};
+
+    /// Phase fractions for groups (used in target distribution)
+    std::array<Scalar, 3> fractions{};
+
+    /// Fallback group target (for non-preferred mode)
+    GroupTarget groupTargetFallback;
 };
 
 } // namespace Opm
