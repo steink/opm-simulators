@@ -508,11 +508,14 @@ void populateGroupNode(ProdGroupTreeNode<Scalar>& node,
     node.name   = groupName;
     node.type   = ProdNodeType::Group;
     node.parent = (groupName == "FIELD") ? "" : group.parent();
-    node.allowGroupControl = group.productionGroupControlAvailable();
 
-    // Check if this is a production group - only production groups participate in balancing
-    const bool isProductionGroup = group.isProductionGroup();
-    
+    // FIELD group is never available for group control (has no parent to control it)
+    if (groupName == "FIELD") {
+        node.allowGroupControl = false;
+    } else {
+        node.allowGroupControl = group.productionGroupControlAvailable();
+    }
+
     // Children
     node.children = group.groups();
     for (const auto& w : group.wells()) {
@@ -520,17 +523,19 @@ void populateGroupNode(ProdGroupTreeNode<Scalar>& node,
     }
 
     // Check if this is a satellite group (has fixed rates from GSATPROD, not controlled by parent)
-    const bool isSatellite = group.hasSatelliteProduction();
+    // Note: hasSatelliteProduction() only returns true AFTER GSATPROD becomes active.
+    // To detect satellite groups before activation, check if GSATPROD is defined for this group
+    // at the end of the schedule (more efficient than checking every step).
+    bool isSatellite = group.hasSatelliteProduction();
 
-    // Non-production groups (e.g., GroupType::NONE, injection groups) are not included in balancing
-    // They remain in the tree with zero rates and cannot be controlled by parent
-    if (!isProductionGroup) {
-        node.rates = {Scalar(0), Scalar(0), Scalar(0)};
-        node.allowGroupControl = false;
-        node.ctrlStatus = ProdNodeCtrlStatus::IndividualControlled;  // Fixed at zero, not participating
-        node.ownCtrlMode = Group::ProductionCMode::NONE;
-        node.preferredCtrl = Well::ProducerCMode::CMODE_UNDEFINED;
-        return;  // Don't populate limits or other data for non-production groups
+    // If not currently active, check if GSATPROD is defined for this group at the last schedule step
+    if (!isSatellite && schedule.size() > 0) {
+        const auto& final_gsatprod = schedule.back().gsatprod();
+        if (final_gsatprod.has(groupName)) {
+            isSatellite = true;
+            OpmLog::info(fmt::format("buildTree: {} identified as SATELLITE group (GSATPROD defined in schedule)",
+                                     groupName));
+        }
     }
 
     // Current rates from group state or satellite data.
@@ -569,12 +574,15 @@ void populateGroupNode(ProdGroupTreeNode<Scalar>& node,
         node.ctrlStatus = ProdNodeCtrlStatus::Satellite;
         node.allowGroupControl = false;  // Satellite groups cannot be controlled by parent
     } else if (node.allowGroupControl) {
-        // Available for group control 
+        // Available for group control
         node.ctrlStatus = ProdNodeCtrlStatus::GroupControlled;
     } else {
         // Not available for group control
         node.ctrlStatus = ProdNodeCtrlStatus::Undetermined;
     }
+
+    OpmLog::info(fmt::format("buildTree: group {} allowGroupControl={} satellite={}",
+                             groupName, node.allowGroupControl, isSatellite));
 
     // RESV conversion coefficients for this group
     {
@@ -820,9 +828,9 @@ std::vector<std::string> getSubTreeOrdering(const Tree<Scalar>& tree,
         stack.pop_back();
         if (tree.count(name) == 0) continue;
         const auto& node = tree.at(name);
-        // Only include nodes that still need balancing (groups with Undetermined status)
-        if (node.type == ProdNodeType::Group &&
-            node.ctrlStatus == ProdNodeCtrlStatus::Undetermined) {
+        // Only include groups that are NOT available for group control
+        // (FIELD, satellite groups, groups with GCONPROD item 8 = NO)
+        if (node.type == ProdNodeType::Group && !node.allowGroupControl) {
             ordering.push_back(name);
         }
         // Push children before the current node so they appear first in output
@@ -835,7 +843,9 @@ std::vector<std::string> getSubTreeOrdering(const Tree<Scalar>& tree,
 
     // Reverse so children appear before parents (post-order)
     std::ranges::reverse(ordering);
-    OpmLog::info(fmt::format("getSubTreeOrdering: found {} nodes", ordering.size()));
+    OpmLog::info(fmt::format("getSubTreeOrdering: found {} nodes: {}",
+                             ordering.size(),
+                             fmt::join(ordering, ", ")));
     return ordering;
 }
 
@@ -873,12 +883,15 @@ void incrementParentRateSums(Tree<Scalar>& tree,
     if (tree.count(nodeName) == 0) return;
     const auto& node = tree.at(nodeName);
 
-    // Determine rates to add
+    // Determine rates to add (convert to positive production for rateSums)
     std::array<Scalar, 3> ratesToAdd;
     if (rates.has_value()) {
         ratesToAdd = rates.value();
     } else {
-        ratesToAdd = node.rates;
+        // node.rates are negative (production), convert to positive for rateSums
+        for (int c = 0; c < 3; ++c) {
+            ratesToAdd[c] = -node.rates[c];
+        }
     }
 
     std::string parent = nodeName;
@@ -900,16 +913,17 @@ void decrementParentGuideRateSums(Tree<Scalar>& tree,
                                    const std::string& origin,
                                    const std::array<Scalar, 3>& guideRateSums)
 {
-    // Subtract guide_rate_sums from node up to origin
+    // Subtract guide_rate_sums from node up to and including origin
     if (tree.count(nodeName) == 0) return;
     const auto& node = tree.at(nodeName);
 
     std::string parent = node.parent;
-    while (!parent.empty() && parent != origin && tree.count(parent) > 0) {
+    while (!parent.empty() && tree.count(parent) > 0) {
         auto& parentNode = tree.at(parent);
         for (int c = 0; c < 3; ++c) {
             parentNode.guideRateSums[c] -= guideRateSums[c];
         }
+        if (parent == origin) break;  // Stop after updating origin
         parent = parentNode.parent;
     }
 }
@@ -1491,7 +1505,10 @@ void balanceGroupTree(Tree<Scalar>& tree,
                 for (const auto& ctName : c_trans) {
                     if (tree.count(ctName) > 0) {
                         auto& ct = tree.at(ctName);
-                        ct.rates = ct.rateSums;
+                        // Convert rateSums (positive) to rates (negative = production)
+                        for (int c = 0; c < 3; ++c) {
+                            ct.rates[c] = -ct.rateSums[c];
+                        }
 
                         // Check if any limits are broken
                         for (const auto& [limitMode, limit] : ct.individualLimits) {
@@ -1514,7 +1531,10 @@ void balanceGroupTree(Tree<Scalar>& tree,
                         for (const auto& ctName : c_trans) {
                             if (tree.count(ctName) > 0) {
                                 auto& ct = tree.at(ctName);
-                                ct.rates = ct.rateSums;
+                                // Convert rateSums (positive) to rates (negative = production)
+                                for (int c = 0; c < 3; ++c) {
+                                    ct.rates[c] = -ct.rateSums[c];
+                                }
                             }
                         }
                     }
@@ -1535,7 +1555,7 @@ void balanceGroupTree(Tree<Scalar>& tree,
                             for (const auto& [limitMode, limit] : currentNode.individualLimits) {
                                 Scalar effectiveLimit = (limitMode == targetMode) ?
                                     std::min(limit, targetRate) : limit;
-                                const Scalar currentRate = rateForMode(rateSums, limitMode, currentNode.resvCoeff);
+                                const Scalar currentRate = -rateForMode(rateSums, limitMode, currentNode.resvCoeff);
                                 const Scalar violation = currentRate / effectiveLimit;
                                 if (violation > maxViolation) {
                                     maxViolation = violation;
@@ -1551,7 +1571,7 @@ void balanceGroupTree(Tree<Scalar>& tree,
                                 }
                                 limitViolated = true;
                                 mode = newMode;
-                                const Scalar modeRate = rateForMode(rateSums, mode, currentNode.resvCoeff);
+                                const Scalar modeRate = -rateForMode(rateSums, mode, currentNode.resvCoeff);
                                 qm = modeRate / maxViolation;
                             } else if (maxViolation < Scalar(1) - tol && anyGroupControlledChildren) {
                                 // Did not manage to distribute everything
@@ -1564,7 +1584,10 @@ void balanceGroupTree(Tree<Scalar>& tree,
                     if (tree.count(nodeName) > 0) {
                         auto& finalNode = tree.at(nodeName);
                         finalNode.isBalanced = balanced;
-                        finalNode.rates = finalNode.rateSums;
+                        // Convert rateSums (positive) to rates (negative = production)
+                        for (int c = 0; c < 3; ++c) {
+                            finalNode.rates[c] = -finalNode.rateSums[c];
+                        }
                     }
                 }
             }
