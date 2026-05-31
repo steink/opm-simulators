@@ -98,7 +98,7 @@ struct FullDomain
 };
 
 #if HAVE_CUDA && OPM_IS_COMPILING_WITH_GPU_COMPILER
-    FullDomain<gpuistl::GpuBuffer<int>> copy_to_gpu(FullDomain<> CPUDomain)
+    inline FullDomain<gpuistl::GpuBuffer<int>> copy_to_gpu(FullDomain<> CPUDomain)
     {
         if (CPUDomain.cells.size() == 0) {
             OPM_THROW(std::runtime_error, "Cannot copy empty full domain to GPU.");
@@ -108,7 +108,7 @@ struct FullDomain
         };
     };
 
-    FullDomain<gpuistl::GpuView<int>> make_view(FullDomain<gpuistl::GpuBuffer<int>>& buffer)
+    inline FullDomain<gpuistl::GpuView<int>> make_view(FullDomain<gpuistl::GpuBuffer<int>>& buffer)
     {
         if (buffer.cells.size() == 0) {
             OPM_THROW(std::runtime_error, "Cannot make view of empty full domain buffer.");
@@ -323,6 +323,7 @@ public:
                       << "\n"  << std::flush;
             succeeded = 0;
         }
+        OPM_TIMEBLOCK(linearizationSynch);
         succeeded = simulator_().gridView().comm().min(succeeded);
 
         if (!succeeded) {
@@ -591,11 +592,23 @@ private:
                         const Scalar zIn = problem_().dofCenterDepth(myIdx);
                         const Scalar zEx = problem_().dofCenterDepth(neighborIdx);
                         const Scalar dZg = (zIn - zEx)*gravity;
-                        const Scalar thpres = problem_().thresholdPressure(myIdx, neighborIdx);
+                        const Scalar thpresInToEx = problem_().thresholdPressure(myIdx, neighborIdx);
+                        const Scalar thpresExToIn = problem_().thresholdPressure(neighborIdx, myIdx);
                         const auto dirId = scvf.dirId();
                         auto faceDir = dirId < 0 ? FaceDir::DirEnum::Unknown
                                                  : FaceDir::FromIntersectionIndex(dirId);
-                        ResidualNBInfo nbinfo{trans, area, thpres, dZg, faceDir, Vin, Vex, {}, {}, {}, {}};
+                        ResidualNBInfo nbinfo{trans,
+                                              area,
+                                              thpresInToEx,
+                                              thpresExToIn,
+                                              dZg,
+                                              faceDir,
+                                              Vin,
+                                              Vex,
+                                              {},
+                                              {},
+                                              {},
+                                              {}};
                         if constexpr (enableFullyImplicitThermal) {
                             nbinfo.inAlpha = problem_().thermalHalfTransmissibility(myIdx, neighborIdx);
                             nbinfo.outAlpha = problem_().thermalHalfTransmissibility(neighborIdx, myIdx);

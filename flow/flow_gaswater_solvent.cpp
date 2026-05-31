@@ -16,9 +16,6 @@
 */
 #include "config.h"
 
-// Define making clear that the simulator supports AMG
-#define FLOW_SUPPORT_AMG 1
-
 #include <flow/flow_gaswater_solvent.hpp>
 
 #include <opm/material/common/ResetLocale.hpp>
@@ -28,18 +25,18 @@
 #include <opm/simulators/flow/SimulatorFullyImplicitBlackoil.hpp>
 #include <opm/simulators/flow/Main.hpp>
 
-namespace Opm {
-namespace Properties {
+namespace Opm::Properties {
+
 namespace TTag {
-struct FlowGasWaterSolventProblem {
-    using InheritsFrom = std::tuple<FlowProblem>;
-};
+
+struct FlowGasWaterSolventProblem
+{ using InheritsFrom = std::tuple<FlowProblem>; };
+
 }
 
 template<class TypeTag>
-struct EnableSolvent<TypeTag, TTag::FlowGasWaterSolventProblem> {
-    static constexpr bool value = true;
-};
+struct EnableSolvent<TypeTag, TTag::FlowGasWaterSolventProblem>
+{ static constexpr bool value = true; };
 
 template<class TypeTag>
 struct EnergyModuleType<TypeTag, TTag::FlowGasWaterSolventProblem>
@@ -56,7 +53,8 @@ private:
     using BaseTypeTag = TTag::FlowProblem;
     using FluidSystem = GetPropType<BaseTypeTag, Properties::FluidSystem>;
     static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
-    static constexpr int numEnergyVars = energyModuleType == EnergyModules::FullyImplicitThermal;
+    static constexpr int numEnergyVars = energyModuleType == EnergyModules::FullyImplicitThermal ? 1 : 0;
+
 public:
     using type = BlackOilTwoPhaseIndices<getPropValue<TypeTag, Properties::EnableSolvent>(),
                                          getPropValue<TypeTag, Properties::EnableExtbo>(),
@@ -68,10 +66,10 @@ public:
                                          /*disabledCompIdx=*/FluidSystem::oilCompIdx,
                                          getPropValue<TypeTag, Properties::EnableBioeffects>()>;
 };
-}}
+
+} // namespace Opm::Properties
 
 namespace Opm {
-
 
 // ----------------- Main program -----------------
 int flowGasWaterSolventMain(int argc, char** argv, bool outputCout, bool outputFiles)
@@ -95,4 +93,4 @@ int flowGasWaterSolventMainStandalone(int argc, char** argv)
     return ret;
 }
 
-}
+} // namespace Opm

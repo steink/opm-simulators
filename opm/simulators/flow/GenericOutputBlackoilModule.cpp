@@ -585,9 +585,7 @@ regionSum(const ScalarBuffer& property,
         totals[regionIdx] += property[j];
     }
 
-    for (std::size_t i = 0; i < maxNumberOfRegions; ++i) {
-        totals[i] = comm.sum(totals[i]);
-    }
+    comm.sum(totals.data(), totals.size());
 
     return totals;
 }
@@ -1050,6 +1048,7 @@ template<class FluidSystem>
 Inplace GenericOutputBlackoilModule<FluidSystem>::
 accumulateRegionSums(const Parallel::Communication& comm)
 {
+    OPM_TIMEBLOCK(GenericOutputBlackoilModule_accumulateRegionSums);
     Inplace inplace;
 
     for (const auto& region : this->regions_) {
@@ -1073,6 +1072,7 @@ updateSummaryRegionValues(const Inplace& inplace,
                           std::map<std::string, double>& miscSummaryData,
                           std::map<std::string, std::vector<double>>& regionData) const
 {
+    OPM_TIMEBLOCK(GenericOutputBlackoilModule_updateSummaryRegionValues);
     // The field summary vectors should only use the FIPNUM based region sum.
     {
         for (const auto& phase : Inplace::phases()) {
@@ -1223,5 +1223,8 @@ INSTANTIATE_COMP(4)
 INSTANTIATE_COMP(5)
 INSTANTIATE_COMP(6)
 INSTANTIATE_COMP(7)
+INSTANTIATE_COMP(8)
+INSTANTIATE_COMP(9)
+INSTANTIATE_COMP(10)
 
 } // namespace Opm

@@ -228,6 +228,7 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/wells/BlackoilWellModelConstraints.cpp
   opm/simulators/wells/BlackoilWellModelGasLift.cpp
   opm/simulators/wells/BlackoilWellModelGeneric.cpp
+  opm/simulators/wells/BlackoilWellModelGenericParameters.cpp
   opm/simulators/wells/BlackoilWellModelGuideRates.cpp
   opm/simulators/wells/BlackoilWellModelNetworkGeneric.cpp
   opm/simulators/wells/BlackoilWellModelNldd.cpp
@@ -323,7 +324,6 @@ if(CUDA_FOUND OR hip_FOUND)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/preconditionerKernels/ILU_variants_helper_kernels.cu)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/preconditionerKernels/ILU0Kernels.cu)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/preconditionerKernels/JacKernels.cu)
-  ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/kernel_enums.hpp)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg GpuVector.cpp)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg GpuView.cpp)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/cpr_amg_operations.cu)
@@ -351,6 +351,7 @@ if(CUDA_FOUND OR hip_FOUND)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/cuda_check_last_error.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/CuBlasHandle.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/CuSparseHandle.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/kernel_enums.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg GpuBuffer.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/preconditionerKernels/DILUKernels.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/preconditionerKernels/ILU_variants_helper_kernels.hpp)
@@ -395,13 +396,9 @@ if(CUDA_FOUND OR hip_FOUND)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg ISTLSolverGPUISTL.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/FlexibleSolverWrapper.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg AmgxInterface.hpp)
-  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg HypreInterface.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg hypreinterface/HypreCpuTransfers.hpp)
-  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg hypreinterface/HypreDataStructures.hpp)
-  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg hypreinterface/HypreErrorHandling.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg hypreinterface/HypreGpuTransfers.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg hypreinterface/HypreSetup.hpp)
-  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg hypreinterface/HypreUtils.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg PinnedMemoryHolder.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg GpuPressureTransferPolicy.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/gpu_preconditioner_utils.hpp)
@@ -422,7 +419,7 @@ if(USE_GPU_BRIDGE)
                                  opm/simulators/linalg/gpubridge/WellContributions.cpp
                                  opm/simulators/linalg/gpubridge/MultisegmentWellContribution.cpp
                                  opm/simulators/linalg/ISTLSolverGpuBridge.cpp)
-  if(OPENCL_FOUND)
+  if(OpenCL_FOUND)
     list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/gpubridge/BlockedMatrix.cpp)
     list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/gpubridge/opencl/openclBILU0.cpp)
     list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/gpubridge/Reorder.cpp)
@@ -599,7 +596,7 @@ if(CUDA_FOUND OR hip_FOUND)
 endif()
 
 if(USE_GPU_BRIDGE)
-  if(OPENCL_FOUND)
+  if(OpenCL_FOUND)
     list(APPEND TEST_SOURCE_FILES tests/test_openclSolver.cpp)
     list(APPEND TEST_SOURCE_FILES tests/test_solvetransposed3x3.cpp)
   list(APPEND TEST_SOURCE_FILES tests/test_csrToCscOffsetMap.cpp)
@@ -970,6 +967,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/flow/FIPContainer.hpp
   opm/simulators/flow/FlowBaseProblemProperties.hpp
   opm/simulators/flow/FlowBaseVanguard.hpp
+  opm/simulators/flow/FlowGasWaterEnergyTypeTag.hpp
   opm/simulators/flow/FlowGenericProblem.hpp
   opm/simulators/flow/FlowGenericProblem_impl.hpp
   opm/simulators/flow/FlowGenericVanguard.hpp
@@ -1173,12 +1171,16 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/BlackoilWellModelGasLift.hpp
   opm/simulators/wells/BlackoilWellModelGasLift_impl.hpp
   opm/simulators/wells/BlackoilWellModelGeneric.hpp
+  opm/simulators/wells/BlackoilWellModelGenericParameters.hpp
   opm/simulators/wells/BlackoilWellModelGuideRates.hpp
   opm/simulators/wells/BlackoilWellModelNetwork.hpp
   opm/simulators/wells/BlackoilWellModelNetwork_impl.hpp
   opm/simulators/wells/BlackoilWellModelNetworkGeneric.hpp
+  opm/simulators/wells/BlackoilWellModelNetworkPressureComputation.hpp
   opm/simulators/wells/BlackoilWellModelNldd.hpp
   opm/simulators/wells/BlackoilWellModelNldd_impl.hpp
+  opm/simulators/wells/BlackoilWellModelRescoup.hpp
+  opm/simulators/wells/BlackoilWellModelRescoup_impl.hpp
   opm/simulators/wells/BlackoilWellModelRestart.hpp
   opm/simulators/wells/BlackoilWellModelWBP.hpp
   opm/simulators/wells/ConnectionIndexMap.hpp
@@ -1424,6 +1426,12 @@ endif()
 if(HYPRE_FOUND)
   list(APPEND PUBLIC_HEADER_FILES
     opm/simulators/linalg/HyprePreconditioner.hpp
+    opm/simulators/linalg/hypreinterface/HypreDataStructures.hpp
+    opm/simulators/linalg/hypreinterface/HypreErrorHandling.hpp
+    opm/simulators/linalg/hypreinterface/HypreCpuTransfers.hpp
+    opm/simulators/linalg/hypreinterface/HypreInterface.hpp
+    opm/simulators/linalg/hypreinterface/HypreSetup.hpp
+    opm/simulators/linalg/hypreinterface/HypreUtils.hpp
   )
 endif()
 

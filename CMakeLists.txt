@@ -32,8 +32,9 @@ option(CONVERT_CUDA_TO_HIP "Convert CUDA code to HIP (to run on AMD cards)" OFF)
 option(SUPPRESS_HIPIFY_WARNINGS "Suppress warnings in hipify?" ON)
 option(USE_AMGX "Enable AMGX support?" OFF)
 option(USE_HYPRE "Use the Hypre library for linear solvers?" OFF)
-set(OPM_COMPILE_COMPONENTS "2;3;4;5;6;7" CACHE STRING "The components to compile support for")
+set(OPM_COMPILE_COMPONENTS "2;3;4;5;6;7;8;9;10" CACHE STRING "The components to compile support for")
 option(USE_OPENCL "Enable OpenCL support?" ON)
+option(USE_DEV_SIMULATOR_IN_TESTS "Use the development simulator binaries in tests?" OFF)
 
 # Wrapper for opm_add_target_options that also adds
 # compile definitions and target links from the library
@@ -99,6 +100,16 @@ macro(opm-simulators_prereqs_hook)
       SuiteSparse::UMFPACK
       Boost::date_time
   )
+
+  if(TARGET ParMETIS::ParMETIS)
+    target_link_libraries(opmsimulators PUBLIC ParMETIS::ParMETIS)
+  elseif(MPI_FOUND)
+    message(
+      WARNING
+      "We have not found ParMETIS/PTScotch on your systems. "
+      "Please note that without this the parallel AMG will be less scalable. "
+      "It is advised to install PTScotch to fix this.")
+  endif()
 
   if(MPI_FOUND)
     target_link_libraries(opmsimulators PUBLIC MPI::MPI_C MPI::MPI_CXX)
@@ -277,7 +288,7 @@ macro(opm-simulators_prereqs_hook)
 endmacro()
 
 macro(opm-simulators_sources_hook)
-  if(OPENCL_FOUND)
+  if(OpenCL_FOUND)
     include(opencl-source-provider)
     target_sources(opmsimulators PRIVATE ${PROJECT_BINARY_DIR}/clSources.cpp)
   endif()
@@ -327,6 +338,7 @@ macro(opm-simulators_sources_hook)
 
   if(HAVE_AVX2_EXTENSION)
     set_property(SOURCE ${AVX2_SOURCE_FILES} PROPERTY COMPILE_OPTIONS ${AVX2_FLAGS})
+    target_compile_definitions(opmsimulators PUBLIC HAVE_AVX2_EXTENSION=1)
   endif()
 
   # Boost 1.66 used on RHEL8 cannot be built as c++-20
@@ -578,31 +590,34 @@ macro(opm-simulators_targets_hook)
   # multiple compile units in order to ensure that eWoms code can be
   # used within libraries that use the same type tag within multiple
   # compile units.
-  opm_add_test(lens_immiscible_ecfv_ad_mcu
-    ONLY_COMPILE
+  opm_add_executable(
+    TARGET
+      lens_immiscible_ecfv_ad_mcu
     SOURCES
      examples/lens_immiscible_ecfv_ad_cu1.cpp
      examples/lens_immiscible_ecfv_ad_cu2.cpp
      examples/lens_immiscible_ecfv_ad_main.cpp
     LIBRARIES
       opmsimulators
-      opmcommon
   )
 
-  opm_add_test(test_tuning_trgmbe
-    ONLY_COMPILE
+  opm_add_executable(
+    TARGET
+      test_tuning_trgmbe
     SOURCES
       tests/test_tuning_TRGMBE.cpp
     LIBRARIES
       Boost::unit_test_framework
   )
 
-  opm_add_test(test_tuning_tsinit_nextstep
-    ONLY_COMPILE
+  opm_add_executable(
+    TARGET
+      test_tuning_tsinit_nextstep
     SOURCES
       tests/test_tuning_TSINIT_NEXTSTEP.cpp
      LIBRARIES
-      Boost::unit_test_framework opmcommon
+      opmcommon
+      Boost::unit_test_framework
   )
 
   if(QuadMath_FOUND)
@@ -610,17 +625,15 @@ macro(opm-simulators_targets_hook)
                  co2injection_flash_ni_vcfv
                  co2injection_flash_ecfv
                  co2injection_flash_vcfv)
-      opm_add_test(${tapp}_quad
-        ONLY_COMPILE
-        LIBRARIES
-          opmsimulators
-          opmcommon
-        EXE_NAME
+      opm_add_executable(
+        TARGET
           ${tapp}_quad
+        LIBRARIES
+          QuadMath::QuadMath
+          opmsimulators
         SOURCES
           examples/${tapp}.cpp
       )
-      target_link_libraries(${tapp}_quad PRIVATE QuadMath::QuadMath)
       target_compile_definitions(${tapp}_quad PRIVATE HAVE_QUAD=1)
     endforeach()
   endif()
@@ -726,47 +739,40 @@ macro(opm-simulators_targets_hook)
     list(APPEND FLOW_TGTS $<TARGET_OBJECTS:flow_lib${OBJ}>)
     list(APPEND FLOWMODELS_PREFIXED flow_${OBJ})
 
-    opm_add_test(flow_${OBJ}
-      ONLY_COMPILE
+    opm_add_executable(
+      TARGET
+        flow_${OBJ}
       SOURCES
         flow/flow_${OBJ}_main.cpp
         $<TARGET_OBJECTS:moduleVersion>
         $<TARGET_OBJECTS:flow_lib${OBJ}>
-      EXE_NAME
-        flow_${OBJ}
-      DEPENDS
-        opmsimulators
       LIBRARIES
         opmsimulators
     )
   endforeach()
 
-  opm_add_test(flow
-    ONLY_COMPILE
-    ALWAYS_ENABLE
-    DEPENDS
-      opmsimulators
-    LIBRARIES
-      opmsimulators
+  opm_add_executable(
+    TARGET
+      flow
     SOURCES
       flow/flow.cpp
       ${FLOW_TGTS}
       $<TARGET_OBJECTS:moduleVersion>
       $<TARGET_OBJECTS:MainDispatchDynamic>
-  )
-
-  opm_add_test(flow_distribute_z
-    ONLY_COMPILE
-    ALWAYS_ENABLE
-    DEPENDS
-      opmsimulators
     LIBRARIES
       opmsimulators
+  )
+
+  opm_add_executable(
+    TARGET
+      flow_distribute_z
     SOURCES
       flow/flow_distribute_z.cpp
       ${FLOW_TGTS}
       $<TARGET_OBJECTS:moduleVersion>
       $<TARGET_OBJECTS:MainDispatchDynamic>
+    LIBRARIES
+      opmsimulators
   )
 
   if(OPM_ENABLE_PYTHON)
@@ -793,17 +799,15 @@ macro(opm-simulators_targets_hook)
   # this will be used in a template argument pack.
   string(REPLACE ";" "," OPM_COMPILE_COMPONENTS_TEMPLATE_LIST "${OPM_COMPILE_COMPONENTS}")
 
-  opm_add_test(flowexp_comp
-    ONLY_COMPILE
-    ALWAYS_ENABLE
-    DEPENDS
-      opmsimulators
-    LIBRARIES
-      opmsimulators
+  opm_add_executable(
+    TARGET
+      flowexp_comp
     SOURCES
       flowexperimental/comp/flowexp_comp.cpp
       ${FLOWEXP_COMPONENTS_SOURCES}
       $<TARGET_OBJECTS:moduleVersion>
+    LIBRARIES
+      opmsimulators
   )
   target_compile_definitions(flowexp_comp
     PRIVATE
@@ -811,56 +815,48 @@ macro(opm-simulators_targets_hook)
   )
 
   if(BUILD_FLOW_FLOAT_VARIANTS)
-    opm_add_test(flow_blackoil_float
-      ONLY_COMPILE
-      ALWAYS_ENABLE
-      DEPENDS
-        opmsimulators
-      LIBRARIES
-        opmsimulators
+    opm_add_executable(
+      TARGET
+        flow_blackoil_float
       SOURCES
         flow/flow_blackoil_float_main.cpp
         $<TARGET_OBJECTS:moduleVersion>
+      LIBRARIES
+        opmsimulators
     )
   endif()
 
-  opm_add_test(flowexp_blackoil
-    ONLY_COMPILE
-    ALWAYS_ENABLE
-    DEPENDS
-      opmsimulators
-    LIBRARIES
-      opmsimulators
+  opm_add_executable(
+    TARGET
+      flowexp_blackoil
     SOURCES
       flowexperimental/flowexp_blackoil.cpp
       $<TARGET_OBJECTS:moduleVersion>
+    LIBRARIES
+      opmsimulators
   )
 
   if(dune-alugrid_FOUND AND BUILD_FLOW_ALU_GRID)
-    opm_add_test(flow_blackoil_alugrid
-      ONLY_COMPILE
-      ALWAYS_ENABLE
-      DEPENDS
-        opmsimulators
-      LIBRARIES
-        opmsimulators
+    opm_add_executable(
+      TARGET
+        flow_blackoil_alugrid
       SOURCES
         flow/flow_blackoil_alugrid.cpp
         $<TARGET_OBJECTS:moduleVersion>
+      LIBRARIES
+        opmsimulators
     )
   endif()
 
   if(BUILD_FLOW_POLY_GRID)
-    opm_add_test(flow_blackoil_polyhedralgrid
-      ONLY_COMPILE
-      ALWAYS_ENABLE
-      DEPENDS
-        opmsimulators
-      LIBRARIES
-        opmsimulators
+    opm_add_executable(
+      TARGET
+        flow_blackoil_polyhedralgrid
       SOURCES
         flow/flow_blackoil_polyhedralgrid.cpp
         $<TARGET_OBJECTS:moduleVersion>
+      LIBRARIES
+        opmsimulators
     )
   endif()
 
@@ -901,8 +897,8 @@ endmacro()
 if(OPM_COMPILE_COMPONENTS STREQUAL "")
   message(FATAL_ERROR "OPM_COMPILE_COMPONENTS must contain at least one component.")
 endif()
-# Check that OPM_COMPILE_COMPONENTS is a subset of 2,3,4,5,6,7
-set(valid_components "2;3;4;5;6;7")
+# Check that OPM_COMPILE_COMPONENTS is a subset of 2,3,4,5,6,7,8,9,10
+set(valid_components "2;3;4;5;6;7;8;9;10")
 foreach(component IN LISTS OPM_COMPILE_COMPONENTS)
   list(FIND valid_components ${component} index)
   if(index EQUAL -1)

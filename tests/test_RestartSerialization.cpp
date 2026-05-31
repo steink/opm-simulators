@@ -311,7 +311,7 @@ public:
                                  const Parallel::Communication& comm,
                                  bool deserialize)
         : BlackoilWellModelGeneric<double, IndexTraits>(schedule, gaslift, network_, summaryState,
-                                           eclState, phase_usage, comm)
+                                           eclState, phase_usage, comm, iter_ctx_)
         , network_(*this)
     {
         if (deserialize) {
@@ -372,6 +372,7 @@ public:
 
 private:
     BlackoilWellModelNetworkGeneric<double, IndexTraits> network_;
+    NewtonIterationContext iter_ctx_;
     ParallelWellInfo<double> dummy;
 };
 
@@ -612,7 +613,7 @@ int main(int argc, char** argv)
 {
     // MPI setup.
     int argcDummy = 1;
-    const char *tmp[] = {"test_RestartSerialization"};
+    const char *tmp[] = {"test_RestartSerialization", nullptr};
     char **argvDummy = const_cast<char**>(tmp);
 #if HAVE_DUNE_FEM
     Dune::Fem::MPIManager::initialize(argcDummy, argvDummy);

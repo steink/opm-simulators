@@ -34,6 +34,7 @@
 #include <dune/common/fvector.hh>
 #include <dune/common/fmatrix.hh>
 
+#include <opm/common/ErrorMacros.hpp>
 #include <opm/common/OpmLog/OpmLog.hpp>
 
 #include <opm/input/eclipse/EclipseState/Grid/FaceDir.hpp>
@@ -142,7 +143,7 @@ public:
      */
     OPM_HOST_DEVICE const DimMatrix& intrinsicPermeability() const
     {
-        throw std::invalid_argument("The ECL transmissibility module does not provide an explicit intrinsic permeability");
+        OPM_THROW(std::invalid_argument, "The ECL transmissibility module does not provide an explicit intrinsic permeability");
     }
 
     /*!
@@ -153,7 +154,7 @@ public:
      */
     OPM_HOST_DEVICE const EvalDimVector& potentialGrad(unsigned) const
     {
-        throw std::invalid_argument("The ECL transmissibility module does not provide explicit potential gradients");
+        OPM_THROW(std::invalid_argument, "The ECL transmissibility module does not provide explicit potential gradients");
     }
 
     /*!
@@ -173,7 +174,7 @@ public:
      */
     OPM_HOST_DEVICE const EvalDimVector& filterVelocity(unsigned) const
     {
-        throw std::invalid_argument("The ECL transmissibility module does not provide explicit filter velocities");
+        OPM_THROW(std::invalid_argument, "The ECL transmissibility module does not provide explicit filter velocities");
     }
 
     /*!
@@ -245,7 +246,8 @@ public:
         unsigned J = stencil.globalSpaceIndex(exteriorDofIdx);
         Scalar trans = problem.transmissibility(elemCtx, interiorDofIdx, exteriorDofIdx);
         Scalar faceArea = scvf.area();
-        Scalar thpres = problem.thresholdPressure(I, J);
+        Scalar thpresInToEx = problem.thresholdPressure(I, J);
+        Scalar thpresExToIn = problem.thresholdPressure(J, I);
 
         // estimate the gravity correction: for performance reasons we use a simplified
         // approach for this flux module that assumes that gravity is constant and always
@@ -286,7 +288,8 @@ public:
                                         I,
                                         J,
                                         distZ*g,
-                                        thpres,
+                                        thpresInToEx,
+                                        thpresExToIn,
                                         problem.moduleParams());
 
             const bool upwindIsInterior = (static_cast<unsigned>(upIdx[phaseIdx]) == interiorDofIdx);
@@ -323,7 +326,8 @@ public:
                                             const unsigned globalIndexIn,
                                             const unsigned globalIndexEx,
                                             const Scalar distZg,
-                                            const Scalar thpres,
+                                            const Scalar thpresInToEx,
+                                            const Scalar thpresExToIn,
                                             const ModuleParams& moduleParams)
     {
 
@@ -400,6 +404,7 @@ public:
         // of threshold pressure is a quite big hack that only makes sense for ECL
         // datasets. (and even there, its physical justification is quite
         // questionable IMO.)
+        const Scalar thpres = pressureDifference < 0.0 ? thpresInToEx : thpresExToIn;
         if (thpres > 0.0) {
             if (std::abs(Toolbox::value(pressureDifference)) > thpres) {
                 if (pressureDifference < 0.0)

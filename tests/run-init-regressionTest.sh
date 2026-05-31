@@ -12,22 +12,22 @@ then
   echo -e "\tMandatory options:"
   echo -e "\t\t -i <path>     Path to read deck from"
   echo -e "\t\t -r <path>     Path to store results in"
-  echo -e "\t\t -b <path>     Path to simulator binary"
   echo -e "\t\t -f <filename> Deck file name"
   echo -e "\t\t -a <tol>      Absolute tolerance in comparison"
   echo -e "\t\t -t <tol>      Relative tolerance in comparison"
   echo -e "\t\t -c <path>     Path to comparison tool"
   echo -e "\t\t -e <filename> Simulator binary to use"
+  echo -e "\tOptional options:"
+  echo -e "\t\t -u <filename> Simulator binary for reference data"
   exit 1
 fi
 
 OPTIND=1
-while getopts "i:r:b:f:a:t:c:e:d:h:" OPT
+while getopts "i:r:f:a:t:c:e:d:h:u:" OPT
 do
   case "${OPT}" in
     i) INPUT_DATA_PATH=${OPTARG} ;;
     r) RESULT_PATH=${OPTARG} ;;
-    b) BINPATH=${OPTARG} ;;
     f) FILENAME=${OPTARG} ;;
     a) ABS_TOL=${OPTARG} ;;
     t) REL_TOL=${OPTARG} ;;
@@ -35,23 +35,27 @@ do
     e) EXE_NAME=${OPTARG} ;;
     d) ;; # Ignored
     h) ;; # Ignored#
+    u) REF_EXE_NAME=${OPTARG} ;;
   esac
 done
 shift $(($OPTIND-1))
 TEST_ARGS="$@"
 
+BASE_EXE_NAME=$(basename -- "${EXE_NAME}")
+REF_EXE_NAME=${REF_EXE_NAME:-${BASE_EXE_NAME}}
+
 rm -Rf  ${RESULT_PATH}
 mkdir -p ${RESULT_PATH}
 cd ${RESULT_PATH}
-${BINPATH}/${EXE_NAME} ${TEST_ARGS} --enable-dry-run=true --output-dir=${RESULT_PATH} ${INPUT_DATA_PATH}/${FILENAME}
+"${EXE_NAME}" ${TEST_ARGS} --enable-dry-run=true --output-dir=${RESULT_PATH} ${INPUT_DATA_PATH}/${FILENAME}
 cd ..
 
 ecode=0
-${COMPARE_ECL_COMMAND} -t INIT ${RESULT_PATH}/${FILENAME} ${INPUT_DATA_PATH}/opm-simulation-reference/${EXE_NAME}/${FILENAME} ${ABS_TOL} ${REL_TOL}
+${COMPARE_ECL_COMMAND} -t INIT ${RESULT_PATH}/${FILENAME} ${INPUT_DATA_PATH}/opm-simulation-reference/${REF_EXE_NAME}/${FILENAME} ${ABS_TOL} ${REL_TOL}
 if [ $? -ne 0 ]
 then
   ecode=1
-  ${COMPARE_ECL_COMMAND} -a -t INIT ${RESULT_PATH}/${FILENAME} ${INPUT_DATA_PATH}/opm-simulation-reference/${EXE_NAME}/${FILENAME} ${ABS_TOL} ${REL_TOL}
+  ${COMPARE_ECL_COMMAND} -a -t INIT ${RESULT_PATH}/${FILENAME} ${INPUT_DATA_PATH}/opm-simulation-reference/${REF_EXE_NAME}/${FILENAME} ${ABS_TOL} ${REL_TOL}
 fi
 
 exit $ecode
