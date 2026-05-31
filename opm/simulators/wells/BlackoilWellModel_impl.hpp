@@ -1716,7 +1716,7 @@ namespace Opm {
         // Run the production group-tree balancing predictor (rank-0 only; result is
         // broadcast via updateAndCommunicate).  It sets initial control modes and
         // rates before the existing switching logic runs as a corrector below.
-        if (param_.enable_group_tree_balancer_) {
+        if (true || param_.enable_group_tree_balancer_) {
             if (comm.rank() == 0) {
                 ProdGroupTreeBalancer::runGroupTreeBalancer(
                     *this,

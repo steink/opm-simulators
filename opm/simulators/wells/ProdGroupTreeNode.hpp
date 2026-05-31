@@ -20,6 +20,7 @@
 #ifndef OPM_PROD_GROUP_TREE_NODE_HEADER_INCLUDED
 #define OPM_PROD_GROUP_TREE_NODE_HEADER_INCLUDED
 
+#include <opm/input/eclipse/Schedule/Well/Well.hpp>
 #include <opm/input/eclipse/Schedule/Well/WellEnums.hpp>
 #include <opm/input/eclipse/Schedule/Group/Group.hpp>
 
@@ -37,7 +38,8 @@ enum class ProdNodeCtrlStatus {
     Undetermined,        ///< Top-node: not yet resolved (Matlab: UNDETERMINED)
     GroupControlled,     ///< Node is controlled by its parent group (Matlab: GRUP)
     IndividualControlled,///< Node has hit an individual limit and is now fixed (Matlab: INDIVIDUAL)
-    NoGroupChildren      ///< Group node whose GroupControlled children are all resolved (Matlab: NONE)
+    NoGroupChildren,     ///< Group node whose GroupControlled children are all resolved (Matlab: NONE)
+    Satellite            ///< Satellite group with fixed rates from GSATPROD, not controlled by parent
 };
 
 /// Node type: well leaf vs. group interior node.
@@ -117,6 +119,11 @@ struct ProdGroupTreeNode {
         Scalar guideRateRatio{1};
     };
     GroupTarget groupTarget;
+
+    // ---- Guide rates for different control modes -------------------------
+    /// Guide rates for each production control mode (ORAT, WRAT, GRAT, LRAT, RESV).
+    /// Populated in buildTree and used in setAndUpdateTargets to distribute targets.
+    std::map<Well::ProducerCMode, Scalar> guideRatesForMode;
 
     // ---- RESV conversion coefficients (wells only) -----------------------
     /// convert_coeff[i] for each active phase so that
