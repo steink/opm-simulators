@@ -64,10 +64,20 @@ public:
                                const std::optional<Well::ProductionControls>& prod_controls = std::nullopt) const;
 
     std::pair<Well::ProducerCMode, Scalar>
+    estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
+                                          const SummaryState& summaryState,
+                                          const RateConvFunc& calcReservoirVoidageRates,
+                                          const Well::ProductionControls& controls,
+                                          const bool include_group_constraints,
+                                          DeferredLogger& deferred_logger,
+                                          const std::optional<Scalar> bhp_at_thp_limit) const;
+
+    std::pair<Well::ProducerCMode, Scalar>
     estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
                                               const SummaryState& summaryState,
                                               const RateConvFunc& calcReservoirVoidageRates,
                                               const Well::ProductionControls& controls,
+                                              const bool check_group_constraints,
                                               DeferredLogger& deferred_logger) const;
 
     Scalar getProductionControlModeScale(const SingleWellState<Scalar, IndexTraits>& ws,

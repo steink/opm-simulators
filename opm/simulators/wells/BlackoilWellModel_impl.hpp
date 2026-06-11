@@ -707,7 +707,7 @@ namespace Opm {
 
         this->calculateProductivityIndexValues(local_deferredLogger);
 
-        this->groupStateHelper().updateNONEProductionGroups();
+        //this->groupStateHelper().updateNONEProductionGroups();
 
 #ifdef RESERVOIR_COUPLING_ENABLED
         this->rescoupHelper_.rescoupSyncSummaryData();
@@ -1633,6 +1633,14 @@ namespace Opm {
         // rates before the existing switching logic runs as a corrector below.
         if (true || param_.enable_group_tree_balancer_) {
             if (comm.rank() == 0) {
+                if (param_.use_implicit_ipr_) {
+                    for (auto& well : well_container_) {
+                        const auto& ws = this->wellState().well(well->indexOfWell());
+                        if (well->wellEcl().isProducer() && ws.status == WellStatus::OPEN) {
+                            well->updateIPRImplicit(simulator_, this->groupStateHelper(), this->wellState());
+                        }
+                    }
+                }
                 ProdGroupTreeBalancer::runGroupTreeBalancer(
                     *this,
                     this->summaryState(),
@@ -1641,7 +1649,8 @@ namespace Opm {
                     param_.group_tree_balancer_max_iterations_,
                     deferred_logger);
             }
-            updateAndCommunicate(episodeIdx);
+            this->updateAndCommunicateGroupData(episodeIdx, /*update_wellgrouptarget*/ false);
+            // updateAndCommunicate(episodeIdx);
             // Note: changed_well_group remains false so the corrector loop below
             // still runs to handle injection, economic limits, and any remaining violations.
         }

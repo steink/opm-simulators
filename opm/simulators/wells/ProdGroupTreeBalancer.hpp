@@ -102,21 +102,21 @@ getLocalTreeDescendants(const Tree<Scalar>& tree, const std::string& nodeName);
 /// \param[in]      mode    Target control mode
 template<class Scalar>
 void resetRatesAndGuideRateSums(Tree<Scalar>& tree,
-                                 const std::vector<std::string>& c,
-                                 const std::vector<std::string>& c_fixed,
-                                 const std::vector<std::string>& c_trans,
-                                 const std::string& origin,
-                                 Well::ProducerCMode mode);
+                                const std::vector<std::string>& c,
+                                const std::vector<std::string>& c_fixed,
+                                const std::vector<std::string>& c_trans,
+                                const std::string& origin,
+                                Well::ProducerCMode mode);
 
 /// Compute limit-to-guide ratios for sorting children.
 /// Corresponds to Matlab get_ratios_for_sorting().
 ///
 /// \param[in]  tree  The production group tree
 /// \param[in]  c     List of child node names
-/// \return     Pair of (ratios, mode_indices) for each child
+/// \return     Ratios for each child
 template<class Scalar>
-std::pair<std::vector<Scalar>, std::vector<int>>
-getRatiosForSorting(const Tree<Scalar>& tree, const std::vector<std::string>& c);
+std::vector<Scalar>
+computeRatiosForSorting(const Tree<Scalar>& tree, const std::vector<std::string>& c);
 
 /// Check if there is a free path from node to node_control (all transparent).
 /// Corresponds to Matlab hasFreePath().
@@ -146,6 +146,7 @@ std::vector<std::string>
 updateTransparentGroups(Tree<Scalar>& tree,
                         const std::string& nodeName,
                         std::vector<std::string>& c_trans,
+                        const GuideRate& guideRate,
                         Scalar nextRatio,
                         Scalar qm,
                         Well::ProducerCMode mode,
@@ -189,6 +190,7 @@ template<class Scalar>
 void distributeFallbackRates(Tree<Scalar>& tree,
                              const std::string& nodeName,
                              const std::vector<std::string>& c,
+                             const GuideRate& guideRate,
                              Well::ProducerCMode mode,
                              Scalar tol);
 
@@ -203,6 +205,7 @@ void distributeFallbackRates(Tree<Scalar>& tree,
 template<class Scalar>
 void balanceGroupTree(Tree<Scalar>& tree,
                       const std::string& nodeName,
+                      const GuideRate& guideRate,
                       Well::ProducerCMode targetMode,
                       Scalar targetRate,
                       Scalar tol);
@@ -244,18 +247,21 @@ void setTargets(Tree<Scalar>& tree, const std::string& topName);
 /// getSubTreeOrdering() order, balancing each one.
 /// Corresponds to Matlab sortalgo2().
 ///
+/// \param[in]      wellModel Well model (provides guide-rate data)
 /// \param[in,out]  tree      The production group tree
 /// \param[in]      tol       Convergence tolerance
 /// \return         true if all subtrees balanced successfully
-template<class Scalar>
-bool runBalancingAlgorithm(Tree<Scalar>& tree, Scalar tol);
+template<class Scalar, typename IndexTraits>
+bool runBalancingAlgorithm(const BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
+                           Tree<Scalar>& tree,
+                           Scalar tol);
 
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
 
 /// Verify that every node is either:
-///   (a) at its activeIndividualCtrl limit (within tol), or
+///   (a) at its mode limit (within tol), or
 ///   (b) at its group target (within tol), or
 ///   (c) in NoGroupChildren / Undetermined state with no GroupControlled children.
 /// Logs a warning for each violation and returns false if any are found.
@@ -305,7 +311,7 @@ bool runGroupTreeBalancer(BlackoilWellModelGeneric<Scalar, IndexTraits>& wellMod
                           const SummaryState& summaryState,
                           int reportStep,
                           Scalar tol,
-                          int maxIter,
+                          [[maybe_unused]] int maxIter,
                           DeferredLogger& logger);
 
 } // namespace Opm::ProdGroupTreeBalancer

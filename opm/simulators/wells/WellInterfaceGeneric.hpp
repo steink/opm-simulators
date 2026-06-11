@@ -201,6 +201,14 @@ public:
         return {};
     }
 
+    virtual std::optional<std::pair<Well::ProducerCMode, Scalar>>
+    estimateStrictestProductionLimitForBalancer(const WellState<Scalar, IndexTraits>&,
+                                                const SummaryState&,
+                                                DeferredLogger&) const
+    {
+        return std::nullopt;
+    }
+
     virtual int setPrimaryVars(typename std::vector<Scalar>::const_iterator)
     {
         return 0;

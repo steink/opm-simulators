@@ -34,12 +34,21 @@ namespace Opm {
 
 /// Represents the control status of a node in the production group tree.
 /// Mirrors Matlab mode_cnt values.
-enum class ProdNodeCtrlStatus {
-    Undetermined,        ///< Top-node: not yet resolved (Matlab: UNDETERMINED)
-    GroupControlled,     ///< Node is controlled by its parent group (Matlab: GRUP)
-    IndividualControlled,///< Node has hit an individual limit and is now fixed (Matlab: INDIVIDUAL)
-    NoGroupChildren,     ///< Group node whose GroupControlled children are all resolved (Matlab: NONE)
-    Satellite            ///< Satellite group with fixed rates from GSATPROD, not controlled by parent
+// enum class ProdNodeCtrlStatus {
+//    Undetermined,        ///< Top-node: not yet resolved (Matlab: UNDETERMINED)
+//    GroupControlled,     ///< Node is controlled by its parent group (Matlab: GRUP)
+//    IndividualControlled,///< Node has hit an individual limit and is now fixed (Matlab: INDIVIDUAL)
+//    NoGroupChildren,     ///< Group node whose GroupControlled children are all resolved (Matlab: NONE)
+//    Satellite            ///< Satellite group with fixed rates from GSATPROD, not controlled by parent
+//};
+
+/// Represents the control status of a node in the balanced production group tree.
+    enum class ProdNodeModeCategory {
+    Group,          ///< Node is controlled by higher group
+    Individual,     ///< Node is controlled by one of its own individual limits
+    None,           ///< Group node with all children at individual or none category
+    Transparent,    ///< Group node with no guide rate producing less than its limits 
+    Satellite       ///< Satellite group node with fixed rates from GSATPROD
 };
 
 /// Node type: well leaf vs. group interior node.
@@ -63,16 +72,17 @@ struct ProdGroupTreeNode {
     std::vector<std::string> children; ///< child node names
 
     // ---- Group control status --------------------------------------------
-    bool allowGroupControl{true};      ///< well: isAvailableForGroupControl()
+    bool availableForGroupControl{true};      ///< well: isAvailableForGroupControl()
                                        ///< group: productionGroupControlAvailable()
 
-    ProdNodeCtrlStatus ctrlStatus{ProdNodeCtrlStatus::Undetermined};
+    //ProdNodeCtrlStatus ctrlStatus{ProdNodeCtrlStatus::Undetermined};
+    ProdNodeModeCategory modeCategory{ProdNodeModeCategory::Group};
 
-    /// Which individual control mode is currently active / most limiting.
-    Well::ProducerCMode activeIndividualCtrl{Well::ProducerCMode::CMODE_UNDEFINED};
+    /// Which (individual or group) control mode is currently active / most limiting.
+    Well::ProducerCMode mode{Well::ProducerCMode::CMODE_UNDEFINED};
 
-    /// Preferred control for top-level UNDETERMINED nodes
-    Well::ProducerCMode preferredCtrl{Well::ProducerCMode::CMODE_UNDEFINED};
+    /// Preferred control / control given in schedule for this node
+    Group::ProductionCMode preferredMode{Group::ProductionCMode::NONE};
 
     // ---- Rates -----------------------------------------------------------
     /// [oil, water, gas] surface rates; negative = production.
@@ -88,27 +98,27 @@ struct ProdGroupTreeNode {
     ///  RESV  → reservoir-volume limit (compared to sum_p -rates[p]*resv_coeff[p])
     ///  BHP   → equivalent total rate derived from IPR at the BHP limit
     ///          (for wells only; groups do not have a BHP limit)
-    std::map<Well::ProducerCMode, Scalar> individualLimits;
+    std::map<Well::ProducerCMode, Scalar> Limits;
 
     // ---- Group's own production control mode (for group nodes only) ------
     /// The group's own scheduled production control mode (from groupState).
     /// Used in setFinalTargets and for guide-rate computation.
     /// For wells this is unused (stays NONE).
-    Group::ProductionCMode ownCtrlMode{Group::ProductionCMode::NONE};
+    //Group::ProductionCMode ownCtrlMode{Group::ProductionCMode::NONE};
 
     /// Fixed phase fractions of the well's current rates (for wells only).
     /// fractions[i] = -rates[i] / total_rate, where total_rate = sum(-rates).
-    std::array<Scalar, 3> wellRateFractions{};
+    //std::array<Scalar, 3> wellRateFractions{};
 
     // ---- Parametrization (updated during the algorithm) ------------------
     /// The rate change per unit alpha-step: delta_rates = alpha * linearTerm.
-    std::array<Scalar, 3> linearTerm{};
+    // std::array<Scalar, 3> linearTerm{};
 
     /// Distance (in alpha units) to the next individual limit.
-    Scalar alphaToNextLimit{std::numeric_limits<Scalar>::max()};
+   // Scalar alphaToNextLimit{std::numeric_limits<Scalar>::max()};
 
     /// Which control mode will be hit at alphaToNextLimit.
-    Well::ProducerCMode nextLimitCtrl{Well::ProducerCMode::CMODE_UNDEFINED};
+    // Well::ProducerCMode nextLimitCtrl{Well::ProducerCMode::CMODE_UNDEFINED};
 
     // ---- Group target (set by parent during target assignment) -----------
     struct GroupTarget {
@@ -123,7 +133,7 @@ struct ProdGroupTreeNode {
     // ---- Guide rates for different control modes -------------------------
     /// Guide rates for each production control mode (ORAT, WRAT, GRAT, LRAT, RESV).
     /// Populated in buildTree and used in setAndUpdateTargets to distribute targets.
-    std::map<Well::ProducerCMode, Scalar> guideRatesForMode;
+    //std::map<Well::ProducerCMode, Scalar> guideRatesForMode;
 
     // ---- RESV conversion coefficients (wells only) -----------------------
     /// convert_coeff[i] for each active phase so that
@@ -131,13 +141,20 @@ struct ProdGroupTreeNode {
     /// Stored in canonical [oil, water, gas] order; zero for inactive phases.
     std::array<Scalar, 3> resvCoeff{};
 
+    // ---- Efficiency factor -----------------------------------------------
+    /// Own efficiency factor: WEFAC * efficiency_scaling_factor for wells,
+    /// GEFAC for groups. Rates flowing upward to the parent are multiplied
+    /// by this factor; targets flowing downward from the parent are divided
+    /// by this factor before being applied to this node.
+    Scalar efficiencyFactor{1};
+
     // ---- Fields for new sorting-based balancing algorithm ----------------
-    /// Whether this node has a guide rate (false for transparent groups)
-    bool hasGuideRate{true};
+    /// Whether this node participates in guide-rate balancing (false for transparent groups)
+    bool hasGuideRate{false};
 
     /// Guide rates indexed by canonical phase [oil, water, gas]
     /// Corresponds to ORAT, WRAT, GRAT guide rates
-    std::array<Scalar, 3> guideRates{};
+    //std::array<Scalar, 3> guideRates{};
 
     /// Accumulated rates during balancing (sum of children's rates)
     std::array<Scalar, 3> rateSums{};
@@ -151,18 +168,20 @@ struct ProdGroupTreeNode {
     /// Visited flag for free-path checking
     bool visited{false};
 
+    /// Whether this node is a satellite group with fixed rates from GSATPROD
+    bool isSatellite{false};
+
     /// Whether this subtree is balanced
     bool isBalanced{false};
 
     /// Iteration counter for this node
     int balancingCount{0};
 
-    /// Mode category: mirrors MATLAB categories
-    /// "INDIVIDUAL", "GRUP", "TRANSPARENT", "NONE", "UNDETERMINED"
-    std::string modeCategory{"UNDETERMINED"};
+    /// Mode category: Group, Individual, None, Transparent, Satellite
+    //std::string modeCategory{"Group"};
 
     /// Explicit rates from preprocessing (cap_individual_and_sum)
-    std::array<Scalar, 3> explicitRates{};
+    //std::array<Scalar, 3> explicitRates{};
 
     /// Phase fractions for groups (used in target distribution)
     std::array<Scalar, 3> fractions{};

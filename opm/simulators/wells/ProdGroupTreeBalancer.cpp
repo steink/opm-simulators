@@ -36,7 +36,6 @@
 #include <opm/simulators/wells/BlackoilWellModelGeneric.hpp>
 #include <opm/simulators/wells/GroupState.hpp>
 #include <opm/simulators/wells/SingleWellState.hpp>
-#include <opm/simulators/wells/WellBhpThpCalculator.hpp>
 #include <opm/simulators/wells/WellInterfaceGeneric.hpp>
 #include <opm/simulators/wells/WellState.hpp>
 
@@ -50,6 +49,7 @@
 #include <numeric>
 #include <optional>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace Opm::ProdGroupTreeBalancer {
 
@@ -79,6 +79,40 @@ constexpr Scalar kDefaultUniformFraction = Scalar(1.0 / 3);
 constexpr int kOil   = 0;
 constexpr int kWater = 1;
 constexpr int kGas   = 2;
+
+// ---------------------------------------------------------------------------
+// Mode conversion helpers
+// ---------------------------------------------------------------------------
+
+/// Convert Group::ProductionCMode to Well::ProducerCMode for balancing.
+/// FLD and VREP are not valid for wells, so they map to CMODE_UNDEFINED.
+inline Well::ProducerCMode groupModeToWellMode(Group::ProductionCMode groupMode)
+{
+    switch (groupMode) {
+        case Group::ProductionCMode::ORAT: return Well::ProducerCMode::ORAT;
+        case Group::ProductionCMode::WRAT: return Well::ProducerCMode::WRAT;
+        case Group::ProductionCMode::GRAT: return Well::ProducerCMode::GRAT;
+        case Group::ProductionCMode::LRAT: return Well::ProducerCMode::LRAT;
+        case Group::ProductionCMode::RESV: return Well::ProducerCMode::RESV;
+        case Group::ProductionCMode::NONE: return Well::ProducerCMode::NONE;
+        default: return Well::ProducerCMode::CMODE_UNDEFINED;  // FLD, VREP, etc.
+    }
+}
+
+/// Convert Well::ProducerCMode to Group::ProductionCMode (for well's preferred mode).
+/// BHP, THP, GRUP, CRAT are well-specific and map to NONE for group representation.
+inline Group::ProductionCMode wellModeToGroupMode(Well::ProducerCMode wellMode)
+{
+    switch (wellMode) {
+        case Well::ProducerCMode::ORAT: return Group::ProductionCMode::ORAT;
+        case Well::ProducerCMode::WRAT: return Group::ProductionCMode::WRAT;
+        case Well::ProducerCMode::GRAT: return Group::ProductionCMode::GRAT;
+        case Well::ProducerCMode::LRAT: return Group::ProductionCMode::LRAT;
+        case Well::ProducerCMode::RESV: return Group::ProductionCMode::RESV;
+        case Well::ProducerCMode::NONE: return Group::ProductionCMode::NONE;
+        default: return Group::ProductionCMode::NONE;  // BHP, THP, GRUP, etc.
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Phase mapping helpers
@@ -148,6 +182,9 @@ Scalar rateForMode(const std::array<Scalar, 3>& rates,
         return -rates[kGas];
     case Well::ProducerCMode::LRAT:
         return -(rates[kOil] + rates[kWater]);
+    case Well::ProducerCMode::BHP:
+    case Well::ProducerCMode::THP:
+        return -(rates[kOil] + rates[kWater] + rates[kGas]);
     case Well::ProducerCMode::RESV:
     {
         Scalar resv = 0;
@@ -183,6 +220,9 @@ Scalar linearTermForMode(const std::array<Scalar, 3>& lt,
         return lt[kGas];
     case Well::ProducerCMode::LRAT:
         return lt[kOil] + lt[kWater];
+    case Well::ProducerCMode::BHP:
+    case Well::ProducerCMode::THP:
+        return (lt[kOil] + lt[kWater] + lt[kGas]);
     case Well::ProducerCMode::RESV:
     {
         Scalar v = 0;
@@ -196,13 +236,52 @@ Scalar linearTermForMode(const std::array<Scalar, 3>& lt,
     }
 }
 
+template<class Scalar>
+Scalar positiveRateForMode(const std::array<Scalar, 3>& positiveRates,
+                           Well::ProducerCMode mode,
+                           const std::array<Scalar, 3>& resvCoeff)
+{
+    if (mode == Well::ProducerCMode::BHP) {
+        return positiveRates[kOil] + positiveRates[kWater] + positiveRates[kGas];
+    }
+
+    const std::array<Scalar, 3> negRates{
+        -positiveRates[kOil],
+        -positiveRates[kWater],
+        -positiveRates[kGas]
+    };
+    return rateForMode(negRates, mode, resvCoeff);
+}
+
+template<class Scalar>
+Scalar guideSlopeForMode(const std::array<Scalar, 3>& guideRateSums,
+                         Well::ProducerCMode mode,
+                         const std::array<Scalar, 3>& resvCoeff)
+{
+    if (mode == Well::ProducerCMode::BHP) {
+        return guideRateSums[kOil] + guideRateSums[kWater] + guideRateSums[kGas];
+    }
+
+    return linearTermForMode(guideRateSums, mode, resvCoeff);
+}
+
+inline int canonicalRateIndexForMode(Well::ProducerCMode mode)
+{
+    switch (mode) {
+        case Well::ProducerCMode::ORAT: return kOil;
+        case Well::ProducerCMode::WRAT: return kWater;
+        case Well::ProducerCMode::GRAT: return kGas;
+        default: return -1;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // IPR-based BHP→rate conversion
 // ---------------------------------------------------------------------------
 
 /// Convert BHP limit to an equivalent total rate using the linear IPR model
 /// q = ipr_a - ipr_b * bhp.  Stores the result as the BHP control mode in
-/// node.individualLimits.  Does nothing if ipr_b_sum <= 0.
+/// node.Limits.  Does nothing if ipr_b_sum <= 0.
 template<class Scalar, typename IndexTraits>
 void addBhpRateLimit(ProdGroupTreeNode<Scalar>& node,
                      const SingleWellState<Scalar, IndexTraits>& ws,
@@ -234,7 +313,7 @@ void addBhpRateLimit(ProdGroupTreeNode<Scalar>& node,
     // Store as ORAT-equivalent using the current phase fractions.
     // (We cannot store individual phase rates here without the current fractions,
     //  so we store as a total-rate limit and key it under ProducerCMode::BHP.)
-    node.individualLimits[Well::ProducerCMode::BHP] = q_limit;
+    node.Limits[Well::ProducerCMode::BHP] = q_limit;
 }
 
 // ---------------------------------------------------------------------------
@@ -263,7 +342,7 @@ Scalar getGuideRateForMode(const std::string& name,
                            Group::ProductionCMode ctrlMode,
                            const GuideRate& guideRate)
 {
-    if (!guideRate.has(name)) return kUniformWeight<Scalar>;
+    //if (!guideRate.has(name)) return kUniformWeight<Scalar>;
     const auto target = productionCModeToGuideTarget(ctrlMode);
     if (target == GuideRateModel::Target::NONE) return kUniformWeight<Scalar>;
     // GuideRate::RateVector is {oil, gas, water} (not canonical [oil,water,gas])
@@ -278,21 +357,6 @@ Scalar getGuideRateForMode(const std::string& name,
 /// Safe lookup of a WellInterfaceGeneric by name.  Returns nullptr if not found
 /// in the local well container (e.g., the well belongs to another MPI rank).
 template<class Scalar, typename IndexTraits>
-const WellInterfaceGeneric<Scalar, IndexTraits>*
-findGenericWell(const BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
-                const std::string& wellName)
-{
-    for (const auto* w : wellModel.genericWells()) {
-        if (w->name() == wellName) return w;
-    }
-    return nullptr;
-}
-
-// ---------------------------------------------------------------------------
-// buildTree helpers
-// ---------------------------------------------------------------------------
-
-template<class Scalar, typename IndexTraits>
 void populateWellNode(ProdGroupTreeNode<Scalar>& node,
                       const std::string& wellName,
                       const Schedule& schedule,
@@ -303,7 +367,8 @@ void populateWellNode(ProdGroupTreeNode<Scalar>& node,
                       int reportStep,
                       int fipnum,
                       int pvtreg,
-                      const BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel)
+                      const BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
+                      const std::unordered_map<std::string, const WellInterfaceGeneric<Scalar, IndexTraits>*>& genericWellByName)
 {
     const auto& ws = wellState.well(wellName);
     const auto& pu = ws.pu;
@@ -312,39 +377,22 @@ void populateWellNode(ProdGroupTreeNode<Scalar>& node,
     node.name   = wellName;
     node.type   = ProdNodeType::Well;
     node.parent = eclWell.groupName();
-    node.allowGroupControl = eclWell.isAvailableForGroupControl();
+    node.availableForGroupControl = eclWell.isAvailableForGroupControl();
+    node.hasGuideRate = true;
+    node.efficiencyFactor = eclWell.getEfficiencyFactor()
+                          * ws.efficiency_scaling_factor;
 
     // Rates: canonical 3-component (negative = production)
     node.rates = toCanonical3(ws.surface_rates, pu);
 
     // Current control mode
-    node.activeIndividualCtrl = ws.production_cmode;
-    node.preferredCtrl        = ws.production_cmode;
+    node.mode = ws.production_cmode;
 
-    // Determine ctrlStatus from current control mode
+    // Determine modeCategory from current control mode
     if (ws.production_cmode == Well::ProducerCMode::GRUP) {
-        node.ctrlStatus = ProdNodeCtrlStatus::GroupControlled;
+        node.modeCategory= ProdNodeModeCategory::Group;
     } else {
-        node.ctrlStatus = ProdNodeCtrlStatus::IndividualControlled;
-    }
-
-    // Phase fractions (for distributing a group target to phases)
-    const Scalar totalRate = std::accumulate(node.rates.begin(), node.rates.end(), Scalar(0),
-                                             [](Scalar s, Scalar r){ return s + (-r); });
-    if (totalRate > Scalar(0)) {
-        for (int c = 0; c < 3; ++c) {
-            node.wellRateFractions[c] = -node.rates[c] / totalRate;
-        }
-    } else {
-        // Default fractions when no production: equal share among active phases.
-        // The exact value matters only when the algorithm initializes with small rates.
-        node.wellRateFractions[kOil]   = pu.phaseIsActive(IndexTraits::oilPhaseIdx)   ? kDefaultUniformFraction<Scalar> : Scalar(0);
-        node.wellRateFractions[kWater] = pu.phaseIsActive(IndexTraits::waterPhaseIdx) ? kDefaultUniformFraction<Scalar> : Scalar(0);
-        node.wellRateFractions[kGas]   = pu.phaseIsActive(IndexTraits::gasPhaseIdx)   ? kDefaultUniformFraction<Scalar> : Scalar(0);
-        const Scalar sumFrac = node.wellRateFractions[0] + node.wellRateFractions[1] + node.wellRateFractions[2];
-        if (sumFrac > Scalar(0)) {
-            for (auto& f : node.wellRateFractions) { f /= sumFrac; }
-        }
+        node.modeCategory= ProdNodeModeCategory::Individual;
     }
 
     // RESV conversion coefficients for this well
@@ -364,129 +412,34 @@ void populateWellNode(ProdGroupTreeNode<Scalar>& node,
     // Individual limits
     if (!eclWell.isProducer()) return;
 
-    const auto controls = eclWell.productionControls(summaryState);
-
-    if (controls.hasControl(Well::ProducerCMode::ORAT) && controls.oil_rate > Scalar(0)) {
-        node.individualLimits[Well::ProducerCMode::ORAT] = controls.oil_rate;
+    const auto gwIt = genericWellByName.find(wellName);
+    if (gwIt == genericWellByName.end() || gwIt->second == nullptr) {
+        return;
     }
-    if (controls.hasControl(Well::ProducerCMode::WRAT) && controls.water_rate > Scalar(0)) {
-        node.individualLimits[Well::ProducerCMode::WRAT] = controls.water_rate;
+    const auto* genWell = gwIt->second;
+
+    DeferredLogger tmpLogger;
+    const auto strictest = genWell->estimateStrictestProductionLimitForBalancer(wellState,
+                                                                                 summaryState,
+                                                                                 tmpLogger);
+    if (!strictest.has_value()) {
+        node.Limits.clear();
+        return;
     }
-    if (controls.hasControl(Well::ProducerCMode::GRAT) && controls.gas_rate > Scalar(0)) {
-        node.individualLimits[Well::ProducerCMode::GRAT] = controls.gas_rate;
-    }
-    if (controls.hasControl(Well::ProducerCMode::LRAT) && controls.liquid_rate > Scalar(0)) {
-        node.individualLimits[Well::ProducerCMode::LRAT] = controls.liquid_rate;
-    }
-    if (controls.hasControl(Well::ProducerCMode::RESV) && controls.resv_rate > Scalar(0)) {
-        node.individualLimits[Well::ProducerCMode::RESV] = controls.resv_rate;
-    }
+    const auto [strictestMode, strictestLimit] = strictest.value();
 
-    // BHP / THP limit via IPR.
-    // Use estimateStableBhp to find the BHP at the THP operating point, which is
-    // more robust than forced_bhp_from_thp.  If no stable operating point exists
-    // at the THP limit, the well cannot be kept open and is assigned zero rates.
-    {
-        Scalar effectiveBhpLimit = Scalar(0);
-        bool   hasBhpConstraint  = false;
-
-        if (controls.hasControl(Well::ProducerCMode::BHP) && controls.bhp_limit > Scalar(0)) {
-            effectiveBhpLimit = controls.bhp_limit;
-            hasBhpConstraint  = true;
-        }
-
-        // Attempt to get the stable BHP corresponding to the THP limit
-        const auto* genWell = findGenericWell(wellModel, wellName);
-        if (genWell != nullptr) {
-            WellBhpThpCalculator<Scalar, IndexTraits> calc(*genWell);
-            if (calc.wellHasTHPConstraints(summaryState)) {
-                // Compute reference density as a weighted average based on surface rates
-                // Standard surface densities: oil ~850 kg/m³, water ~1000 kg/m³, gas ~1 kg/m³
-                const Scalar oilDens   = Scalar(850.0);
-                const Scalar waterDens = Scalar(1000.0);
-                const Scalar gasDens   = Scalar(1.0);
-                
-                Scalar totalRate = Scalar(0);
-                Scalar weightedDens = Scalar(0);
-                const auto& rates = node.rates; // canonical [oil, water, gas], negative = production
-                if (pu.phaseIsActive(IndexTraits::oilPhaseIdx) && rates[kOil] < Scalar(0)) {
-                    totalRate += -rates[kOil];
-                    weightedDens += -rates[kOil] * oilDens;
-                }
-                if (pu.phaseIsActive(IndexTraits::waterPhaseIdx) && rates[kWater] < Scalar(0)) {
-                    totalRate += -rates[kWater];
-                    weightedDens += -rates[kWater] * waterDens;
-                }
-                if (pu.phaseIsActive(IndexTraits::gasPhaseIdx) && rates[kGas] < Scalar(0)) {
-                    totalRate += -rates[kGas];
-                    weightedDens += -rates[kGas] * gasDens;
-                }
-                const Scalar refDens = (totalRate > Scalar(0)) ? (weightedDens / totalRate) : oilDens;
-                
-                const auto stableBhp = calc.estimateStableBhp(
-                    wellState, eclWell, ws.surface_rates,
-                    refDens, summaryState);
-
-                if (!stableBhp.has_value()) {
-                    // No stable operating point at THP limit: well cannot produce.
-                    node.rates        = {};
-                    node.ctrlStatus   = ProdNodeCtrlStatus::IndividualControlled;
-                    node.activeIndividualCtrl = Well::ProducerCMode::THP;
-                    node.individualLimits.clear();
-                    return; // no further limit processing needed
-                }
-
-                // THP is more restrictive if the stable BHP is higher than the
-                // BHP limit (higher BHP → lower production for a producer).
-                if (stableBhp.value() > effectiveBhpLimit) {
-                    effectiveBhpLimit = stableBhp.value();
-                    hasBhpConstraint  = true;
-                }
-            }
-        } else if (ws.forced_bhp_from_thp.has_value()) {
-            // Fallback when the well's WellInterfaceGeneric is not in the local
-            // container (e.g., in a distributed-wells setup on a non-owner rank).
-            // forced_bhp_from_thp is the BHP computed from the VFP table at the
-            // current operating point under THP control; less accurate than
-            // estimateStableBhp but better than ignoring the THP constraint.
-            // TODO: Remove once all wells are guaranteed to be on rank 0.
-            if (ws.forced_bhp_from_thp.value() > effectiveBhpLimit) {
-                effectiveBhpLimit = ws.forced_bhp_from_thp.value();
-                hasBhpConstraint  = true;
-            }
-        }
-
-        if (hasBhpConstraint) {
-            addBhpRateLimit(node, ws, effectiveBhpLimit);
-        }
+    if (strictestMode == Well::ProducerCMode::THP && strictestLimit <= Scalar(0)) {
+        // No stable operating point at THP limit: well cannot produce.
+        node.rates         = {};
+        node.modeCategory  = ProdNodeModeCategory::Individual;
+        node.mode          = Well::ProducerCMode::THP;
+        node.Limits.clear();
+        return;
     }
 
-    // Pre-compute the single binding limit for this well.
-    // The direction of rate change is fixed (wellRateFractions), so we can
-    // determine at construction time which limit will be hit first.
-    // Keeping only the binding limit simplifies parametrizeTree for wells.
-    if (!node.individualLimits.empty()) {
-        const auto& lt = node.wellRateFractions; // direction (positive = more production)
-        Well::ProducerCMode bindingMode = Well::ProducerCMode::CMODE_UNDEFINED;
-        Scalar minAlpha = std::numeric_limits<Scalar>::max();
-
-        for (const auto& [mode, limit] : node.individualLimits) {
-            const Scalar currentRate = rateForMode(node.rates, mode, node.resvCoeff);
-            const Scalar ltForMode   = linearTermForMode(lt, mode, node.resvCoeff);
-            if (ltForMode <= Scalar(0)) continue;
-            const Scalar remaining = limit - currentRate;
-            const Scalar alpha = (remaining <= Scalar(0)) ? Scalar(0) : remaining / ltForMode;
-            if (alpha < minAlpha) {
-                minAlpha    = alpha;
-                bindingMode = mode;
-            }
-        }
-
-        if (bindingMode != Well::ProducerCMode::CMODE_UNDEFINED) {
-            const Scalar bindingLimit = node.individualLimits.at(bindingMode);
-            node.individualLimits.clear();
-            node.individualLimits[bindingMode] = bindingLimit;
-        }
+    node.Limits.clear();
+    if (strictestLimit > Scalar(0)) {
+        node.Limits[strictestMode] = strictestLimit;
     }
 }
 
@@ -511,9 +464,11 @@ void populateGroupNode(ProdGroupTreeNode<Scalar>& node,
 
     // FIELD group is never available for group control (has no parent to control it)
     if (groupName == "FIELD") {
-        node.allowGroupControl = false;
+        node.availableForGroupControl = false;
+        node.efficiencyFactor = Scalar(1);
     } else {
-        node.allowGroupControl = group.productionGroupControlAvailable();
+        node.availableForGroupControl = group.productionGroupControlAvailable();
+        node.efficiencyFactor = group.getGroupEfficiencyFactor();
     }
 
     // Children
@@ -533,8 +488,11 @@ void populateGroupNode(ProdGroupTreeNode<Scalar>& node,
         const auto& final_gsatprod = schedule.back().gsatprod();
         if (final_gsatprod.has(groupName)) {
             isSatellite = true;
-            OpmLog::info(fmt::format("buildTree: {} identified as SATELLITE group (GSATPROD defined in schedule)",
-                                     groupName));
+            //OpmLog::info(fmt::format("buildTree: {} identified as SATELLITE group (GSATPROD defined in schedule)",
+            //                         groupName));
+            node.isSatellite = true;
+            node.modeCategory = ProdNodeModeCategory::Satellite;
+            node.availableForGroupControl = false; // Satellite groups cannot be controlled by parent
         }
     }
 
@@ -565,24 +523,20 @@ void populateGroupNode(ProdGroupTreeNode<Scalar>& node,
         ? groupState.production_control(groupName)
         : Group::ProductionCMode::NONE;
 
-    node.ownCtrlMode = ctrl;
+    //node.ownCtrlMode = ctrl;
+    node.mode = groupModeToWellMode(ctrl); // Convert to well mode for balancing (FLD/VREP→CMODE_UNDEFINED)
 
     // Determine control status:
     // - Satellite groups have fixed rates and should not be controlled by parent groups
     // - For other groups: check if available for group control
     if (isSatellite) {
-        node.ctrlStatus = ProdNodeCtrlStatus::Satellite;
-        node.allowGroupControl = false;  // Satellite groups cannot be controlled by parent
-    } else if (node.allowGroupControl) {
-        // Available for group control
-        node.ctrlStatus = ProdNodeCtrlStatus::GroupControlled;
-    } else {
-        // Not available for group control
-        node.ctrlStatus = ProdNodeCtrlStatus::Undetermined;
+        node.modeCategory= ProdNodeModeCategory::Satellite;
+        node.availableForGroupControl = false;  // Satellite groups cannot be controlled by parent
+        node.isSatellite = true;
     }
 
-    OpmLog::info(fmt::format("buildTree: group {} allowGroupControl={} satellite={}",
-                             groupName, node.allowGroupControl, isSatellite));
+    //OpmLog::info(fmt::format("buildTree: group {} availableForGroupControl={} satellite={}",
+    //                         groupName, node.availableForGroupControl, isSatellite));
 
     // RESV conversion coefficients for this group
     {
@@ -604,44 +558,43 @@ void populateGroupNode(ProdGroupTreeNode<Scalar>& node,
 
     // Populate individual limits from group production controls
     if (group.isProductionGroup()) {
-        const auto controls = group.productionControls(summaryState);
+        const auto controls = schedule.getGroup(groupName, reportStep).productionControls(summaryState);
+
+        // Set preferredMode from schedule control mode (store Group::ProductionCMode directly)
+        // FLD and NONE will be resolved via inheritance later
+        node.preferredMode = controls.cmode;
+
+        // A group participates in guide-rate balancing if item 10 is present or if
+        // it has active individual limits that keep it non-transparent.
+        node.hasGuideRate = (controls.guide_rate_def != Group::GuideRateProdTarget::NO_GUIDE_RATE);// ||
+                            //(node.availableForGroupControl && !node.Limits.empty()));
         
-        // Set preferredCtrl from schedule control mode (not from active groupState control)
-        // Map Group::ProductionCMode to Well::ProducerCMode
-        switch (controls.cmode) {
-        case Group::ProductionCMode::ORAT:
-            node.preferredCtrl = Well::ProducerCMode::ORAT; break;
-        case Group::ProductionCMode::WRAT:
-            node.preferredCtrl = Well::ProducerCMode::WRAT; break;
-        case Group::ProductionCMode::GRAT:
-            node.preferredCtrl = Well::ProducerCMode::GRAT; break;
-        case Group::ProductionCMode::LRAT:
-            node.preferredCtrl = Well::ProducerCMode::LRAT; break;
-        case Group::ProductionCMode::RESV:
-            node.preferredCtrl = Well::ProducerCMode::RESV; break;
-        case Group::ProductionCMode::FLD:
-            node.preferredCtrl = Well::ProducerCMode::GRUP; break;  // FLD means follow parent
-        case Group::ProductionCMode::NONE:
-        default:
-            node.preferredCtrl = Well::ProducerCMode::NONE; break;
-        }
-        
+        const auto& action = controls.group_limit_action; 
+        const bool actionAllIsRate = (action.allRates == Opm::Group::ExceedAction::RATE);
         // Populate individual limits from schedule controls
         if (group.has_control(Group::ProductionCMode::ORAT) && controls.oil_target > Scalar(0)) {
-            node.individualLimits[Well::ProducerCMode::ORAT] = controls.oil_target;
+            if (actionAllIsRate || action.oil == Opm::Group::ExceedAction::RATE) {
+                node.Limits[Well::ProducerCMode::ORAT] = controls.oil_target;
+            }
         }
         if (group.has_control(Group::ProductionCMode::WRAT) && controls.water_target > Scalar(0)) {
-            node.individualLimits[Well::ProducerCMode::WRAT] = controls.water_target;
+            if (actionAllIsRate || action.water == Opm::Group::ExceedAction::RATE) {
+                node.Limits[Well::ProducerCMode::WRAT] = controls.water_target;
+            }
         }
         if (group.has_control(Group::ProductionCMode::GRAT) && controls.gas_target > Scalar(0)) {
-            node.individualLimits[Well::ProducerCMode::GRAT] = controls.gas_target;
+            if (actionAllIsRate || action.gas == Opm::Group::ExceedAction::RATE) {
+                node.Limits[Well::ProducerCMode::GRAT] = controls.gas_target;
+            }
         }
         if (group.has_control(Group::ProductionCMode::LRAT) && controls.liquid_target > Scalar(0)) {
-            node.individualLimits[Well::ProducerCMode::LRAT] = controls.liquid_target;
+            if (actionAllIsRate || action.liquid == Opm::Group::ExceedAction::RATE) {
+                node.Limits[Well::ProducerCMode::LRAT] = controls.liquid_target;
+            }
         }
-        if (group.has_control(Group::ProductionCMode::RESV) && controls.resv_target > Scalar(0)) {
-            node.individualLimits[Well::ProducerCMode::RESV] = controls.resv_target;
-        }
+        //if (group.has_control(Group::ProductionCMode::RESV) && controls.resv_target > Scalar(0)) {
+        //    node.Limits[Well::ProducerCMode::RESV] = controls.resv_target;
+        //}
     }
 }
 
@@ -665,8 +618,27 @@ Tree<Scalar> buildTree(const BlackoilWellModelGeneric<Scalar, IndexTraits>& well
     // Get RESV conversion parameters (fipnum, pvtreg)
     const auto [fipnum, pvtreg] = wellModel.getGroupFipnumAndPvtreg();
 
+    std::unordered_map<std::string, const WellInterfaceGeneric<Scalar, IndexTraits>*> genericWellByName;
+    genericWellByName.reserve(wellModel.genericWells().size());
+    for (const auto* gw : wellModel.genericWells()) {
+        if (gw != nullptr) {
+            genericWellByName.emplace(gw->name(), gw);
+        }
+    }
+
     Tree<Scalar> tree;
 
+    std::function<bool(const SingleWellState<Scalar, IndexTraits>&)> 
+            validWellNode = [&](const SingleWellState<Scalar, IndexTraits>& ws) {
+        // A well node is valid if it is a producer and has non-zero rates
+        if (!ws.producer) return false;
+        for (const auto& r : ws.surface_rates) {
+            if (std::abs(r) != Scalar(0)) {
+                return true;
+            }
+        }
+        return false;
+    };
     // Use a stack-based traversal starting from FIELD
     std::vector<std::string> toVisit = {"FIELD"};
     while (!toVisit.empty()) {
@@ -677,11 +649,11 @@ Tree<Scalar> buildTree(const BlackoilWellModelGeneric<Scalar, IndexTraits>& well
             // Well node: only populate if locally available (producer only)
             if (wellState.has(name)) {
                 const auto& ws = wellState.well(name);
-                if (ws.producer) {
+                if (validWellNode(ws)) {
                     auto& node = tree[name];
                     populateWellNode(node, name, schedule, wellState, groupState,
                                      guideRate, summaryState, reportStep,
-                                     fipnum, pvtreg, wellModel);
+                                     fipnum, pvtreg, wellModel, genericWellByName);
                 }
             }
         } else {
@@ -724,85 +696,57 @@ Tree<Scalar> buildTree(const BlackoilWellModelGeneric<Scalar, IndexTraits>& well
         }
     };
     fillMissingGroupRates("FIELD");
-
     // Top-down pass: propagate effective group control modes, compute guide rates,
     // propagate preferred control, and detect transparent groups.
-    std::function<void(const std::string&, Group::ProductionCMode, Well::ProducerCMode)>
-    propagateGuideRates = [&](const std::string& groupName,
-                              Group::ProductionCMode inheritedMode,
-                              Well::ProducerCMode inheritedPreferredCtrl)
+    std::function<void(const std::string&, Well::ProducerCMode, Group::ProductionCMode)>
+    propagateGuideRatesAndMode = [&](const std::string& nodeName,
+                                    Well::ProducerCMode inheritedMode,
+                                    Group::ProductionCMode inheritedpreferredMode)
     {
-        if (tree.count(groupName) == 0) return;
-        auto& gnode = tree.at(groupName);
-
-        // Effective mode this group uses to issue targets to its children.
-        Group::ProductionCMode effectiveMode = gnode.ownCtrlMode;
-        if (effectiveMode == Group::ProductionCMode::FLD ||
-            effectiveMode == Group::ProductionCMode::NONE) {
-            effectiveMode = inheritedMode; // relay parent's mode
+        if (tree.count(nodeName) == 0) return;
+        auto& node = tree.at(nodeName);
+        if (node.isSatellite) return; // Satellite groups have fixed rates
+        //auto modeToChild = inheritedMode;
+        if (!node.availableForGroupControl) {
+            // Not available for group control (no inheritance from above), should
+            // have non-defaulted preferredMode
+            const auto& preferredMode = node.preferredMode;
+            if(preferredMode == Group::ProductionCMode::FLD ||
+               preferredMode == Group::ProductionCMode::NONE) {
+                //OpmLog::warning(fmt::format("Group {} is not available for group control but has preferredMode {}. "
+                //                            "This may indicate a problem in the schedule or an unsupported case for the balancer.",
+                //                            nodeName, preferredMode == Group::ProductionCMode::FLD ? "FLD" : "NONE"));
+            }
+            //modeToChild = node.mode;
+        } else {
+            // If mode is given as FLD/NONE, we set its preferredMode to the inherited preferred control
+            if(node.preferredMode == Group::ProductionCMode::FLD ||
+               node.preferredMode == Group::ProductionCMode::NONE) {
+                node.preferredMode = inheritedpreferredMode; // Inherit preferred control from parent
+            }
+            if (!(node.modeCategory == ProdNodeModeCategory::Individual)) {
+                // Inherit control mode from parent if not individually controlled
+                node.mode = inheritedMode;
+            }
         }
-        // Store the effective mode back so setTargets can use it.
-        gnode.ownCtrlMode = effectiveMode;
-
-        // Propagate preferred control for FIELD/NONE cases
-        if (gnode.preferredCtrl == Well::ProducerCMode::GRUP ||
-            gnode.preferredCtrl == Well::ProducerCMode::NONE) {
-            gnode.preferredCtrl = inheritedPreferredCtrl;
+        // Set guide rate for this node with current mode
+        if (node.hasGuideRate) {
+            const bool validMode = (!(node.mode == Well::ProducerCMode::CMODE_UNDEFINED)) &&
+                                   (!(node.mode == Well::ProducerCMode::NONE));
+            const auto groupMode = validMode ? wellModeToGroupMode(node.mode) : node.preferredMode;
+            node.groupTarget.ctrlMode = groupMode;
+            node.groupTarget.guideRate = getGuideRateForMode(nodeName, node.rates, groupMode, guideRate);
+            // also fill groupTargetFallback with the preferredMode guide rate
+            const auto groupModeFallback = node.preferredMode;
+            node.groupTargetFallback.ctrlMode = groupModeFallback;
+            node.groupTargetFallback.guideRate = getGuideRateForMode(nodeName, node.rates, groupModeFallback, guideRate);
         }
-
-        for (const auto& childName : gnode.children) {
-            if (tree.count(childName) == 0) continue;
-            auto& child = tree.at(childName);
-            child.groupTarget.ctrlMode  = effectiveMode;
-            child.groupTarget.guideRate =
-                getGuideRateForMode(childName, child.rates, effectiveMode, guideRate);
-
-            // Detect if this node has a guide rate
-            child.hasGuideRate = guideRate.has(childName);
-
-            // Compute guide rates for all control modes
-            const std::array<Group::ProductionCMode, 5> modes = {
-                Group::ProductionCMode::ORAT,
-                Group::ProductionCMode::WRAT,
-                Group::ProductionCMode::GRAT,
-                Group::ProductionCMode::LRAT,
-                Group::ProductionCMode::RESV
-            };
-            for (const auto& mode : modes) {
-                const auto grForMode = getGuideRateForMode(childName, child.rates, mode, guideRate);
-                // Map Group::ProductionCMode to Well::ProducerCMode for storage
-                Well::ProducerCMode wellMode;
-                switch (mode) {
-                    case Group::ProductionCMode::ORAT: wellMode = Well::ProducerCMode::ORAT; break;
-                    case Group::ProductionCMode::WRAT: wellMode = Well::ProducerCMode::WRAT; break;
-                    case Group::ProductionCMode::GRAT: wellMode = Well::ProducerCMode::GRAT; break;
-                    case Group::ProductionCMode::LRAT: wellMode = Well::ProducerCMode::LRAT; break;
-                    case Group::ProductionCMode::RESV: wellMode = Well::ProducerCMode::RESV; break;
-                    default: continue;
-                }
-                child.guideRatesForMode[wellMode] = grForMode;
-            }
-
-            // Populate guideRates array [oil, water, gas] for ORAT, WRAT, GRAT
-            child.guideRates[kOil]   = child.guideRatesForMode[Well::ProducerCMode::ORAT];
-            child.guideRates[kWater] = child.guideRatesForMode[Well::ProducerCMode::WRAT];
-            child.guideRates[kGas]   = child.guideRatesForMode[Well::ProducerCMode::GRAT];
-
-            // Propagate preferred control for FIELD/NONE cases
-            if (child.preferredCtrl == Well::ProducerCMode::GRUP ||
-                child.preferredCtrl == Well::ProducerCMode::NONE) {
-                child.preferredCtrl = gnode.preferredCtrl;
-            }
-
-            if (child.type == ProdNodeType::Group) {
-                propagateGuideRates(childName, effectiveMode, gnode.preferredCtrl);
-            }
+        // Propagate effective control mode to children
+        for (const auto& childName : node.children) {
+            propagateGuideRatesAndMode(childName, node.mode, node.preferredMode);
         }
     };
-    // ORAT is the ultimate fallback if FIELD has no control mode set.
-    // Use ORAT as the initial preferred control as well.
-    propagateGuideRates("FIELD", Group::ProductionCMode::ORAT, Well::ProducerCMode::ORAT);
-
+    propagateGuideRatesAndMode("FIELD", Well::ProducerCMode::CMODE_UNDEFINED, Group::ProductionCMode::NONE);
     return tree;
 }
 
@@ -810,10 +754,16 @@ Tree<Scalar> buildTree(const BlackoilWellModelGeneric<Scalar, IndexTraits>& well
 
 template<class Scalar>
 std::vector<std::string> getSubTreeOrdering(const Tree<Scalar>& tree,
-                                             const std::string& rootName)
+                                            const std::string& rootName)
 {
+    // Collect all rootnodes of subtrees that needs to be balanced individually. This 
+    // includes:
+    // - top-most node with a given limit (often the FIELD group, but can be a subgroup if FIELD has no limits)
+    // - satellite groups (have fixed rates, not controlled by parent)
+    // - groups that are not available for group control (e.g., have GCONPROD item 8 = NO)
+    // - wells that are not available for group control (e.g., have WGRUPCON item 2 = NO)
     // Post-order traversal: leaves first, root last.
-    OpmLog::info(fmt::format("getSubTreeOrdering: starting from {}", rootName));
+    //OpmLog::info(fmt::format("getSubTreeOrdering: starting from {}", rootName));
     std::vector<std::string> ordering;
     std::vector<std::string> stack;
     stack.push_back(rootName);
@@ -821,7 +771,7 @@ std::vector<std::string> getSubTreeOrdering(const Tree<Scalar>& tree,
     int iterCount = 0;
     while (!stack.empty()) {
         if (++iterCount > 1000) {
-            OpmLog::error("getSubTreeOrdering: stuck in loop after 1000 iterations");
+            //OpmLog::error("getSubTreeOrdering: stuck in loop after 1000 iterations");
             break;
         }
         const std::string name = stack.back();
@@ -830,8 +780,22 @@ std::vector<std::string> getSubTreeOrdering(const Tree<Scalar>& tree,
         const auto& node = tree.at(name);
         // Only include groups that are NOT available for group control
         // (FIELD, satellite groups, groups with GCONPROD item 8 = NO)
-        if (node.type == ProdNodeType::Group && !node.allowGroupControl) {
+        if (node.isSatellite) {
+            // Satellite groups are always included (have fixed rates, not controlled by parent)
             ordering.push_back(name);
+        } else {
+            if (node.type == ProdNodeType::Group && !node.availableForGroupControl) {
+                // if group has no limits (e.g., no preferredMode) it's children can't be controlled
+                if (node.preferredMode == Group::ProductionCMode::NONE) {
+                    for (const auto& child : node.children) {
+                        if (tree.count(child) > 0) {
+                            ordering.push_back(child);
+                        }
+                    }
+                } else {
+                    ordering.push_back(name);
+                }
+            }
         }
         // Push children before the current node so they appear first in output
         for (const auto& child : node.children) {
@@ -843,9 +807,9 @@ std::vector<std::string> getSubTreeOrdering(const Tree<Scalar>& tree,
 
     // Reverse so children appear before parents (post-order)
     std::ranges::reverse(ordering);
-    OpmLog::info(fmt::format("getSubTreeOrdering: found {} nodes: {}",
-                             ordering.size(),
-                             fmt::join(ordering, ", ")));
+    //OpmLog::info(fmt::format("getSubTreeOrdering: found {} nodes: {}",
+    //                         ordering.size(),
+    //                         fmt::join(ordering, ", ")));
     return ordering;
 }
 
@@ -868,7 +832,7 @@ bool hasFreePath(const Tree<Scalar>& tree,
     if (node.parent.empty() || tree.count(node.parent) == 0) return false;
 
     const auto& parent = tree.at(node.parent);
-    const bool isFreeStep = (parent.modeCategory == "TRANSPARENT") && !parent.visited;
+    const bool isFreeStep = (parent.modeCategory == ProdNodeModeCategory::Transparent) && !parent.visited;
 
     return isFreeStep && hasFreePath(tree, node.parent, nodeControl);
 }
@@ -883,14 +847,17 @@ void incrementParentRateSums(Tree<Scalar>& tree,
     if (tree.count(nodeName) == 0) return;
     const auto& node = tree.at(nodeName);
 
-    // Determine rates to add (convert to positive production for rateSums)
+    // Determine rates to add (convert to positive production for rateSums,
+    // scaled by the node's own efficiency factor so the parent sees the
+    // efficiency-adjusted contribution).
     std::array<Scalar, 3> ratesToAdd;
     if (rates.has_value()) {
+        // Caller already provides the delta in parent-frame units.
         ratesToAdd = rates.value();
     } else {
-        // node.rates are negative (production), convert to positive for rateSums
+        // node.rates are negative (production); convert to positive and scale.
         for (int c = 0; c < 3; ++c) {
-            ratesToAdd[c] = -node.rates[c];
+            ratesToAdd[c] = node.efficiencyFactor * (-node.rates[c]);
         }
     }
 
@@ -947,7 +914,7 @@ getLocalTreeDescendants(const Tree<Scalar>& tree, const std::string& nodeName)
         if (tree.count(childName) == 0) continue;
         const auto& child = tree.at(childName);
 
-        if (!child.allowGroupControl) {
+        if (!child.availableForGroupControl) {
             df.push_back(childName);
         } else if (child.hasGuideRate) {
             d.push_back(childName);
@@ -965,14 +932,31 @@ getLocalTreeDescendants(const Tree<Scalar>& tree, const std::string& nodeName)
 }
 
 // ---------------------------------------------------------------------------
+template<class Scalar>
+void updateGuideRatesForMode(Tree<Scalar>& tree,
+                             const std::vector<std::string>& c,
+                             Well::ProducerCMode mode,
+                             const GuideRate& guideRate)
+{
+    const auto modeAsGroupMode = wellModeToGroupMode(mode);
+    // Update guide rates for children if needed (e.g., if mode changed)
+    for (const auto& childName : c) {
+        if (tree.count(childName) == 0) continue;
+        auto& child = tree.at(childName);
+        if (child.groupTarget.ctrlMode != modeAsGroupMode) {
+            child.groupTarget.ctrlMode = modeAsGroupMode;
+            child.groupTarget.guideRate = getGuideRateForMode(childName, child.rates, modeAsGroupMode, guideRate);
+        }
+    }
+}
 
 template<class Scalar>
 void resetRatesAndGuideRateSums(Tree<Scalar>& tree,
-                                 const std::vector<std::string>& c,
-                                 const std::vector<std::string>& c_fixed,
-                                 const std::vector<std::string>& c_trans,
-                                 const std::string& origin,
-                                 Well::ProducerCMode mode)
+                                const std::vector<std::string>& c,
+                                const std::vector<std::string>& c_fixed,
+                                const std::vector<std::string>& c_trans,
+                                const std::string& origin,
+                                Well::ProducerCMode mode)
 {
     // Reset guide-rate-sums and rate-sums for all relevant nodes
     std::vector<std::string> allNodes = {origin};
@@ -991,30 +975,25 @@ void resetRatesAndGuideRateSums(Tree<Scalar>& tree,
     // Set transparent nodes category
     for (const auto& nodeName : c_trans) {
         if (tree.count(nodeName) > 0) {
-            tree.at(nodeName).modeCategory = "TRANSPARENT";
+            tree.at(nodeName).modeCategory = ProdNodeModeCategory::Transparent;
         }
-    }
-
-    // Convert mode to canonical index
-    int modeIdx = -1;
-    switch (mode) {
-        case Well::ProducerCMode::ORAT: modeIdx = kOil; break;
-        case Well::ProducerCMode::WRAT: modeIdx = kWater; break;
-        case Well::ProducerCMode::GRAT: modeIdx = kGas; break;
-        default: modeIdx = kOil; // fallback
     }
 
     if (tree.count(origin) == 0) return;
     const auto& originNode = tree.at(origin);
-    const Well::ProducerCMode modePreferred = originNode.preferredCtrl;
-    const bool modeIsPref = (mode == modePreferred);
+    const Group::ProductionCMode modePreferred = originNode.preferredMode;
+    // Convert mode to Group::ProductionCMode for comparison
+    const Group::ProductionCMode modeAsGroupMode = wellModeToGroupMode(mode);
+    const bool modeIsPref = (modeAsGroupMode == modePreferred);
 
     // Compute total guide rate for mode if not preferred
     Scalar guideSumOrigin = Scalar(0);
-    if (!modeIsPref && modeIdx >= 0) {
+    if (!modeIsPref) {
         for (const auto& childName : c) {
             if (tree.count(childName) > 0) {
-                guideSumOrigin += tree.at(childName).guideRates[modeIdx];
+                const auto& child = tree.at(childName);
+                const auto& activeTarget = child.useFallback ? child.groupTargetFallback : child.groupTarget;
+                guideSumOrigin += activeTarget.guideRate;
             }
         }
     }
@@ -1023,16 +1002,19 @@ void resetRatesAndGuideRateSums(Tree<Scalar>& tree,
     for (const auto& childName : c) {
         if (tree.count(childName) == 0) continue;
         auto& child = tree.at(childName);
+        child.useFallback = false;
 
         const auto& rates = child.rates;
 
         // Check for fallback condition (non-preferred mode with tiny fraction)
-        if (!modeIsPref && modeIdx >= 0) {
+        if (!modeIsPref) {
             const Scalar rateSum = std::accumulate(rates.begin(), rates.end(), Scalar(0),
                                                    [](Scalar s, Scalar r){ return s + (-r); });
-            const Scalar rateFracMode = (rateSum > Scalar(0)) ? (-rates[modeIdx] / rateSum) : Scalar(0);
+            const Scalar rateForCurrentMode = rateForMode(rates, mode, child.resvCoeff);
+            const Scalar rateFracMode = (rateSum > Scalar(0)) ? (rateForCurrentMode / rateSum) : Scalar(0);
+            const Scalar guideRateForMode = child.groupTarget.guideRate;
             const Scalar guideRatioMode = (guideSumOrigin > Scalar(0))
-                ? (child.guideRates[modeIdx] / guideSumOrigin) : Scalar(0);
+                ? (guideRateForMode / guideSumOrigin) : Scalar(0);
 
             if (rateFracMode < std::sqrt(std::numeric_limits<Scalar>::epsilon()) ||
                 guideRatioMode < std::sqrt(std::numeric_limits<Scalar>::epsilon())) {
@@ -1044,14 +1026,17 @@ void resetRatesAndGuideRateSums(Tree<Scalar>& tree,
             }
         }
 
-        // Set guide-rate sums proportional to rates
-        child.useFallback = false;
-        const Scalar guideRate = (modeIdx >= 0) ? child.guideRates[modeIdx] : Scalar(1);
-        const Scalar rateMagnitude = (modeIdx >= 0) ? -rates[modeIdx] : Scalar(1);
+        // Set guide-rate sums proportional to rates, scaled by the child's
+        // efficiency factor so parent-frame guide-rate sums and rate-sums are
+        // consistently in the same (parent) frame.
+        const auto& activeTarget = child.useFallback ? child.groupTargetFallback : child.groupTarget;
+        const Scalar guideRateValue = activeTarget.guideRate;
+        const Scalar rateMagnitude = rateForMode(rates, mode, child.resvCoeff);
 
         if (rateMagnitude > Scalar(0)) {
-            for (int c = 0; c < 3; ++c) {
-                child.guideRateSums[c] = (guideRate / rateMagnitude) * (-rates[c]);
+            for (int cmp = 0; cmp < 3; ++cmp) {
+                child.guideRateSums[cmp] =
+                    child.efficiencyFactor * (guideRateValue / rateMagnitude) * (-rates[cmp]);
             }
         } else {
             child.guideRateSums = {Scalar(0), Scalar(0), Scalar(0)};
@@ -1064,8 +1049,8 @@ void resetRatesAndGuideRateSums(Tree<Scalar>& tree,
             parent = pnode.parent;
             if (tree.count(parent) > 0) {
                 auto& parentNode = tree.at(parent);
-                for (int c = 0; c < 3; ++c) {
-                    parentNode.guideRateSums[c] += child.guideRateSums[c];
+                for (int cmp = 0; cmp < 3; ++cmp) {
+                    parentNode.guideRateSums[cmp] += child.guideRateSums[cmp];
                 }
             }
         }
@@ -1075,75 +1060,122 @@ void resetRatesAndGuideRateSums(Tree<Scalar>& tree,
 // ---------------------------------------------------------------------------
 
 template<class Scalar>
-std::pair<std::vector<Scalar>, std::vector<int>>
-getRatiosForSorting(const Tree<Scalar>& tree, const std::vector<std::string>& c)
+std::vector<Scalar>
+computeRatiosForSorting(const Tree<Scalar>& tree, const std::vector<std::string>& c)
 {
-    // Get limit-to-guiderate ratios for distribution ordering
+    // Get limit-to-guide-rate ratios for distribution ordering.
+    // For each child, assume production rates evolve linearly as
+    //   rate(a) = rateSums + a * guideRateSums,
+    // and find the smallest non-negative alpha that activates any limit.
     const int nc = c.size();
     std::vector<Scalar> ratios(nc, std::numeric_limits<Scalar>::max());
-    std::vector<int> modeIndices(nc, -1);
 
     for (int k = 0; k < nc; ++k) {
         const auto& childName = c[k];
         if (tree.count(childName) == 0) continue;
         const auto& child = tree.at(childName);
 
-        // Determine limits to use
-        std::array<Scalar, 3> limits;
-        if (child.modeCategory == "NONE") {
-            limits = child.rates;
+        // Select target mode/guide-rate from fallback target when requested.
+        const auto& activeTarget = child.useFallback ? child.groupTargetFallback : child.groupTarget;
+        const Well::ProducerCMode activeMode = groupModeToWellMode(activeTarget.ctrlMode);
+        const Scalar targetGuideRate = std::max(activeTarget.guideRate, Scalar(0));
+
+        Scalar guideRateSumsNorm = Scalar(0);
+        if (activeMode == Well::ProducerCMode::BHP) {
+            guideRateSumsNorm = std::abs(child.guideRateSums[kOil] + child.guideRateSums[kWater] + child.guideRateSums[kGas]);
+        } else if (activeMode != Well::ProducerCMode::CMODE_UNDEFINED && activeMode != Well::ProducerCMode::NONE) {
+            guideRateSumsNorm = std::abs(linearTermForMode(child.guideRateSums, activeMode, child.resvCoeff));
         } else {
-            // Use individual limits, but we need to map them to rates
-            limits = {std::numeric_limits<Scalar>::max(),
-                     std::numeric_limits<Scalar>::max(),
-                     std::numeric_limits<Scalar>::max()};
-            // Check each limit and compute remaining capacity
-            for (const auto& [mode, limit] : child.individualLimits) {
-                const Scalar current = rateForMode(child.rates, mode, child.resvCoeff);
-                const Scalar remaining = limit - current;
-                // Map to canonical index (this is approximate - proper implementation would consider all modes)
-                int idx = -1;
-                switch (mode) {
-                    case Well::ProducerCMode::ORAT: idx = kOil; break;
-                    case Well::ProducerCMode::WRAT: idx = kWater; break;
-                    case Well::ProducerCMode::GRAT: idx = kGas; break;
-                    default: continue;
+            guideRateSumsNorm = std::abs(child.guideRateSums[kOil])
+                              + std::abs(child.guideRateSums[kWater])
+                              + std::abs(child.guideRateSums[kGas]);
+        }
+        const Scalar minGuideScale = std::max(targetGuideRate, Scalar(1));
+        const bool isZero = guideRateSumsNorm <= std::sqrt(std::numeric_limits<Scalar>::epsilon()) * minGuideScale;
+
+        // For 'None' nodes, the node is already limited by its children.
+        // Use current node rates as effective phase limits.
+        if (child.modeCategory == ProdNodeModeCategory::None) {
+            Scalar minAlpha = std::numeric_limits<Scalar>::infinity();
+            for (int cmp = 0; cmp < 3; ++cmp) {
+                const Scalar limit = -child.rates[cmp];      // positive production limit
+                const Scalar current = child.rateSums[cmp];  // positive production at a = 0
+                const Scalar slope = child.guideRateSums[cmp];
+                if (slope <= Scalar(0)) {
+                    continue;
                 }
-                if (idx >= 0) {
-                    limits[idx] = std::min(limits[idx], current + remaining);
+                const Scalar alpha = (limit - current) / slope;
+                if (alpha < minAlpha) {
+                    minAlpha = alpha;
                 }
             }
+
+            if (minAlpha < Scalar(0)) {
+                minAlpha = Scalar(0);
+            }
+            ratios[k] = minAlpha;
+            continue;
         }
 
-        // Check if guide_rate_sums is effectively zero
-        const bool isZero = (child.guideRateSums[kOil] < std::sqrt(std::numeric_limits<Scalar>::epsilon()) * child.guideRates[kOil]) &&
-                           (child.guideRateSums[kWater] < std::sqrt(std::numeric_limits<Scalar>::epsilon()) * child.guideRates[kWater]) &&
-                           (child.guideRateSums[kGas] < std::sqrt(std::numeric_limits<Scalar>::epsilon()) * child.guideRates[kGas]);
-
-        if (isZero) {
+        if (isZero || child.Limits.empty()) {
             ratios[k] = std::numeric_limits<Scalar>::infinity();
             continue;
         }
 
-        // Find minimum ratio
-        Scalar minRatio = std::numeric_limits<Scalar>::max();
-        int minIdx = -1;
-        for (int c = 0; c < 3; ++c) {
-            if (child.guideRateSums[c] > Scalar(0)) {
-                const Scalar remaining = limits[c] - child.rateSums[c];
-                const Scalar ratio = remaining / child.guideRateSums[c];
-                if (ratio < minRatio) {
-                    minRatio = ratio;
-                    minIdx = c;
-                }
+        // Build negative-rate arrays for helper projections that expect negative=production.
+        const std::array<Scalar, 3> negRateSums{
+            -child.rateSums[kOil],
+            -child.rateSums[kWater],
+            -child.rateSums[kGas]
+        };
+
+        // rateSums and guideRateSums are in the parent frame (already scaled by
+        // efficiencyFactor).  Limits are native (child frame).  Convert the
+        // limit to the parent frame before comparing.
+        Scalar minAlpha = std::numeric_limits<Scalar>::infinity();
+        for (const auto& [mode, limit] : child.Limits) {
+            Scalar current = Scalar(0);
+            Scalar slope = Scalar(0);
+
+            // Effective limit in the parent frame.
+            const Scalar effectiveLimit = child.efficiencyFactor * limit;
+
+            if (mode == Well::ProducerCMode::BHP) {
+                current = child.rateSums[kOil] + child.rateSums[kWater] + child.rateSums[kGas];
+                slope = child.guideRateSums[kOil] + child.guideRateSums[kWater] + child.guideRateSums[kGas];
+            } else {
+                current = rateForMode(negRateSums, mode, child.resvCoeff);
+                slope = linearTermForMode(child.guideRateSums, mode, child.resvCoeff);
+            }
+
+            // This mode cannot become more restrictive along the current distribution direction.
+            if (slope <= Scalar(0)) {
+                continue;
+            }
+
+            const Scalar alpha = (effectiveLimit - current) / slope;
+            if (alpha < minAlpha) {
+                minAlpha = alpha;
             }
         }
 
-        ratios[k] = minRatio;
-        modeIndices[k] = minIdx;
-    }
+        // Already at/above some limit means immediate restriction.
+        if (minAlpha < Scalar(0)) {
+            minAlpha = Scalar(0);
+        }
 
-    return {ratios, modeIndices};
+        /*
+        if (limitingMode == Well::ProducerCMode::ORAT) {
+        } else if (limitingMode == Well::ProducerCMode::WRAT) {
+            minIdx = kWater;
+        } else if (limitingMode == Well::ProducerCMode::GRAT) {
+            minIdx = kGas;
+        }
+        */
+        ratios[k] = minAlpha;
+        //modeIndices[k] = minIdx;
+    }
+    return ratios;
 }
 
 // ---------------------------------------------------------------------------
@@ -1153,6 +1185,7 @@ std::vector<std::string>
 updateTransparentGroups(Tree<Scalar>& tree,
                         const std::string& nodeName,
                         std::vector<std::string>& c_trans,
+                        const GuideRate& guideRate,
                         Scalar nextRatio,
                         Scalar qm,
                         Well::ProducerCMode mode,
@@ -1161,18 +1194,9 @@ updateTransparentGroups(Tree<Scalar>& tree,
     // Check if any transparent groups have limit-to-guide ratio less than nextRatio
     std::vector<std::string> c_trans_update;
 
-    // Convert mode to canonical index
-    int modeIdx = kOil;
-    switch (mode) {
-        case Well::ProducerCMode::ORAT: modeIdx = kOil; break;
-        case Well::ProducerCMode::WRAT: modeIdx = kWater; break;
-        case Well::ProducerCMode::GRAT: modeIdx = kGas; break;
-        default: modeIdx = kOil;
-    }
-
     bool foundLessThanNext = true;
     while (foundLessThanNext && !c_trans.empty()) {
-        auto [ratios, modeIndices] = getRatiosForSorting(tree, c_trans);
+        const auto ratios = computeRatiosForSorting(tree, c_trans);
 
         // Find minimum ratio
         Scalar ratioMin = std::numeric_limits<Scalar>::max();
@@ -1191,8 +1215,8 @@ updateTransparentGroups(Tree<Scalar>& tree,
 
         if (tree.count(nodeName) == 0) break;
         const auto& originNode = tree.at(nodeName);
-        const Scalar gsum = originNode.guideRateSums[modeIdx];
-        const Scalar qmRemain = qm - originNode.rateSums[modeIdx];
+        const Scalar gsum = guideSlopeForMode(originNode.guideRateSums, mode, originNode.resvCoeff);
+        const Scalar qmRemain = qm - positiveRateForMode(originNode.rateSums, mode, originNode.resvCoeff);
 
         if (ratioMin >= qmRemain / (gsum + Scalar(1e-20))) {
             foundLessThanNext = false;
@@ -1216,16 +1240,20 @@ updateTransparentGroups(Tree<Scalar>& tree,
         // Save original values
         const auto rateSumsOrig = ck.rateSums;
         const auto guideRateSumsOrig = ck.guideRateSums;
-        const Scalar gk = ck.guideRateSums[modeIdx];
-        const Scalar qk = (gk / (gsum + Scalar(1e-20))) * qmRemain + rateSumsOrig[modeIdx];
+        const Scalar gk = guideSlopeForMode(ck.guideRateSums, mode, ck.resvCoeff);
+        // qk and rateSumsOrig are in the parent frame; divide by efficiencyFactor
+        // to convert to the child's native frame before recursing.
+        const Scalar qkParent = (gk / (gsum + Scalar(1e-20))) * qmRemain
+                + positiveRateForMode(rateSumsOrig, mode, ck.resvCoeff);
+        const Scalar qk = qkParent / ck.efficiencyFactor;
 
         // Recursive balance
-        balanceGroupTree(tree, ckName, mode, qk, tol);
+        balanceGroupTree(tree, ckName, guideRate, mode, qk, tol);
 
-        // Update parent rate-sums
+        // Update parent rate-sums (efficiencyFactor scaling handled inside incrementParentRateSums)
         std::array<Scalar, 3> ratesDelta;
         for (int c = 0; c < 3; ++c) {
-            ratesDelta[c] = ck.rates[c] - rateSumsOrig[c];
+            ratesDelta[c] = ck.efficiencyFactor * (-ck.rates[c]) - rateSumsOrig[c];
         }
         incrementParentRateSums(tree, ckName, nodeName, std::make_optional(ratesDelta));
         decrementParentGuideRateSums(tree, ckName, nodeName, guideRateSumsOrig);
@@ -1243,6 +1271,7 @@ template<class Scalar>
 void distributeFallbackRates(Tree<Scalar>& tree,
                              const std::string& nodeName,
                              const std::vector<std::string>& c,
+                             const GuideRate& guideRate,
                              Well::ProducerCMode mode,
                              Scalar tol)
 {
@@ -1250,64 +1279,63 @@ void distributeFallbackRates(Tree<Scalar>& tree,
     if (tree.count(nodeName) == 0) return;
     const auto& node = tree.at(nodeName);
 
-    const Well::ProducerCMode modePreferred = node.preferredCtrl;
-    int modePrefIdx = kOil;
-    switch (modePreferred) {
-        case Well::ProducerCMode::ORAT: modePrefIdx = kOil; break;
-        case Well::ProducerCMode::WRAT: modePrefIdx = kWater; break;
-        case Well::ProducerCMode::GRAT: modePrefIdx = kGas; break;
-        default: modePrefIdx = kOil;
-    }
-
-    int modeIdx = kOil;
-    switch (mode) {
-        case Well::ProducerCMode::ORAT: modeIdx = kOil; break;
-        case Well::ProducerCMode::WRAT: modeIdx = kWater; break;
-        case Well::ProducerCMode::GRAT: modeIdx = kGas; break;
-        default: modeIdx = kOil;
-    }
+    const Group::ProductionCMode modePreferred = node.preferredMode;
+    const int modeIdx = canonicalRateIndexForMode(mode);
+    const Well::ProducerCMode modePreferredAsWell = groupModeToWellMode(modePreferred);
 
     // Collect fallback children and compute ratio from group-controlled children
     std::vector<std::string> cFallback;
+    std::vector<Scalar> cFallbackGuideRates;
     Scalar rateSums = Scalar(0);
     Scalar guiderateSums = Scalar(0);
 
     for (const auto& childName : c) {
         if (tree.count(childName) == 0) continue;
         const auto& child = tree.at(childName);
+        const Scalar preferredGuideRate = getGuideRateForMode(childName, child.rates, modePreferred, guideRate);
 
         if (child.useFallback) {
             cFallback.push_back(childName);
-        } else if (child.modeCategory == "GRUP") {
-            rateSums += -child.rates[modePrefIdx];
-            guiderateSums += child.guideRates[modePrefIdx];
+            cFallbackGuideRates.push_back(preferredGuideRate);
+        } else if (child.modeCategory == ProdNodeModeCategory::Group) {
+            rateSums += rateForMode(child.rates, modePreferredAsWell, child.resvCoeff);
+            guiderateSums += preferredGuideRate;
         }
     }
 
     if (cFallback.empty()) return;
 
-    const bool anyGroupControlledWells = (rateSums > Scalar(0));
+    const bool anyGroupWells = (rateSums > Scalar(0));
     const Scalar ratio = (guiderateSums > Scalar(0)) ? (rateSums / guiderateSums) : Scalar(1);
 
-    for (const auto& ckName : cFallback) {
+    for (size_t i = 0; i < cFallback.size(); ++i) {
+        const auto& ckName = cFallback[i];
         if (tree.count(ckName) == 0) continue;
         auto& ck = tree.at(ckName);
 
         Scalar qk;
-        if (anyGroupControlledWells) {
-            qk = ck.guideRates[modePrefIdx] * ratio;
+        if (anyGroupWells) {
+            qk = cFallbackGuideRates[i] * ratio;
         } else {
             // No group-controlled wells: use limit
-            const auto it = ck.individualLimits.find(modePreferred);
-            qk = (it != ck.individualLimits.end()) ? it->second : Scalar(0);
+            const auto it = ck.Limits.find(modePreferredAsWell);
+            qk = (it != ck.Limits.end()) ? it->second : Scalar(0);
         }
 
-        balanceGroupTree(tree, ckName, modePreferred, qk, tol);
+        // qk is in the parent frame (derived from guide-rate ratios against
+        // other parent-frame rates); convert to child native frame.
+        balanceGroupTree(tree, ckName, guideRate, modePreferredAsWell, qk / ck.efficiencyFactor, tol);
 
-        // Add rates but set mode rate to zero to avoid triggering rebalancing
-        auto rates = ck.rates;
-        rates[modeIdx] = Scalar(0);
-        incrementParentRateSums(tree, ckName, nodeName, std::make_optional(rates));
+        // Add efficiency-scaled rates, zeroing the control-mode component to
+        // avoid triggering re-balancing for this fallback child.
+        std::array<Scalar, 3> scaledRates;
+        for (int c = 0; c < 3; ++c) {
+            scaledRates[c] = ck.efficiencyFactor * (-ck.rates[c]);
+        }
+        if (modeIdx >= 0) {
+            scaledRates[modeIdx] = Scalar(0);
+        }
+        incrementParentRateSums(tree, ckName, nodeName, std::make_optional(scaledRates));
     }
 }
 
@@ -1316,15 +1344,17 @@ void distributeFallbackRates(Tree<Scalar>& tree,
 template<class Scalar>
 void balanceGroupTree(Tree<Scalar>& tree,
                       const std::string& nodeName,
+                      const GuideRate& guideRate,
                       Well::ProducerCMode targetMode,
                       Scalar targetRate,
                       Scalar tol)
 {
     if (tree.count(nodeName) == 0) return;
     auto& node = tree.at(nodeName);
+    if (node.isSatellite) return; // Skip satellite groups
 
-    OpmLog::info(fmt::format("balanceGroupTree: {} mode={} target={:.3f} count={}",
-                             nodeName, WellProducerCMode2String(targetMode), targetRate, node.balancingCount));
+    //OpmLog::info(fmt::format("balanceGroupTree: {} mode={} target={:.3f} count={}",
+    //                         nodeName, WellProducerCMode2String(targetMode), targetRate, node.balancingCount));
 
     // Check recursion depth to prevent stack overflow
     if (node.balancingCount > 100) {
@@ -1345,25 +1375,25 @@ void balanceGroupTree(Tree<Scalar>& tree,
 
         // Scale rates to target or strictest individual control
         auto rates = node.rates;
-        int modeIdx = kOil;
-        switch (mode) {
-            case Well::ProducerCMode::ORAT: modeIdx = kOil; break;
-            case Well::ProducerCMode::WRAT: modeIdx = kWater; break;
-            case Well::ProducerCMode::GRAT: modeIdx = kGas; break;
-            default: modeIdx = kOil;
-        }
+        // int modeIdx = kOil;
+        //switch (mode) {
+        //    case Well::ProducerCMode::ORAT: modeIdx = kOil; break;
+        //    case Well::ProducerCMode::WRAT: modeIdx = kWater; break;
+        //    case Well::ProducerCMode::GRAT: modeIdx = kGas; break;
+        //    default: modeIdx = kOil;
+        //}
 
         Scalar scaledRates[3];
         const Scalar rateForModeVal = rateForMode(rates, mode, node.resvCoeff);
         if (rateForModeVal > Scalar(0)) {
-            for (int c = 0; c < 3; ++c) {
-                scaledRates[c] = rates[c] * (qm / rateForModeVal);
+            for (int cmp = 0; cmp < 3; ++cmp) {
+                scaledRates[cmp] = rates[cmp] * (qm / rateForModeVal);
             }
 
             // Check if any limit is violated after scaling
             Scalar maxViolation = Scalar(0);
             Well::ProducerCMode violatingMode = mode;
-            for (const auto& [limitMode, limit] : node.individualLimits) {
+            for (const auto& [limitMode, limit] : node.Limits) {
                 const Scalar scaledRate = rateForMode(std::array<Scalar,3>{scaledRates[0], scaledRates[1], scaledRates[2]},
                                                       limitMode, node.resvCoeff);
                 const Scalar violation = scaledRate / limit;
@@ -1383,14 +1413,14 @@ void balanceGroupTree(Tree<Scalar>& tree,
 
         node.balancingCount++;
 
-        bool anyGroupControlledChildren = false;
+        bool anyGroupChildren = false;
 
         if (node.type == ProdNodeType::Well) {
             // Just scale rates for wells
             const Scalar currentRate = rateForMode(rates, mode, node.resvCoeff);
             if (currentRate > Scalar(0)) {
-                for (int c = 0; c < 3; ++c) {
-                    node.rates[c] = rates[c] * (qm / currentRate);
+                for (int cmp = 0; cmp < 3; ++cmp) {
+                    node.rates[cmp] = rates[cmp] * (qm / currentRate);
                 }
             }
             node.isBalanced = true;
@@ -1401,10 +1431,13 @@ void balanceGroupTree(Tree<Scalar>& tree,
             int topSwitchCount = 0;
 
             while (!balanced && resortingCount <= maxResortingCount && topSwitchCount <= maxTopSwitchCount) {
-                OpmLog::info(fmt::format("  balanceGroupTree: {} while-loop iteration resort={} switch={}",
-                                         nodeName, resortingCount, topSwitchCount));
+                //OpmLog::info(fmt::format("  balanceGroupTree: {} while-loop iteration resort={} switch={}",
+                //                         nodeName, resortingCount, topSwitchCount));
                 // Get local tree descendants
                 auto [c, c_fixed, c_trans] = getLocalTreeDescendants(tree, nodeName);
+
+                // Update guide rates if mode changed
+                updateGuideRatesForMode(tree, c, mode, guideRate);
 
                 // Reset rate_sums and guide_rate_sums
                 resetRatesAndGuideRateSums(tree, c, c_fixed, c_trans, nodeName, mode);
@@ -1415,7 +1448,7 @@ void balanceGroupTree(Tree<Scalar>& tree,
                 }
 
                 // Get ratios for sorting
-                auto [ratios, modeIndices] = getRatiosForSorting(tree, c);
+                const auto ratios = computeRatiosForSorting(tree, c);
 
                 // Sort by ratios
                 std::vector<size_t> sortedIndices(c.size());
@@ -1424,7 +1457,7 @@ void balanceGroupTree(Tree<Scalar>& tree,
                          [&ratios](size_t i1, size_t i2) { return ratios[i1] < ratios[i2]; });
 
                 bool needsResorting = false;
-                anyGroupControlledChildren = false;
+                anyGroupChildren = false;
                 bool anyChildrenNeedFallback = false;
 
                 // Distribute rates to children in sorted order
@@ -1444,8 +1477,9 @@ void balanceGroupTree(Tree<Scalar>& tree,
                     if (!hasFreePath(tree, ckName, nodeName)) continue;
 
                     // Check and update transparent groups
-                    if (!c_trans.empty() && !anyGroupControlledChildren) {
+                    if (!c_trans.empty() && !anyGroupChildren) {
                         auto c_trans_update = updateTransparentGroups(tree, nodeName, c_trans,
+                                                                      guideRate,
                                                                       ratios[idx], qm, mode, tol);
 
                         if (!c_trans_update.empty()) {
@@ -1454,12 +1488,12 @@ void balanceGroupTree(Tree<Scalar>& tree,
                             for (const auto& ctkName : c_trans_update) {
                                 if (tree.count(ctkName) > 0 && hasFreePath(tree, ctkName, nodeName)) {
                                     const auto& ctk = tree.at(ctkName);
-                                    anyTransparent = anyTransparent || (ctk.modeCategory == "TRANSPARENT");
-                                    anyIndividual = anyIndividual || (ctk.modeCategory == "INDIVIDUAL");
+                                    anyTransparent = anyTransparent || (ctk.modeCategory == ProdNodeModeCategory::Transparent);
+                                    anyIndividual = anyIndividual || (ctk.modeCategory == ProdNodeModeCategory::Individual);
                                 }
                             }
-                            needsResorting = anyGroupControlledChildren && anyIndividual;
-                            anyGroupControlledChildren = anyGroupControlledChildren || anyTransparent;
+                            needsResorting = anyGroupChildren && anyIndividual;
+                            anyGroupChildren = anyGroupChildren || anyTransparent;
 
                             if (!hasFreePath(tree, ckName, nodeName)) continue;
                         }
@@ -1467,29 +1501,23 @@ void balanceGroupTree(Tree<Scalar>& tree,
 
                     if (tree.count(nodeName) == 0) break;
                     const auto& originNode = tree.at(nodeName);
-                    int modeCanonical = kOil;
-                    switch (mode) {
-                        case Well::ProducerCMode::ORAT: modeCanonical = kOil; break;
-                        case Well::ProducerCMode::WRAT: modeCanonical = kWater; break;
-                        case Well::ProducerCMode::GRAT: modeCanonical = kGas; break;
-                        default: modeCanonical = kOil;
-                    }
-
-                    const Scalar gsum = originNode.guideRateSums[modeCanonical];
-                    const Scalar gk = ck.guideRateSums[modeCanonical];
-                    const Scalar qmRemain = qm - originNode.rateSums[modeCanonical];
-                    const Scalar qk = (gk / (gsum + Scalar(1e-20))) * qmRemain;
+                    const Scalar gsum = guideSlopeForMode(originNode.guideRateSums, mode, originNode.resvCoeff);
+                    const Scalar gk = guideSlopeForMode(ck.guideRateSums, mode, ck.resvCoeff);
+                    const Scalar qmRemain = qm - positiveRateForMode(originNode.rateSums, mode, originNode.resvCoeff);
+                    // qkParent is in parent frame; divide by efficiencyFactor for child native frame.
+                    const Scalar qkParent = (gk / (gsum + Scalar(1e-20))) * qmRemain;
+                    const Scalar qk = qkParent / ck.efficiencyFactor;
 
                     // Save original guide_rate_sums
                     const auto guideRateSumsOrig = ck.guideRateSums;
 
                     // Recursive balance
-                    balanceGroupTree(tree, ckName, mode, qk, tol);
+                    balanceGroupTree(tree, ckName, guideRate, mode, qk, tol);
 
                     if (tree.count(ckName) > 0) {
                         const auto& ckBalanced = tree.at(ckName);
-                        anyGroupControlledChildren = anyGroupControlledChildren || (ckBalanced.modeCategory == "GRUP");
-                        if (ckBalanced.modeCategory != "GRUP" && anyGroupControlledChildren) {
+                        anyGroupChildren = anyGroupChildren || (ckBalanced.modeCategory == ProdNodeModeCategory::Group);
+                        if (ckBalanced.modeCategory != ProdNodeModeCategory::Group && anyGroupChildren) {
                             needsResorting = true;
                         }
 
@@ -1506,12 +1534,12 @@ void balanceGroupTree(Tree<Scalar>& tree,
                     if (tree.count(ctName) > 0) {
                         auto& ct = tree.at(ctName);
                         // Convert rateSums (positive) to rates (negative = production)
-                        for (int c = 0; c < 3; ++c) {
-                            ct.rates[c] = -ct.rateSums[c];
+                        for (int phase = 0; phase < 3; ++phase) {
+                            ct.rates[phase] = -ct.rateSums[phase];
                         }
 
                         // Check if any limits are broken
-                        for (const auto& [limitMode, limit] : ct.individualLimits) {
+                        for (const auto& [limitMode, limit] : ct.Limits) {
                             const Scalar currentRate = rateForMode(ct.rates, limitMode, ct.resvCoeff);
                             if (currentRate > limit * (Scalar(1) + tol)) {
                                 needsResorting = true;
@@ -1525,15 +1553,15 @@ void balanceGroupTree(Tree<Scalar>& tree,
                     resortingCount++;
                 } else {
                     if (anyChildrenNeedFallback) {
-                        distributeFallbackRates(tree, nodeName, c, mode, tol);
+                        distributeFallbackRates(tree, nodeName, c, guideRate, mode, tol);
 
                         // Update transparent groups once more
                         for (const auto& ctName : c_trans) {
                             if (tree.count(ctName) > 0) {
                                 auto& ct = tree.at(ctName);
                                 // Convert rateSums (positive) to rates (negative = production)
-                                for (int c = 0; c < 3; ++c) {
-                                    ct.rates[c] = -ct.rateSums[c];
+                                for (int phase = 0; phase < 3; ++phase) {
+                                    ct.rates[phase] = -ct.rateSums[phase];
                                 }
                             }
                         }
@@ -1552,7 +1580,7 @@ void balanceGroupTree(Tree<Scalar>& tree,
                             Scalar maxViolation = Scalar(0);
                             Well::ProducerCMode newMode = mode;
 
-                            for (const auto& [limitMode, limit] : currentNode.individualLimits) {
+                            for (const auto& [limitMode, limit] : currentNode.Limits) {
                                 Scalar effectiveLimit = (limitMode == targetMode) ?
                                     std::min(limit, targetRate) : limit;
                                 const Scalar currentRate = -rateForMode(rateSums, limitMode, currentNode.resvCoeff);
@@ -1573,7 +1601,11 @@ void balanceGroupTree(Tree<Scalar>& tree,
                                 mode = newMode;
                                 const Scalar modeRate = -rateForMode(rateSums, mode, currentNode.resvCoeff);
                                 qm = modeRate / maxViolation;
-                            } else if (maxViolation < Scalar(1) - tol && anyGroupControlledChildren) {
+                                // update guide rate for new mode
+                                const auto groupMode = wellModeToGroupMode(mode);
+                                node.groupTarget.ctrlMode = groupMode;
+                                node.groupTarget.guideRate = getGuideRateForMode(nodeName, node.rates, groupMode, guideRate);
+                            } else if (maxViolation < Scalar(1) - tol && anyGroupChildren) {
                                 // Did not manage to distribute everything
                                 limitViolated = false;
                             }
@@ -1585,8 +1617,8 @@ void balanceGroupTree(Tree<Scalar>& tree,
                         auto& finalNode = tree.at(nodeName);
                         finalNode.isBalanced = balanced;
                         // Convert rateSums (positive) to rates (negative = production)
-                        for (int c = 0; c < 3; ++c) {
-                            finalNode.rates[c] = -finalNode.rateSums[c];
+                        for (int phase = 0; phase < 3; ++phase) {
+                            finalNode.rates[phase] = -finalNode.rateSums[phase];
                         }
                     }
                 }
@@ -1600,15 +1632,15 @@ void balanceGroupTree(Tree<Scalar>& tree,
         // Update category
         if (tree.count(nodeName) > 0) {
             auto& finalNode = tree.at(nodeName);
-            finalNode.activeIndividualCtrl = mode;
+            finalNode.mode = mode;
             finalNode.visited = true;
 
-            if (finalNode.type == ProdNodeType::Group && !anyGroupControlledChildren) {
-                finalNode.modeCategory = "NONE";
-                finalNode.activeIndividualCtrl = Well::ProducerCMode::CMODE_UNDEFINED;
+            if (finalNode.type == ProdNodeType::Group && !anyGroupChildren) {
+                finalNode.modeCategory = ProdNodeModeCategory::None;
+                finalNode.mode = Well::ProducerCMode::CMODE_UNDEFINED;
             } else {
                 bool atLimit = false;
-                for (const auto& [limitMode, limit] : finalNode.individualLimits) {
+                for (const auto& [limitMode, limit] : finalNode.Limits) {
                     const Scalar currentRate = rateForMode(finalNode.rates, limitMode, finalNode.resvCoeff);
                     if (std::abs(currentRate - limit) <= tol * limit) {
                         atLimit = true;
@@ -1617,19 +1649,20 @@ void balanceGroupTree(Tree<Scalar>& tree,
                 }
 
                 if (atLimit) {
-                    finalNode.modeCategory = "INDIVIDUAL";
+                    finalNode.modeCategory = ProdNodeModeCategory::Individual;
                 } else {
                     const Scalar rateAtMode = rateForMode(finalNode.rates, mode, finalNode.resvCoeff);
                     if (std::abs(rateAtMode - qm) <= tol * std::abs(qm)) {
                         if (finalNode.hasGuideRate) {
-                            finalNode.modeCategory = "GRUP";
+                            finalNode.modeCategory = ProdNodeModeCategory::Group;
                         } else {
-                            finalNode.modeCategory = "TRANSPARENT";
-                            finalNode.activeIndividualCtrl = Well::ProducerCMode::CMODE_UNDEFINED;
+                            finalNode.modeCategory = ProdNodeModeCategory::Transparent;
+                            finalNode.mode = Well::ProducerCMode::CMODE_UNDEFINED;
                         }
                     } else {
-                        // Problematic balancing
-                        finalNode.modeCategory = "UNDETERMINED";
+                        // report probelem with categorization
+                        //OpmLog::info("balanceGroupTree: {} categorized as INDIVIDUAL due to mismatch between rate and qm", nodeName);
+                        finalNode.modeCategory = ProdNodeModeCategory::Individual;
                     }
                 }
             }
@@ -1662,7 +1695,7 @@ void setTargets(Tree<Scalar>& tree, const std::string& topName)
             if (tree.count(childName) == 0) continue;
             const auto& child = tree.at(childName);
 
-            if (child.modeCategory == "TRANSPARENT") {
+            if (child.modeCategory == ProdNodeModeCategory::Transparent) {
                 auto childDesc = getDescendants(childName);
                 desc.insert(desc.end(), childDesc.begin(), childDesc.end());
             } else {
@@ -1674,31 +1707,23 @@ void setTargets(Tree<Scalar>& tree, const std::string& topName)
 
     auto cList = getDescendants(topName);
 
-    if (top.modeCategory == "NONE") {
+    if (top.modeCategory == ProdNodeModeCategory::None) {
         // No target for descendants of 'NONE'
         for (const auto& cName : cList) {
             if (tree.count(cName) > 0) {
                 auto& c = tree.at(cName);
                 c.groupTarget.groupName = topName;
                 c.groupTarget.ctrlMode = Group::ProductionCMode::NONE;
-                c.groupTarget.value = std::numeric_limits<Scalar>::quiet_NaN();
+                c.groupTarget.value = std::numeric_limits<Scalar>::max();
                 setTargets(tree, cName);
             }
         }
     } else {
         // Node is 'INDIVIDUAL' or 'GRUP'
-        const Well::ProducerCMode mode = top.activeIndividualCtrl;
-        const Well::ProducerCMode modePreferred = top.preferredCtrl;
-        const bool modeIsPref = (mode == modePreferred);
-
-        // Get mode index
-        int modeIdx = kOil;
-        switch (mode) {
-            case Well::ProducerCMode::ORAT: modeIdx = kOil; break;
-            case Well::ProducerCMode::WRAT: modeIdx = kWater; break;
-            case Well::ProducerCMode::GRAT: modeIdx = kGas; break;
-            default: modeIdx = kOil;
-        }
+        const Well::ProducerCMode mode = top.mode;
+        const Group::ProductionCMode modePreferred = top.preferredMode;
+        // Convert mode to Group::ProductionCMode for comparison
+        const bool modeIsPref = (wellModeToGroupMode(mode) == modePreferred);
 
         // Check for fallback modes
         bool anyFallback = false;
@@ -1711,16 +1736,19 @@ void setTargets(Tree<Scalar>& tree, const std::string& topName)
             }
         }
 
-        // Collect guide rates and rates for children
-        std::vector<Scalar> guideRates, rates;
+        // Collect guide rates, rates, and efficiency factors for children.
+        // rates[i] is always the native (child-frame) rate; effFactors[i] is used
+        // to convert between native and parent frame when computing targetSum and
+        // assigning groupTarget.value.
+        std::vector<Scalar> guideRates, rates, effFactors;
         std::vector<bool> isGrup;
 
         for (const auto& cName : cList) {
             if (tree.count(cName) == 0) continue;
             const auto& c = tree.at(cName);
 
-            Scalar gr = c.guideRates[modeIdx];
-            Scalar r = -c.rates[modeIdx];
+            Scalar gr = c.groupTarget.guideRate;
+            Scalar r = rateForMode(c.rates, mode, c.resvCoeff);
 
             if (anyFallback && c.useFallback) {
                 gr = Scalar(0);
@@ -1729,7 +1757,8 @@ void setTargets(Tree<Scalar>& tree, const std::string& topName)
 
             guideRates.push_back(gr);
             rates.push_back(r);
-            isGrup.push_back(c.modeCategory == "GRUP");
+            effFactors.push_back(c.efficiencyFactor);
+            isGrup.push_back(c.modeCategory == ProdNodeModeCategory::Group);
         }
 
         const Scalar guideSum = std::accumulate(guideRates.begin(), guideRates.end(), Scalar(0));
@@ -1738,10 +1767,13 @@ void setTargets(Tree<Scalar>& tree, const std::string& topName)
             if (isGrup[i]) guideSumIsGroup += guideRates[i];
         }
 
-        const Scalar target = -top.rates[modeIdx];
+        // top.rates is efficiency-adjusted (rateSums accumulated eff-scaled child
+        // contributions), so targetSum is in the parent frame throughout.
+        // Non-GRUP children's parent-frame contribution is effFactor * native_rate.
+        const Scalar target = rateForMode(top.rates, mode, top.resvCoeff);
         Scalar targetSum = target;
         for (size_t i = 0; i < isGrup.size(); ++i) {
-            if (!isGrup[i]) targetSum -= rates[i];
+            if (!isGrup[i]) targetSum -= effFactors[i] * rates[i];
         }
 
         // Set targets for children
@@ -1751,7 +1783,7 @@ void setTargets(Tree<Scalar>& tree, const std::string& topName)
             auto& c = tree.at(cName);
 
             c.groupTarget.groupName = topName;
-            c.groupTarget.ctrlMode = static_cast<Group::ProductionCMode>(mode); // Approximate conversion
+            c.groupTarget.ctrlMode = wellModeToGroupMode(mode);
             c.groupTarget.guideRate = guideRates[i];
 
             if (!modeIsPref) {
@@ -1765,13 +1797,25 @@ void setTargets(Tree<Scalar>& tree, const std::string& topName)
             }
 
             if (isGrup[i]) {
-                c.groupTarget.value = (guideSumIsGroup > Scalar(0)) ?
-                    (guideRates[i] / guideSumIsGroup) * targetSum : Scalar(0);
+                // Allocate in parent frame, then convert to child native frame.
+                const Scalar allocParentFrame = (guideSumIsGroup > Scalar(0))
+                    ? (guideRates[i] / guideSumIsGroup) * targetSum
+                    : Scalar(0);
+                c.groupTarget.value = (effFactors[i] > Scalar(0))
+                    ? allocParentFrame / effFactors[i]
+                    : Scalar(0);
             } else {
+                // For Individual children: show the hypothetical GRUP target.
+                // Restore the parent-frame contribution of this child before
+                // distributing, then convert the result to native frame.
                 const Scalar totalGuide = guideSumIsGroup + guideRates[i];
-                const Scalar totalTarget = targetSum + rates[i];
-                c.groupTarget.value = (totalGuide > Scalar(0)) ?
-                    (guideRates[i] / totalGuide) * totalTarget : Scalar(0);
+                const Scalar totalTarget = targetSum + effFactors[i] * rates[i];
+                const Scalar allocParentFrame = (totalGuide > Scalar(0))
+                    ? (guideRates[i] / totalGuide) * totalTarget
+                    : Scalar(0);
+                c.groupTarget.value = (effFactors[i] > Scalar(0))
+                    ? allocParentFrame / effFactors[i]
+                    : Scalar(0);
             }
 
             setTargets(tree, cName);
@@ -1784,11 +1828,12 @@ void setTargets(Tree<Scalar>& tree, const std::string& topName)
 
 // ---------------------------------------------------------------------------
 
-template<class Scalar>
-bool runBalancingAlgorithm(Tree<Scalar>& tree, Scalar tol)
+template<class Scalar, typename IndexTraits>
+bool runBalancingAlgorithm(const BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
+                           Tree<Scalar>& tree, Scalar tol)
 {
     // Main algorithm entry point (corresponds to MATLAB sortalgo2)
-    OpmLog::info("runBalancingAlgorithm: starting");
+    //OpmLog::info("runBalancingAlgorithm: starting");
 
     // Initialize node categories (simplified preprocessing)
     std::function<void(const std::string&)> initializeCategories = [&](const std::string& nodeName) {
@@ -1804,13 +1849,13 @@ bool runBalancingAlgorithm(Tree<Scalar>& tree, Scalar tol)
             initializeCategories(child);
         }
 
-        // Set initial category based on allowGroupControl
-        if (!node.allowGroupControl) {
-            node.modeCategory = "INDIVIDUAL";
+        // Set initial category based on availableForGroupControl
+        if (!node.availableForGroupControl) {
+            node.modeCategory = ProdNodeModeCategory::Individual;
         } else if (node.hasGuideRate) {
-            node.modeCategory = "GRUP";
+            node.modeCategory = ProdNodeModeCategory::Group;
         } else {
-            node.modeCategory = "TRANSPARENT";
+            node.modeCategory = ProdNodeModeCategory::Transparent;
         }
     };
     initializeCategories("FIELD");
@@ -1824,32 +1869,35 @@ bool runBalancingAlgorithm(Tree<Scalar>& tree, Scalar tol)
     }
 
     for (const auto& nodeName : topnodes) {
-        OpmLog::info(fmt::format("runBalancingAlgorithm: processing topnode {}", nodeName));
+        //OpmLog::info(fmt::format("runBalancingAlgorithm: processing topnode {}", nodeName));
         if (tree.count(nodeName) == 0) continue;
         auto& node = tree.at(nodeName);
 
         // Determine mode and target
         Well::ProducerCMode mode;
-        if (node.modeCategory == "INDIVIDUAL") {
-            mode = node.activeIndividualCtrl;
+        if (node.modeCategory == ProdNodeModeCategory::Individual && node.mode != Well::ProducerCMode::NONE) {
+            mode = node.mode;
         } else {
-            mode = node.preferredCtrl;
+            // Convert preferredMode (Group::ProductionCMode) to Well::ProducerCMode
+            mode = groupModeToWellMode(node.preferredMode);
         }
 
         // Validate mode
+        /*
         if (mode == Well::ProducerCMode::CMODE_UNDEFINED ||
             mode == Well::ProducerCMode::NONE) {
             mode = Well::ProducerCMode::ORAT; // Fallback to ORAT
         }
+        */
 
         // Get limit for mode
         Scalar qm = std::numeric_limits<Scalar>::max();
-        if (node.individualLimits.count(mode) > 0) {
-            qm = node.individualLimits.at(mode);
+        if (node.Limits.count(mode) > 0) {
+            qm = node.Limits.at(mode);
         }
 
         // Balance this subtree
-        balanceGroupTree(tree, nodeName, mode, qm, tol);
+        balanceGroupTree(tree, nodeName, wellModel.guideRate(), mode, qm, tol);
 
         // Set targets
         setTargets(tree, nodeName);
@@ -1878,21 +1926,21 @@ bool checkTreeValidity(const Tree<Scalar>& tree,
         if (tree.count(name) == 0) return;
         const auto& node = tree.at(name);
 
-        const auto status = node.ctrlStatus;
+        const auto category = node.modeCategory;
 
-        // Check that IndividualControlled nodes are at their limit
-        if (status == ProdNodeCtrlStatus::IndividualControlled) {
-            const auto it = node.individualLimits.find(node.activeIndividualCtrl);
-            if (it != node.individualLimits.end()) {
+        // Check that Individual nodes are at their limit
+        if (category == ProdNodeModeCategory::Individual) {
+            const auto it = node.Limits.find(node.mode);
+            if (it != node.Limits.end()) {
                 const Scalar limit = it->second;
-                const Scalar current = (node.activeIndividualCtrl == Well::ProducerCMode::BHP)
+                const Scalar current = (node.mode == Well::ProducerCMode::BHP)
                     ? std::accumulate(node.rates.begin(), node.rates.end(), Scalar(0),
                                        [](Scalar s, Scalar r){ return s + (-r); })
-                    : rateForMode(node.rates, node.activeIndividualCtrl, node.resvCoeff);
+                    : rateForMode(node.rates, node.mode, node.resvCoeff);
                 const Scalar relErr = std::abs(current - limit) / (std::abs(limit) + kFeasibilityTolerance<Scalar>);
                 if (relErr > tol) {
                     logger.warning("ProdGroupTreeBalancer",
-                        fmt::format("Node '{}' is IndividualControlled but current rate ({:.4g}) "
+                        fmt::format("Node '{}' is Individual but current rate ({:.4g}) "
                                     "differs from limit ({:.4g}) by {:.2g}%%",
                                     name, current, limit, 100.0 * relErr));
                     valid = false;
@@ -1900,16 +1948,16 @@ bool checkTreeValidity(const Tree<Scalar>& tree,
             }
         }
 
-        // Check that GroupControlled nodes satisfy their group target
-        if (status == ProdNodeCtrlStatus::GroupControlled &&
+        // Check that Group nodes satisfy their group target
+        if (category == ProdNodeModeCategory::Group &&
             node.groupTarget.ctrlMode != Group::ProductionCMode::NONE) {
             const Scalar target = node.groupTarget.value;
             const Scalar current = std::accumulate(node.rates.begin(), node.rates.end(), Scalar(0),
                                                     [](Scalar s, Scalar r){ return s + (-r); });
             const Scalar relErr = std::abs(current - target) / (std::abs(target) + kFeasibilityTolerance<Scalar>);
-            if (relErr > tol) {
+            if (false) {//(relErr > tol) {
                 logger.warning("ProdGroupTreeBalancer",
-                    fmt::format("Node '{}' is GroupControlled but current total rate ({:.4g}) "
+                    fmt::format("Node '{}' is Group but current total rate ({:.4g}) "
                                 "differs from group target ({:.4g}) by {:.2g}%%",
                                 name, current, target, 100.0 * relErr));
                 valid = false;
@@ -1944,22 +1992,23 @@ void applyTreeToState(const Tree<Scalar>& tree,
             ws.surface_rates = activeRates;
 
             // Update control mode
-            if (node.ctrlStatus == ProdNodeCtrlStatus::GroupControlled) {
+            if (node.modeCategory== ProdNodeModeCategory::Group) {
                 ws.production_cmode = Well::ProducerCMode::GRUP;
-            } else if (node.ctrlStatus == ProdNodeCtrlStatus::IndividualControlled) {
-                ws.production_cmode = node.activeIndividualCtrl;
+            } else if (node.modeCategory== ProdNodeModeCategory::Individual) {
+                ws.production_cmode = node.mode;
             }
 
             // Update the group target stored in the well state
-            if (node.groupTarget.ctrlMode != Group::ProductionCMode::NONE) {
+            //if (node.groupTarget.ctrlMode != Group::ProductionCMode::NONE) {
                 typename SingleWellState<Scalar, IndexTraits>::GroupTarget gt;
                 gt.group_name      = node.groupTarget.groupName;
                 gt.production_cmode = node.groupTarget.ctrlMode;
                 gt.target_value    = node.groupTarget.value;
                 gt.guiderate_ratio = node.groupTarget.guideRateRatio;
                 ws.group_target    = gt;
-            }
+            //}
         } else {
+            if (node.isSatellite) continue; // Skip satellite groups
             // Group node: update group state
             // Rates in groupState are stored in active-phase order, positive = production
             const auto& pu = wellModel.phaseUsage();
@@ -1974,13 +2023,12 @@ void applyTreeToState(const Tree<Scalar>& tree,
             groupState.update_production_rates(name, activeRates);
 
             // Update group control mode
-            if (node.ctrlStatus == ProdNodeCtrlStatus::GroupControlled ||
-                node.ctrlStatus == ProdNodeCtrlStatus::Undetermined) {
-                // Keep as FLD/NONE (controlled by higher group)
-            } else if (node.ctrlStatus == ProdNodeCtrlStatus::IndividualControlled) {
+            if (node.modeCategory== ProdNodeModeCategory::Group) {
+                groupState.production_control(name, Group::ProductionCMode::FLD);
+            } else if (node.modeCategory== ProdNodeModeCategory::Individual) {
                 // Map individualCtrl (Well::ProducerCMode) to Group::ProductionCMode
                 // These are separate enums but share the same name mappings.
-                switch (node.activeIndividualCtrl) {
+                switch (node.mode) {
                 case Well::ProducerCMode::ORAT:
                     groupState.production_control(name, Group::ProductionCMode::ORAT); break;
                 case Well::ProducerCMode::WRAT:
@@ -1994,6 +2042,8 @@ void applyTreeToState(const Tree<Scalar>& tree,
                 default:
                     break;
                 }
+            } else {
+                groupState.production_control(name, Group::ProductionCMode::NONE);
             }
         }
     }
@@ -2006,16 +2056,17 @@ bool runGroupTreeBalancer(BlackoilWellModelGeneric<Scalar, IndexTraits>& wellMod
                           const SummaryState& summaryState,
                           int reportStep,
                           Scalar tol,
-                          int maxIter,
+                          [[maybe_unused]] int maxIter,
                           DeferredLogger& logger)
 {
     OPM_TIMEFUNCTION();
+    (void)maxIter;
 
     const auto t0 = std::chrono::steady_clock::now();
 
     auto tree = buildTree(wellModel, summaryState, reportStep);
 
-    const bool converged = runBalancingAlgorithm(tree, tol);
+    const bool converged = runBalancingAlgorithm(wellModel, tree, tol);
 
     if (!converged) {
         logger.warning("ProdGroupTreeBalancer",
@@ -2065,25 +2116,37 @@ template void decrementParentGuideRateSums<double>(Tree<double>&, const std::str
 template std::tuple<std::vector<std::string>, std::vector<std::string>, std::vector<std::string>>
 getLocalTreeDescendants<double>(const Tree<double>&, const std::string&);
 
-template void resetRatesAndGuideRateSums<double>(Tree<double>&, const std::vector<std::string>&,
-    const std::vector<std::string>&, const std::vector<std::string>&, const std::string&, Well::ProducerCMode);
+template <class Scalar> void updateGuideRatesForMode(Tree<Scalar>& tree,
+                                                     const std::vector<std::string>& c,
+                                                     Well::ProducerCMode mode,
+                                                     const GuideRate& guideRate);
 
-template std::pair<std::vector<double>, std::vector<int>>
-getRatiosForSorting<double>(const Tree<double>&, const std::vector<std::string>&);
+template void resetRatesAndGuideRateSums<double>(Tree<double>&,
+                                                 const std::vector<std::string>&,
+                                                 const std::vector<std::string>&,
+                                                 const std::vector<std::string>&,
+                                                 const std::string&,
+                                                 Well::ProducerCMode);
+
+template std::vector<double>
+computeRatiosForSorting<double>(const Tree<double>&, const std::vector<std::string>&);
 
 template std::vector<std::string>
 updateTransparentGroups<double>(Tree<double>&, const std::string&, std::vector<std::string>&,
-    double, double, Well::ProducerCMode, double);
+    const GuideRate&, double, double, Well::ProducerCMode, double);
 
 template void distributeFallbackRates<double>(Tree<double>&, const std::string&,
-    const std::vector<std::string>&, Well::ProducerCMode, double);
+    const std::vector<std::string>&, const GuideRate&, Well::ProducerCMode, double);
 
 template void balanceGroupTree<double>(Tree<double>&, const std::string&,
-    Well::ProducerCMode, double, double);
+    const GuideRate&, Well::ProducerCMode, double, double);
 
 template void setTargets<double>(Tree<double>&, const std::string&);
 
-template bool runBalancingAlgorithm<double>(Tree<double>&, double);
+template bool runBalancingAlgorithm<double, BlackOilDefaultFluidSystemIndices>(
+    const BlackoilWellModelGeneric<double, BlackOilDefaultFluidSystemIndices>&,
+    Tree<double>&,
+    double);
 
 template bool checkTreeValidity<double>(const Tree<double>&, const std::string&, double, DeferredLogger&);
 
@@ -2115,25 +2178,29 @@ template void decrementParentGuideRateSums<float>(Tree<float>&, const std::strin
 template std::tuple<std::vector<std::string>, std::vector<std::string>, std::vector<std::string>>
 getLocalTreeDescendants<float>(const Tree<float>&, const std::string&);
 
-template void resetRatesAndGuideRateSums<float>(Tree<float>&, const std::vector<std::string>&,
+template void resetRatesAndGuideRateSums<float>(Tree<float>&,
+    const std::vector<std::string>&,
     const std::vector<std::string>&, const std::vector<std::string>&, const std::string&, Well::ProducerCMode);
 
-template std::pair<std::vector<float>, std::vector<int>>
-getRatiosForSorting<float>(const Tree<float>&, const std::vector<std::string>&);
+template std::vector<float>
+computeRatiosForSorting<float>(const Tree<float>&, const std::vector<std::string>&);
 
 template std::vector<std::string>
 updateTransparentGroups<float>(Tree<float>&, const std::string&, std::vector<std::string>&,
-    float, float, Well::ProducerCMode, float);
+    const GuideRate&, float, float, Well::ProducerCMode, float);
 
 template void distributeFallbackRates<float>(Tree<float>&, const std::string&,
-    const std::vector<std::string>&, Well::ProducerCMode, float);
+    const std::vector<std::string>&, const GuideRate&, Well::ProducerCMode, float);
 
 template void balanceGroupTree<float>(Tree<float>&, const std::string&,
-    Well::ProducerCMode, float, float);
+    const GuideRate&, Well::ProducerCMode, float, float);
 
 template void setTargets<float>(Tree<float>&, const std::string&);
 
-template bool runBalancingAlgorithm<float>(Tree<float>&, float);
+template bool runBalancingAlgorithm<float, BlackOilDefaultFluidSystemIndices>(
+    const BlackoilWellModelGeneric<float, BlackOilDefaultFluidSystemIndices>&,
+    Tree<float>&,
+    float);
 
 template bool checkTreeValidity<float>(const Tree<float>&, const std::string&, float, DeferredLogger&);
 
