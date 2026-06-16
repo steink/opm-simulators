@@ -21,12 +21,12 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef OPM_BLACKOILMODEL_IMPL_HEADER_INCLUDED
-#define OPM_BLACKOILMODEL_IMPL_HEADER_INCLUDED
+#ifndef OPM_NONLINEAR_SYSTEM_BLACK_OIL_RESERVOIR_IMPL_HEADER_INCLUDED
+#define OPM_NONLINEAR_SYSTEM_BLACK_OIL_RESERVOIR_IMPL_HEADER_INCLUDED
 
-#ifndef OPM_BLACKOILMODEL_HEADER_INCLUDED
+#ifndef OPM_NONLINEAR_SYSTEM_BLACK_OIL_RESERVOIR_HEADER_INCLUDED
 #include <config.h>
-#include <opm/simulators/flow/BlackoilModel.hpp>
+#include <opm/simulators/flow/NonlinearSystemBlackOilReservoir.hpp>
 #endif
 
 #include <dune/common/timer.hh>
@@ -57,9 +57,9 @@
 namespace {
     template <typename TypeTag>
     std::string_view
-    make_string(const typename Opm::BlackoilModel<TypeTag>::DebugFlags f)
+    make_string(const typename Opm::NonlinearSystemBlackOilReservoir<TypeTag>::DebugFlags f)
     {
-        using F = typename Opm::BlackoilModel<TypeTag>::DebugFlags;
+        using F = typename Opm::NonlinearSystemBlackOilReservoir<TypeTag>::DebugFlags;
 
         switch (f) {
         case F::STRICT:   return "Strict";
@@ -74,77 +74,49 @@ namespace {
 namespace Opm {
 
 template <class TypeTag>
-BlackoilModel<TypeTag>::
-BlackoilModel(Simulator& simulator,
+NonlinearSystemBlackOilReservoir<TypeTag>::
+NonlinearSystemBlackOilReservoir(Simulator& simulator,
               const ModelParameters& param,
               BlackoilWellModel<TypeTag>& well_model,
               const bool terminal_output)
-    : simulator_(simulator)
-    , grid_(simulator_.vanguard().grid())
-    , param_( param )
-    , well_model_ (well_model)
-    , terminal_output_ (terminal_output)
-    , current_relaxation_(1.0)
-    , dx_old_(simulator_.model().numGridDof())
-    , conv_monitor_(param_.monitor_params_)
+    : ParentType(simulator, param, well_model, terminal_output)
+    , conv_monitor_(param.monitor_params_)
 {
     // compute global sum of number of cells
-    global_nc_ = detail::countGlobalCells(grid_);
-    convergence_reports_.reserve(300); // Often insufficient, but avoids frequent moves.
+    global_nc_ = detail::countGlobalCells(this->grid_);
+    this->convergence_reports_.reserve(300); // Often insufficient, but avoids frequent moves.
     // TODO: remember to fix!
-    if (param_.nonlinear_solver_ == "nldd") {
+    if (this->param_.nonlinear_solver_ == "nldd") {
         if (terminal_output) {
             OpmLog::info("Using Non-Linear Domain Decomposition solver (nldd).");
         }
-        nlddSolver_ = std::make_unique<BlackoilModelNldd<TypeTag>>(*this);
-    } else if (param_.nonlinear_solver_ == "newton") {
+        nlddSolver_ = std::make_unique<NonlinearSystemNldd<TypeTag>>(*this);
+    } else if (this->param_.nonlinear_solver_ == "newton") {
         if (terminal_output) {
             OpmLog::info("Using Newton nonlinear solver.");
         }
     } else {
         OPM_THROW(std::runtime_error, "Unknown nonlinear solver option: " +
-                                      param_.nonlinear_solver_);
+                                      this->param_.nonlinear_solver_);
     }
 }
 
 template <class TypeTag>
 SimulatorReportSingle
-BlackoilModel<TypeTag>::
+NonlinearSystemBlackOilReservoir<TypeTag>::
 prepareStep(const SimulatorTimerInterface& timer)
 {
     OPM_TIMEFUNCTION();
-    SimulatorReportSingle report;
+    auto report = ParentType::prepareStep(timer);
+
     Dune::Timer perfTimer;
     perfTimer.start();
-    // update the solution variables in the model
-    int lastStepFailed = timer.lastStepFailed();
-    if (grid_.comm().size() > 1 && grid_.comm().max(lastStepFailed) != grid_.comm().min(lastStepFailed)) {
-        OPM_THROW(std::runtime_error, "Misalignment of the parallel simulation run in prepareStep " +
-                                "- the previous step succeeded on some ranks but failed on others.");
-    }
-    if (lastStepFailed) {
-        simulator_.model().updateFailed();
-    }
-    else {
-        simulator_.model().advanceTimeLevel();
-    }
 
-    // Set the timestep size and episode index for the model explicitly.
-    // The model needs to know the report step/episode index because of
-    // timing dependent data despite the fact that flow uses its own time stepper.
-    // (The length of the episode does not matter, though.)
-    simulator_.setTime(timer.simulationTimeElapsed());
-    simulator_.setTimeStepSize(timer.currentStepLength());
-
-    simulator_.problem().resetIterationForNewTimestep();
-
-    simulator_.problem().beginTimeStep();
-
-    unsigned numDof = simulator_.model().numGridDof();
+    unsigned numDof = this->simulator_.model().numGridDof();
     wasSwitched_.resize(numDof);
     std::fill(wasSwitched_.begin(), wasSwitched_.end(), false);
 
-    if (param_.update_equations_scaling_) {
+    if (this->param_.update_equations_scaling_) {
         OpmLog::error("Equation scaling not supported");
         //updateEquationsScaling();
     }
@@ -164,9 +136,9 @@ prepareStep(const SimulatorTimerInterface& timer)
 
         return -1;
     };
-    const auto& schedule = simulator_.vanguard().schedule();
-    auto& rst_conv = simulator_.problem().eclWriter().mutableOutputModule().getConv();
-    rst_conv.init(simulator_.vanguard().globalNumCells(),
+    const auto& schedule = this->simulator_.vanguard().schedule();
+    auto& rst_conv = this->simulator_.problem().eclWriter().mutableOutputModule().getConv();
+    rst_conv.init(this->simulator_.vanguard().globalNumCells(),
                   schedule[timer.reportStepNum()].rst_config(),
                   {getIdx(FluidSystem::oilPhaseIdx),
                    getIdx(FluidSystem::gasPhaseIdx),
@@ -180,110 +152,93 @@ prepareStep(const SimulatorTimerInterface& timer)
 
 template <class TypeTag>
 void
-BlackoilModel<TypeTag>::
+NonlinearSystemBlackOilReservoir<TypeTag>::
 initialLinearization(SimulatorReportSingle& report,
                      const int minIter,
                      const int maxIter,
                      const SimulatorTimerInterface& timer)
 {
-    // -----------   Set up reports and timer   -----------
-    failureReport_ = SimulatorReportSingle();
-    Dune::Timer perfTimer;
-
-    perfTimer.start();
-    report.total_linearizations = 1;
-
-    // -----------   Assemble   -----------
-    try {
-        report += assembleReservoir(timer);
-        report.assemble_time += perfTimer.stop();
-        // Mark timestep initialized after assembleReservoir(), because the well model's
-        // assemble() also uses needsTimestepInit() to trigger prepareTimeStep().
-        simulator_.problem().markTimestepInitialized();
-    }
-    catch (...) {
-        report.assemble_time += perfTimer.stop();
-        failureReport_ += report;
-        throw; // continue throwing the stick
-    }
+    ParentType::initialLinearization(report,
+                                     minIter,
+                                     maxIter,
+                                     timer);                                 
 
     // -----------   Check if converged   -----------
     std::vector<Scalar> residual_norms;
+    Dune::Timer perfTimer;
     perfTimer.reset();
     perfTimer.start();
     // the step is not considered converged until at least minIter iterations is done
     {
         auto convrep = getConvergence(timer, maxIter, residual_norms);
         report.converged = convrep.converged() &&
-                           simulator_.problem().iterationContext().iteration() >= minIter;
+                           this->simulator_.problem().iterationContext().iteration() >= minIter;
         ConvergenceReport::Severity severity = convrep.severityOfWorstFailure();
-        convergence_reports_.back().report.push_back(std::move(convrep));
+        this->convergence_reports_.back().report.push_back(std::move(convrep));
 
         // Throw if any NaN or too large residual found.
         if (severity == ConvergenceReport::Severity::NotANumber) {
-            failureReport_ += report;
+            this->failureReport_ += report;
             OPM_THROW_PROBLEM(NumericalProblem, "NaN residual found!");
         } else if (severity == ConvergenceReport::Severity::TooLarge) {
-            failureReport_ += report;
+            this->failureReport_ += report;
             OPM_THROW_NOLOG(NumericalProblem, "Too large residual found!");
         } else if (severity == ConvergenceReport::Severity::ConvergenceMonitorFailure) {
-            failureReport_ += report;
+            this->failureReport_ += report;
             OPM_THROW_PROBLEM(ConvergenceMonitorFailure,
                               fmt::format(
                                   "Total penalty count exceeded cut-off-limit of {}",
-                                  param_.monitor_params_.cutoff_
+                                  this->param_.monitor_params_.cutoff_
                               ));
         }
     }
     report.update_time += perfTimer.stop();
-    residual_norms_history_.push_back(residual_norms);
+    this->residual_norms_history_.push_back(residual_norms);
 }
 
 template <class TypeTag>
 template <class NonlinearSolverType>
 SimulatorReportSingle
-BlackoilModel<TypeTag>::
+NonlinearSystemBlackOilReservoir<TypeTag>::
 nonlinearIteration(const SimulatorTimerInterface& timer,
                    NonlinearSolverType& nonlinear_solver)
 {
     // Model-level timestep initialization (once per timestep).
     // markTimestepInitialized() is called later in initialLinearization(),
     // after assembleReservoir() has triggered the well model's prepareTimeStep().
-    if (simulator_.problem().iterationContext().needsTimestepInit()) {
-        residual_norms_history_.clear();
-        conv_monitor_.reset();
-        current_relaxation_ = 1.0;
-        dx_old_ = 0.0;
-        convergence_reports_.push_back({timer.reportStepNum(), timer.currentStepNum(), {}});
-        convergence_reports_.back().report.reserve(11);
+    if (this->simulator_.problem().iterationContext().needsTimestepInit()) {
+        this->residual_norms_history_.clear();
+        this->conv_monitor_.reset();
+        this->current_relaxation_ = 1.0;
+        this->dx_old_ = 0.0;
+        this->convergence_reports_.push_back({timer.reportStepNum(), timer.currentStepNum(), {}});
+        this->convergence_reports_.back().report.reserve(11);
     }
 
     SimulatorReportSingle result;
-    if (this->param_.nonlinear_solver_ != "nldd")
-    {
+    if (this->param_.nonlinear_solver_ != "nldd") {
         result = this->nonlinearIterationNewton(timer, nonlinear_solver);
     }
     else {
         result = this->nlddSolver_->nonlinearIterationNldd(timer, nonlinear_solver);
     }
 
-    auto& rst_conv = simulator_.problem().eclWriter().mutableOutputModule().getConv();
-    rst_conv.update(simulator_.model().linearizer().residual());
+    auto& rst_conv = this->simulator_.problem().eclWriter().mutableOutputModule().getConv();
+    rst_conv.update(this->simulator_.model().linearizer().residual());
 
-    simulator_.problem().advanceIteration();
+    this->simulator_.problem().advanceIteration();
     return result;
 }
 
 template <class TypeTag>
 template <class NonlinearSolverType>
 SimulatorReportSingle
-BlackoilModel<TypeTag>::
+NonlinearSystemBlackOilReservoir<TypeTag>::
 nonlinearIterationNewton(const SimulatorTimerInterface& timer,
                          NonlinearSolverType& nonlinear_solver)
 {
     OPM_TIMEFUNCTION();
 
-    // -----------   Set up reports and timer   -----------
     SimulatorReportSingle report;
     Dune::Timer perfTimer;
 
@@ -292,26 +247,19 @@ nonlinearIterationNewton(const SimulatorTimerInterface& timer,
                                this->param_.newton_max_iter_,
                                timer);
 
-    // -----------   If not converged, solve linear system and do Newton update  -----------
     if (!report.converged) {
         perfTimer.reset();
         perfTimer.start();
         report.total_newton_iterations = 1;
 
-        // Compute the nonlinear update.
-        unsigned nc = simulator_.model().numGridDof();
+        const unsigned nc = this->simulator_.model().numGridDof();
         BVector x(nc);
 
-        // Solve the linear system.
         linear_solve_setup_time_ = 0.0;
         try {
-            // Apply the Schur complement of the well model to
-            // the reservoir linearized equations.
-            // Note that linearize may throw for MSwells.
-            wellModel().linearize(simulator().model().linearizer().jacobian(),
-                                  simulator().model().linearizer().residual());
+            this->wellModel().linearize(this->simulator().model().linearizer().jacobian(),
+                                        this->simulator().model().linearizer().residual());
 
-            // ---- Solve linear system ----
             solveJacobianSystem(x);
 
             report.linear_solve_setup_time += linear_solve_setup_time_;
@@ -323,44 +271,34 @@ nonlinearIterationNewton(const SimulatorTimerInterface& timer,
             report.linear_solve_time += perfTimer.stop();
             report.total_linear_iterations += linearIterationsLastSolve();
 
-            failureReport_ += report;
-            throw; // re-throw up
+            this->failureReport_ += report;
+            throw;
         }
 
         perfTimer.reset();
         perfTimer.start();
 
-        // handling well state update before oscillation treatment is a decision based
-        // on observation to avoid some big performance degeneration under some circumstances.
-        // there is no theorectical explanation which way is better for sure.
-        wellModel().postSolve(x);
+        this->wellModel().postSolve(x);
 
-        if (param_.use_update_stabilization_) {
-            // Stabilize the nonlinear update.
+        if (this->param_.use_update_stabilization_) {
             bool isOscillate = false;
             bool isStagnate = false;
-            nonlinear_solver.detectOscillations(residual_norms_history_,
-                                                residual_norms_history_.size() - 1,
+            nonlinear_solver.detectOscillations(this->residual_norms_history_,
+                                                this->residual_norms_history_.size() - 1,
                                                 isOscillate,
                                                 isStagnate);
             if (isOscillate) {
-                current_relaxation_ -= nonlinear_solver.relaxIncrement();
-                current_relaxation_ = std::max(current_relaxation_,
-                                               nonlinear_solver.relaxMax());
-                if (terminalOutputEnabled()) {
-                    std::string msg = "    Oscillating behavior detected: Relaxation set to "
-                            + std::to_string(current_relaxation_);
-                    OpmLog::info(msg);
+                this->current_relaxation_ -= nonlinear_solver.relaxIncrement();
+                this->current_relaxation_ = std::max(this->current_relaxation_, nonlinear_solver.relaxMax());
+                if (this->terminalOutputEnabled()) {
+                    OpmLog::info("    Oscillating behavior detected: Relaxation set to "
+                                 + std::to_string(this->current_relaxation_));
                 }
             }
-            nonlinear_solver.stabilizeNonlinearUpdate(x, dx_old_, current_relaxation_);
+            nonlinear_solver.stabilizeNonlinearUpdate(x, this->dx_old_, this->current_relaxation_);
         }
 
-        // ---- Newton update ----
-        // Apply the update, with considering model-dependent limitations and
-        // chopping of the update.
-        updateSolution(x);
-
+        this->updateSolution(x);
         report.update_time += perfTimer.stop();
     }
 
@@ -368,30 +306,18 @@ nonlinearIterationNewton(const SimulatorTimerInterface& timer,
 }
 
 template <class TypeTag>
-SimulatorReportSingle
-BlackoilModel<TypeTag>::
-assembleReservoir(const SimulatorTimerInterface& /* timer */)
-{
-    // -------- Mass balance equations --------
-    simulator_.problem().beginIteration();
-    simulator_.model().linearizer().linearizeDomain();
-    simulator_.problem().endIteration();
-    return wellModel().lastReport();
-}
-
-template <class TypeTag>
-typename BlackoilModel<TypeTag>::Scalar
-BlackoilModel<TypeTag>::
+typename NonlinearSystemBlackOilReservoir<TypeTag>::Scalar
+NonlinearSystemBlackOilReservoir<TypeTag>::
 relativeChange() const
 {
     Scalar resultDelta = 0.0;
     Scalar resultDenom = 0.0;
 
-    const auto& elemMapper = simulator_.model().elementMapper();
-    const auto& gridView = simulator_.gridView();
+    const auto& elemMapper = this->simulator_.model().elementMapper();
+    const auto& gridView = this->simulator_.gridView();
     for (const auto& elem : elements(gridView, Dune::Partitions::interior)) {
         unsigned globalElemIdx = elemMapper.index(elem);
-        const auto& priVarsNew = simulator_.model().solution(/*timeIdx=*/0)[globalElemIdx];
+        const auto& priVarsNew = this->simulator_.model().solution(/*timeIdx=*/0)[globalElemIdx];
 
         Scalar pressureNew;
         pressureNew = priVarsNew[Indices::pressureSwitchIdx];
@@ -410,7 +336,7 @@ relativeChange() const
             FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx) &&
             priVarsNew.primaryVarsMeaningGas() == PrimaryVariables::GasMeaning::Sg)
         {
-            assert(Indices::compositionSwitchIdx >= 0);
+            assert(Indices::compositionSwitchIdx != std::numeric_limits<unsigned>::max());
             saturationsNew[FluidSystem::gasPhaseIdx] = priVarsNew[Indices::compositionSwitchIdx];
             oilSaturationNew -= saturationsNew[FluidSystem::gasPhaseIdx];
         }
@@ -419,7 +345,7 @@ relativeChange() const
             saturationsNew[FluidSystem::oilPhaseIdx] = oilSaturationNew;
         }
 
-        const auto& priVarsOld = simulator_.model().solution(/*timeIdx=*/1)[globalElemIdx];
+        const auto& priVarsOld = this->simulator_.model().solution(/*timeIdx=*/1)[globalElemIdx];
 
         Scalar pressureOld;
         pressureOld = priVarsOld[Indices::pressureSwitchIdx];
@@ -441,7 +367,7 @@ relativeChange() const
 
             if (priVarsOld.primaryVarsMeaningGas() == PrimaryVariables::GasMeaning::Sg)
             {
-                assert(Indices::compositionSwitchIdx >= 0 );
+                assert(Indices::compositionSwitchIdx != std::numeric_limits<unsigned>::max());
                 saturationsOld[FluidSystem::gasPhaseIdx] =
                     priVarsOld[Indices::compositionSwitchIdx];
                 oilSaturationOld -= saturationsOld[FluidSystem::gasPhaseIdx];
@@ -468,16 +394,16 @@ relativeChange() const
 
 template <class TypeTag>
 void
-BlackoilModel<TypeTag>::
+NonlinearSystemBlackOilReservoir<TypeTag>::
 solveJacobianSystem(BVector& x)
 {
-    auto& jacobian = simulator_.model().linearizer().jacobian().istlMatrix();
-    auto& residual = simulator_.model().linearizer().residual();
-    auto& linSolver = simulator_.model().newtonMethod().linearSolver();
+    auto& jacobian = this->simulator_.model().linearizer().jacobian().istlMatrix();
+    auto& residual = this->simulator_.model().linearizer().residual();
+    auto& linSolver = this->simulator_.model().newtonMethod().linearSolver();
 
     const int numSolvers = linSolver.numAvailableSolvers();
     if (numSolvers > 1 && (linSolver.getSolveCount() % 100 == 0)) {
-        if (terminal_output_) {
+        if (this->terminal_output_) {
             OpmLog::debug("\nRunning speed test for comparing available linear solvers.");
         }
 
@@ -488,7 +414,6 @@ solveJacobianSystem(BVector& x)
         x = 0.0;
         std::vector<BVector> x_trial(numSolvers, x);
         for (int solver = 0; solver < numSolvers; ++solver) {
-            BVector x0(x);
             linSolver.setActiveSolver(solver);
             perfTimer.start();
             linSolver.prepare(jacobian, residual);
@@ -499,26 +424,25 @@ solveJacobianSystem(BVector& x)
             linSolver.solve(x_trial[solver]);
             times[solver] = perfTimer.stop();
             perfTimer.reset();
-            if (terminal_output_) {
+            if (this->terminal_output_) {
                 OpmLog::debug(fmt::format(fmt::runtime("Solver time {}: {}"), solver, times[solver]));
             }
         }
 
         int fastest_solver = std::ranges::min_element(times) - times.begin();
         // Use timing on rank 0 to determine fastest, must be consistent across ranks.
-        grid_.comm().broadcast(&fastest_solver, 1, 0);
-        linear_solve_setup_time_ = setupTimes[fastest_solver];
+        this->grid_.comm().broadcast(&fastest_solver, 1, 0);
+        this->linear_solve_setup_time_ = setupTimes[fastest_solver];
         x = x_trial[fastest_solver];
         linSolver.setActiveSolver(fastest_solver);
     }
     else {
-        // set initial guess
         x = 0.0;
 
         Dune::Timer perfTimer;
         perfTimer.start();
         linSolver.prepare(jacobian, residual);
-        linear_solve_setup_time_ = perfTimer.stop();
+        this->linear_solve_setup_time_ = perfTimer.stop();
         linSolver.setResidual(residual);
         // actually, the error needs to be calculated after setResidual in order to
         // account for parallelization properly. since the residual of ECFV
@@ -529,55 +453,29 @@ solveJacobianSystem(BVector& x)
 }
 
 template <class TypeTag>
-void
-BlackoilModel<TypeTag>::
-updateSolution(const BVector& dx)
+bool
+NonlinearSystemBlackOilReservoir<TypeTag>::
+shouldStoreSolutionUpdate() const
 {
-    OPM_TIMEBLOCK(updateSolution);
-    // Prepare to store solution update for convergence check
-    if (this->param_.tolerance_max_dp_ > 0.0 || this->param_.tolerance_max_ds_ > 0.0
-        || this->param_.tolerance_max_drs_ > 0.0 || this->param_.tolerance_max_drv_ > 0.0) {
-        prepareStoringSolutionUpdate();
-    }
-
-    auto& newtonMethod = simulator_.model().newtonMethod();
-    SolutionVector& solution = simulator_.model().solution(/*timeIdx=*/0);
-
-    newtonMethod.update_(/*nextSolution=*/solution,
-                         /*curSolution=*/solution,
-                         /*update=*/dx,
-                         /*resid=*/dx); // the update routines of the black
-                                        // oil model do not care about the
-                                        // residual
-
-    // if the solution is updated, the intensive quantities need to be recalculated
-    {
-        OPM_TIMEBLOCK(invalidateAndUpdateIntensiveQuantities);
-        simulator_.model().invalidateAndUpdateIntensiveQuantities(/*timeIdx=*/0);
-    }
-
-    // Store solution update
-    if (this->param_.tolerance_max_dp_ > 0.0 || this->param_.tolerance_max_ds_ > 0.0
-        || this->param_.tolerance_max_drs_ > 0.0 || this->param_.tolerance_max_drv_  > 0.0) {
-        storeSolutionUpdate(dx);
-    }
+    return this->param_.tolerance_max_dp_ > 0.0 || this->param_.tolerance_max_ds_ > 0.0
+        || this->param_.tolerance_max_drs_ > 0.0 || this->param_.tolerance_max_drv_ > 0.0;
 }
 
 template <class TypeTag>
 void
-BlackoilModel<TypeTag>::
-prepareStoringSolutionUpdate()
+NonlinearSystemBlackOilReservoir<TypeTag>::
+prepareSolutionUpdate()
 {
     // Init. solution update vector
-    unsigned nc = simulator_.model().numGridDof();
+    unsigned nc = this->simulator_.model().numGridDof();
     solUpd_.resize(nc);
 
-    const auto& elemMapper = simulator_.model().elementMapper();
-    const auto& gridView = simulator_.gridView();
+    const auto& elemMapper = this->simulator_.model().elementMapper();
+    const auto& gridView = this->simulator_.gridView();
     for (const auto& elem : elements(gridView, Dune::Partitions::interior)) {
         // Copy solution vector to transfer primary variables meaning
         unsigned globalElemIdx = elemMapper.index(elem);
-        solUpd_[globalElemIdx] = simulator_.model().solution(/*timeIdx=*/0)[globalElemIdx];
+        solUpd_[globalElemIdx] = this->simulator_.model().solution(/*timeIdx=*/0)[globalElemIdx];
 
         // Ensure each element is zero
         std::ranges::fill(solUpd_[globalElemIdx], 0.0);
@@ -586,11 +484,11 @@ prepareStoringSolutionUpdate()
 
 template <class TypeTag>
 void
-BlackoilModel<TypeTag>::
-storeSolutionUpdate(const BVector& dx)
+NonlinearSystemBlackOilReservoir<TypeTag>::
+storeSolutionUpdate(const GlobalEqVector& dx)
 {
-    const auto& elemMapper = simulator_.model().elementMapper();
-    const auto& gridView = simulator_.gridView();
+    const auto& elemMapper = this->simulator_.model().elementMapper();
+    const auto& gridView = this->simulator_.gridView();
     for (const auto& elem : elements(gridView, Dune::Partitions::interior)) {
         // Get cell vectors
         unsigned globalElemIdx = elemMapper.index(elem);
@@ -604,12 +502,14 @@ storeSolutionUpdate(const BVector& dx)
 }
 
 template <class TypeTag>
-typename BlackoilModel<TypeTag>::MaxSolutionUpdateData
-BlackoilModel<TypeTag>::
+typename NonlinearSystemBlackOilReservoir<TypeTag>::MaxSolutionUpdateData
+NonlinearSystemBlackOilReservoir<TypeTag>::
 getMaxSolutionUpdate(const std::vector<unsigned>& ixCells)
 {
-    static constexpr bool enableSolvent = Indices::solventSaturationIdx >= 0;
-    static constexpr bool enableBrine = Indices::saltConcentrationIdx >= 0;
+    static constexpr bool enableSolvent =
+        Indices::solventSaturationIdx != std::numeric_limits<unsigned>::max();
+    static constexpr bool enableBrine =
+        Indices::saltConcentrationIdx != std::numeric_limits<unsigned>::max();
 
     // Init output
     Scalar dPMax = 0.0;
@@ -620,11 +520,11 @@ getMaxSolutionUpdate(const std::vector<unsigned>& ixCells)
     // Loop over solution update, get the correct variables and calculate max.
     for (const auto& ix : ixCells) {
         const auto& value = solUpd_[ix];
-        for (int pvIdx = 0; pvIdx < static_cast<int>(value.size()); ++pvIdx) {
+        for (unsigned pvIdx = 0; pvIdx < value.size(); ++pvIdx) {
             if (pvIdx == Indices::pressureSwitchIdx) {
                 dPMax = std::max(dPMax, std::abs(value[pvIdx]));
             }
-            else if ( (pvIdx == Indices::waterSwitchIdx
+            else if ((pvIdx == Indices::waterSwitchIdx
                        && value.primaryVarsMeaningWater() == PrimaryVariables::WaterMeaning::Sw)
                       || (pvIdx == Indices::compositionSwitchIdx
                           && value.primaryVarsMeaningGas() == PrimaryVariables::GasMeaning::Sg)
@@ -655,9 +555,9 @@ getMaxSolutionUpdate(const std::vector<unsigned>& ixCells)
 }
 
 template <class TypeTag>
-std::tuple<typename BlackoilModel<TypeTag>::Scalar,
-           typename BlackoilModel<TypeTag>::Scalar>
-BlackoilModel<TypeTag>::
+std::tuple<typename NonlinearSystemBlackOilReservoir<TypeTag>::Scalar,
+           typename NonlinearSystemBlackOilReservoir<TypeTag>::Scalar>
+NonlinearSystemBlackOilReservoir<TypeTag>::
 convergenceReduction(Parallel::Communication comm,
                      const Scalar pvSumLocal,
                      const Scalar numAquiferPvSumLocal,
@@ -665,59 +565,18 @@ convergenceReduction(Parallel::Communication comm,
                      std::vector< Scalar >& maxCoeff,
                      std::vector< Scalar >& B_avg)
 {
-    OPM_TIMEBLOCK(convergenceReduction);
-    // Compute total pore volume (use only owned entries)
-    Scalar pvSum = pvSumLocal;
-    Scalar numAquiferPvSum = numAquiferPvSumLocal;
-
-    if (comm.size() > 1) {
-        // global reduction
-        std::vector< Scalar > sumBuffer;
-        std::vector< Scalar > maxBuffer;
-        const int numComp = B_avg.size();
-        sumBuffer.reserve( 2*numComp + 2 ); // +2 for (numAquifer)pvSum
-        maxBuffer.reserve( numComp );
-        for (int compIdx = 0; compIdx < numComp; ++compIdx) {
-            sumBuffer.push_back(B_avg[compIdx]);
-            sumBuffer.push_back(R_sum[compIdx]);
-            maxBuffer.push_back(maxCoeff[ compIdx]);
-        }
-
-        // Compute total pore volume
-        sumBuffer.push_back( pvSum );
-        sumBuffer.push_back( numAquiferPvSum );
-
-        // compute global sum
-        comm.sum( sumBuffer.data(), sumBuffer.size() );
-
-        // compute global max
-        comm.max( maxBuffer.data(), maxBuffer.size() );
-
-        // restore values to local variables
-        for (int compIdx = 0, buffIdx = 0; compIdx < numComp; ++compIdx, ++buffIdx) {
-            B_avg[compIdx] = sumBuffer[buffIdx];
-            ++buffIdx;
-
-            R_sum[compIdx] = sumBuffer[buffIdx];
-        }
-
-        for (int compIdx = 0; compIdx < numComp; ++compIdx) {
-            maxCoeff[compIdx] = maxBuffer[compIdx];
-        }
-
-        // restore global pore volume
-        pvSum = sumBuffer[sumBuffer.size()-2];
-        numAquiferPvSum = sumBuffer.back();
-    }
-
-    // return global pore volume
-    return {pvSum, numAquiferPvSum};
+    return ParentType::convergenceReduction(comm,
+                                            pvSumLocal,
+                                            numAquiferPvSumLocal,
+                                            R_sum,
+                                            maxCoeff,
+                                            B_avg);
 }
 
 template <class TypeTag>
-std::pair<typename BlackoilModel<TypeTag>::Scalar,
-          typename BlackoilModel<TypeTag>::Scalar>
-BlackoilModel<TypeTag>::
+std::pair<typename NonlinearSystemBlackOilReservoir<TypeTag>::Scalar,
+          typename NonlinearSystemBlackOilReservoir<TypeTag>::Scalar>
+NonlinearSystemBlackOilReservoir<TypeTag>::
 localConvergenceData(std::vector<Scalar>& R_sum,
                      std::vector<Scalar>& maxCoeff,
                      std::vector<Scalar>& B_avg,
@@ -726,13 +585,13 @@ localConvergenceData(std::vector<Scalar>& R_sum,
     OPM_TIMEBLOCK(localConvergenceData);
     Scalar pvSumLocal = 0.0;
     Scalar numAquiferPvSumLocal = 0.0;
-    const auto& model = simulator_.model();
-    const auto& problem = simulator_.problem();
+    const auto& model = this->simulator_.model();
+    const auto& problem = this->simulator_.problem();
 
-    const auto& residual = simulator_.model().linearizer().residual();
+    const auto& residual = this->simulator_.model().linearizer().residual();
 
-    ElementContext elemCtx(simulator_);
-    const auto& gridView = simulator().gridView();
+    ElementContext elemCtx(this->simulator_);
+    const auto& gridView = this->simulator().gridView();
     IsNumericalAquiferCell isNumericalAquiferCell(gridView.grid());
     OPM_BEGIN_PARALLEL_TRY_CATCH();
     for (const auto& elem : elements(gridView, Dune::Partitions::interior)) {
@@ -755,20 +614,20 @@ localConvergenceData(std::vector<Scalar>& R_sum,
                           B_avg, R_sum, maxCoeff, maxCoeffCell);
     }
 
-    OPM_END_PARALLEL_TRY_CATCH("BlackoilModel::localConvergenceData() failed: ", grid_.comm());
+    OPM_END_PARALLEL_TRY_CATCH("NonlinearSystemBlackOilReservoir::localConvergenceData() failed: ", this->grid_.comm());
 
     // compute local average in terms of global number of elements
     const int bSize = B_avg.size();
     for (int i = 0; i < bSize; ++i) {
-        B_avg[i] /= Scalar(global_nc_);
+        B_avg[i] /= Scalar(this->global_nc_);
     }
 
     return {pvSumLocal, numAquiferPvSumLocal};
 }
 
 template <class TypeTag>
-typename BlackoilModel<TypeTag>::CnvPvSplitData
-BlackoilModel<TypeTag>::
+typename NonlinearSystemBlackOilReservoir<TypeTag>::CnvPvSplitData
+NonlinearSystemBlackOilReservoir<TypeTag>::
 characteriseCnvPvSplit(const std::vector<Scalar>& B_avg, const double dt)
 {
     OPM_TIMEBLOCK(computeCnvErrorPv);
@@ -838,7 +697,7 @@ characteriseCnvPvSplit(const std::vector<Scalar>& B_avg, const double dt)
         }
     }
 
-    OPM_END_PARALLEL_TRY_CATCH("BlackoilModel::characteriseCnvPvSplit() failed: ",
+    OPM_END_PARALLEL_TRY_CATCH("NonlinearSystemBlackOilReservoir::characteriseCnvPvSplit() failed: ",
                                this->grid_.comm());
 
     this->grid_.comm().sum(splitPV  .data(), splitPV  .size());
@@ -848,33 +707,8 @@ characteriseCnvPvSplit(const std::vector<Scalar>& B_avg, const double dt)
 }
 
 template <class TypeTag>
-void
-BlackoilModel<TypeTag>::
-updateTUNING(const Tuning& tuning)
-{
-    this->param_.tolerance_cnv_ = tuning.TRGCNV;
-    this->param_.tolerance_cnv_relaxed_ = tuning.XXXCNV;
-    this->param_.tolerance_mb_ = tuning.TRGMBE;
-    this->param_.tolerance_mb_relaxed_ = tuning.XXXMBE;
-    this->param_.newton_max_iter_ = tuning.NEWTMX;
-    this->param_.newton_min_iter_ = tuning.NEWTMN;
-}
-
-template <class TypeTag>
-void
-BlackoilModel<TypeTag>::
-updateTUNINGDP(const TuningDp& tuning_dp)
-{
-    // NOTE: If TUNINGDP item is _not_ set it should be 0.0
-    this->param_.tolerance_max_dp_ = tuning_dp.TRGDDP;
-    this->param_.tolerance_max_ds_ = tuning_dp.TRGDDS;
-    this->param_.tolerance_max_drs_ = tuning_dp.TRGDDRS;
-    this->param_.tolerance_max_drv_ = tuning_dp.TRGDDRV;
-}
-
-template <class TypeTag>
 ConvergenceReport
-BlackoilModel<TypeTag>::
+NonlinearSystemBlackOilReservoir<TypeTag>::
 getReservoirConvergence(const double reportTime,
                         const double dt,
                         const int maxIter,
@@ -884,7 +718,7 @@ getReservoirConvergence(const double reportTime,
     OPM_TIMEBLOCK(getReservoirConvergence);
     using Vector = std::vector<Scalar>;
 
-    const auto& iterCtx = simulator_.problem().iterationContext();
+    const auto& iterCtx = this->simulator_.problem().iterationContext();
 
     ConvergenceReport report{reportTime};
 
@@ -978,12 +812,12 @@ getReservoirConvergence(const double reportTime,
 
     // Ensure that CNV convergence criteria is met when max.
     // solution change tolerances have been fulfilled
-    Scalar tolerance_cnv_relaxed = relax_dsol_cnv ? 1e20 : param_.tolerance_cnv_relaxed_;
+    Scalar tolerance_cnv_relaxed = relax_dsol_cnv ? 1e20 : this->param_.tolerance_cnv_relaxed_;
 
-    const auto tol_cnv = use_relaxed_cnv ? tolerance_cnv_relaxed : param_.tolerance_cnv_;
-    const auto tol_mb  = use_relaxed_mb ? param_.tolerance_mb_relaxed_ : param_.tolerance_mb_;
-    const auto tol_cnv_energy = use_relaxed_cnv ? param_.tolerance_cnv_energy_relaxed_ : param_.tolerance_cnv_energy_;
-    const auto tol_eb = use_relaxed_mb ? param_.tolerance_energy_balance_relaxed_ : param_.tolerance_energy_balance_;
+    const auto tol_cnv = use_relaxed_cnv ? tolerance_cnv_relaxed : this->param_.tolerance_cnv_;
+    const auto tol_mb  = use_relaxed_mb ? this->param_.tolerance_mb_relaxed_ : this->param_.tolerance_mb_;
+    const auto tol_cnv_energy = use_relaxed_cnv ? this->param_.tolerance_cnv_energy_relaxed_ : this->param_.tolerance_cnv_energy_;
+    const auto tol_eb = use_relaxed_mb ?  this->param_.tolerance_energy_balance_relaxed_ : this->param_.tolerance_energy_balance_;
 
     // Finish computation
     std::vector<Scalar> CNV(numComp);
@@ -1012,31 +846,20 @@ getReservoirConvergence(const double reportTime,
             tol[1] = tol_cnv_energy;
         }
 
-        for (int ii : {0, 1}) {
-            if (std::isnan(res[ii])) {
-                report.setReservoirFailed({types[ii], CR::Severity::NotANumber, compIdx});
+        this->addReservoirConvergenceMetrics(
+            report,
+            compIdx,
+            this->compNames_.name(compIdx),
+            std::span<const Scalar>{res},
+            std::span<const CR::ReservoirFailure::Type>{types},
+            std::span<const Scalar>{tol},
+            maxResidualAllowed(),
+            [this](const std::string& message)
+            {
                 if (this->terminal_output_) {
-                    OpmLog::debug("NaN residual for " + this->compNames_.name(compIdx) + " equation.");
+                    OpmLog::debug(message);
                 }
-            }
-            else if (res[ii] > maxResidualAllowed()) {
-                report.setReservoirFailed({types[ii], CR::Severity::TooLarge, compIdx});
-                if (this->terminal_output_) {
-                    OpmLog::debug("Too large residual for " + this->compNames_.name(compIdx) + " equation.");
-                }
-            }
-            else if (res[ii] < 0.0) {
-                report.setReservoirFailed({types[ii], CR::Severity::Normal, compIdx});
-                if (this->terminal_output_) {
-                    OpmLog::debug("Negative residual for " + this->compNames_.name(compIdx) + " equation.");
-                }
-            }
-            else if (res[ii] > tol[ii]) {
-                report.setReservoirFailed({types[ii], CR::Severity::Normal, compIdx});
-            }
-
-            report.setReservoirConvergenceMetric(types[ii], compIdx, res[ii], tol[ii]);
-        }
+            });
     }
 
     // Compute the Newton convergence per cell.
@@ -1128,23 +951,23 @@ getReservoirConvergence(const double reportTime,
 
 template <class TypeTag>
 void
-BlackoilModel<TypeTag>::
+NonlinearSystemBlackOilReservoir<TypeTag>::
 convergencePerCell(const std::vector<Scalar>& B_avg,
                    const double dt,
                    const double tol_cnv,
                    const double tol_cnv_energy)
 {
-    auto& rst_conv = simulator_.problem().eclWriter().mutableOutputModule().getConv();
+    auto& rst_conv = this->simulator_.problem().eclWriter().mutableOutputModule().getConv();
     if (!rst_conv.hasConv()) {
         return;
     }
 
-    if (simulator_.problem().iterationContext().isFirstGlobalIteration()) {
+    if (this->simulator_.problem().iterationContext().isFirstGlobalIteration()) {
         rst_conv.prepareConv();
     }
 
-    const auto& residual = simulator_.model().linearizer().residual();
-    const auto& gridView = this->simulator().gridView();
+    const auto& residual = this->simulator_.model().linearizer().residual();
+    const auto& gridView = this->simulator_.gridView();
     const IsNumericalAquiferCell isNumericalAquiferCell(gridView.grid());
     ElementContext elemCtx(this->simulator());
     std::vector<int> convNewt(residual.size(), 0);
@@ -1155,8 +978,8 @@ convergencePerCell(const std::vector<Scalar>& B_avg,
         elemCtx.updatePrimaryStencil(elem);
 
         const unsigned cell_idx = elemCtx.globalSpaceIndex(/*spaceIdx=*/0, /*timeIdx=*/0);
-        const auto pvValue = simulator_.problem().referencePorosity(cell_idx, /*timeIdx=*/0) *
-                             simulator_.model().dofTotalVolume(cell_idx);
+        const auto pvValue = this->simulator_.problem().referencePorosity(cell_idx, /*timeIdx=*/0) *
+                             this->simulator_.model().dofTotalVolume(cell_idx);
         for (int compIdx = 0; compIdx < numComp; ++compIdx) {
             const auto tol = (has_energy_ && compIdx == contiEnergyEqIdx) ? tol_cnv_energy : tol_cnv;
             const Scalar cnv = std::abs(B_avg[compIdx] * residual[cell_idx][compIdx]) * dt / pvValue;
@@ -1167,14 +990,14 @@ convergencePerCell(const std::vector<Scalar>& B_avg,
         }
         ++idx;
     }
-    OPM_END_PARALLEL_TRY_CATCH("BlackoilModel::convergencePerCell() failed: ",
+    OPM_END_PARALLEL_TRY_CATCH("NonlinearSystemBlackOilReservoir::convergencePerCell() failed: ",
                                this->grid_.comm());
     rst_conv.updateNewton(convNewt);
 }
 
 template <class TypeTag>
 ConvergenceReport
-BlackoilModel<TypeTag>::
+NonlinearSystemBlackOilReservoir<TypeTag>::
 getConvergence(const SimulatorTimerInterface& timer,
                const int maxIter,
                std::vector<Scalar>& residual_norms)
@@ -1187,18 +1010,18 @@ getConvergence(const SimulatorTimerInterface& timer,
                                           maxIter, B_avg, residual_norms);
     {
         OPM_TIMEBLOCK(getWellConvergence);
-        report += wellModel().getWellConvergence(B_avg,
-                                                 /*checkWellGroupControlsAndNetwork*/report.converged());
+        report += this->wellModel().getWellConvergence(B_avg,
+                                                       /*checkWellGroupControlsAndNetwork*/report.converged());
     }
 
-    conv_monitor_.checkPenaltyCard(report, simulator_.problem().iterationContext().iteration());
+    conv_monitor_.checkPenaltyCard(report, this->simulator_.problem().iterationContext().iteration());
 
     return report;
 }
 
 template <class TypeTag>
-std::vector<std::vector<typename BlackoilModel<TypeTag>::Scalar> >
-BlackoilModel<TypeTag>::
+std::vector<std::vector<typename NonlinearSystemBlackOilReservoir<TypeTag>::Scalar> >
+NonlinearSystemBlackOilReservoir<TypeTag>::
 computeFluidInPlace(const std::vector<int>& /*fipnum*/) const
 {
     OPM_TIMEBLOCK(computeFluidInPlace);
@@ -1210,7 +1033,7 @@ computeFluidInPlace(const std::vector<int>& /*fipnum*/) const
 
 template <class TypeTag>
 const SimulatorReport&
-BlackoilModel<TypeTag>::
+NonlinearSystemBlackOilReservoir<TypeTag>::
 localAccumulatedReports() const
 {
     if (!hasNlddSolver()) {
@@ -1221,7 +1044,7 @@ localAccumulatedReports() const
 
 template <class TypeTag>
 const std::vector<SimulatorReport>&
-BlackoilModel<TypeTag>::
+NonlinearSystemBlackOilReservoir<TypeTag>::
 domainAccumulatedReports() const
 {
     if (!nlddSolver_)
@@ -1231,7 +1054,7 @@ domainAccumulatedReports() const
 
 template <class TypeTag>
 void
-BlackoilModel<TypeTag>::
+NonlinearSystemBlackOilReservoir<TypeTag>::
 writeNonlinearIterationsPerCell(const std::filesystem::path& odir) const
 {
     if (hasNlddSolver()) {
@@ -1241,7 +1064,7 @@ writeNonlinearIterationsPerCell(const std::filesystem::path& odir) const
 
 template <class TypeTag>
 void
-BlackoilModel<TypeTag>::
+NonlinearSystemBlackOilReservoir<TypeTag>::
 writePartitions(const std::filesystem::path& odir) const
 {
     if (hasNlddSolver()) {
@@ -1268,7 +1091,7 @@ writePartitions(const std::filesystem::path& odir) const
 template <class TypeTag>
 template<class FluidState, class Residual>
 void
-BlackoilModel<TypeTag>::
+NonlinearSystemBlackOilReservoir<TypeTag>::
 getMaxCoeff(const unsigned cell_idx,
             const IntensiveQuantities& intQuants,
             const FluidState& fs,
@@ -1390,4 +1213,4 @@ getMaxCoeff(const unsigned cell_idx,
 
 } // namespace Opm
 
-#endif // OPM_BLACKOILMODEL_IMPL_HEADER_INCLUDED
+#endif // OPM_NONLINEAR_SYSTEM_BLACK_OIL_RESERVOIR_IMPL_HEADER_INCLUDED

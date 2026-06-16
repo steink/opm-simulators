@@ -458,8 +458,11 @@ checkGEconLimits(
     if (checker.minOilRate() || checker.minGasRate()) {
         checker.closeWells();
     }
-    else if (checker.waterCut() || checker.GOR() || checker.WGR()) {
-        checker.doWorkOver();
+    else {
+        const auto ratio_details = checker.ratioViolation();
+        if (ratio_details.has_value()) {
+            checker.doWorkOver(ratio_details.value());
+        }
     }
     if (checker.endRun() && (checker.numProducersOpenInitially() >= 1)
                              && (checker.numProducersOpen() == 0))
@@ -563,7 +566,9 @@ checkGconsaleLimits(const Group& group,
             break;
         }
         default:
-            throw("Invalid procedure for maximum rate limit selected for group" + group.name());
+            OPM_DEFLOG_THROW(std::runtime_error,
+                             "Invalid procedure for maximum rate limit selected for group " + group.name(),
+                             deferred_logger);
         }
     }
     if (sales_rate < gconsale.min_sales_rate) {
@@ -653,8 +658,7 @@ checkGroupHigherConstraints(const Group& group,
         // So when checking constraints, current groups rate must also be subtracted it's reduction rate
         std::vector<Scalar> rates_available =
             this->groupStateHelper().getGroupRatesAvailableForHigherLevelControl(group, /*is_injector=*/true);
-        const Phase all[] = { Phase::WATER, Phase::OIL, Phase::GAS };
-        for (Phase phase : all) {
+        for (const Phase phase : {Phase::WATER, Phase::OIL, Phase::GAS}) {
             const auto currentControl = this->groupState().injection_control(group.name(), phase);
             bool group_is_oscillating = false;
             if (auto groupPos = switched_inj_groups_.find(group.name()); groupPos != switched_inj_groups_.end()) {
@@ -940,7 +944,7 @@ wellPI(const std::string& well_name) const
 
 template<typename Scalar, typename IndexTraits>
 bool BlackoilWellModelGeneric<Scalar, IndexTraits>::
-wasDynamicallyShutThisTimeStep(const int well_index) const
+wasDynamicallyShutThisTimeStep(const std::size_t well_index) const
 {
     return wasDynamicallyShutThisTimeStep(this->wells_ecl_[well_index].name());
 }
@@ -1211,7 +1215,7 @@ groupAndNetworkData(const int reportStepIdx) const
     auto grp_nwrk_values = data::GroupAndNetworkValues{};
 
     this->assignGroupValues(reportStepIdx, grp_nwrk_values.groupData);
-    this->genNetwork_.assignNodeValues(grp_nwrk_values.nodeData, reportStepIdx - 1); // Schedule state info at previous step
+    this->genNetwork_.assignNodeAndBranchValues(grp_nwrk_values.nodeData, grp_nwrk_values.branchData, grp_nwrk_values.convergedBranchData, reportStepIdx - 1); // Schedule state info at previous step
 
     return grp_nwrk_values;
 }
@@ -1248,11 +1252,11 @@ updateAndCommunicateGroupData(const int reportStepIdx,
         this->updateNupcolWGState();
     } else {
         for (const auto& gr_name : schedule().groupNames(reportStepIdx)) {
-            const Phase all[] = { Phase::WATER, Phase::OIL, Phase::GAS };
-            for (Phase phase : all) {
+            for (const Phase phase : {Phase::WATER, Phase::OIL, Phase::GAS}) {
                 if (this->groupState().has_injection_control(gr_name, phase)) {
                     if (this->groupState().injection_control(gr_name, phase) == Group::InjectionCMode::VREP ||
-                        this->groupState().injection_control(gr_name, phase) == Group::InjectionCMode::REIN) {
+                        this->groupState().injection_control(gr_name, phase) == Group::InjectionCMode::REIN)
+                    {
 		        OPM_TIMEBLOCK(extraIterationsAfterNupcol);
                         const bool is_vrep = this->groupState().injection_control(gr_name, phase) == Group::InjectionCMode::VREP;
                         const Group& group = schedule().getGroup(gr_name, reportStepIdx);
@@ -1323,7 +1327,7 @@ updateAndCommunicateGroupData(const int reportStepIdx,
         group_state_helper.updateVREPForGroups(fieldGroup);
         group_state_helper.updateReservoirRatesInjectionGroups(fieldGroup);
         group_state_helper.updateSurfaceRatesInjectionGroups(fieldGroup);
-        group_state_helper.updateNetworkLeafNodeProductionRates();
+        group_state_helper.updateNetworkLeafNodeRates();
         group_state_helper.updateGroupProductionRates(fieldGroup);
     }
     group_state_helper.updateWellRates(fieldGroup, this->nupcolWellState(), this->wellState());
@@ -1466,12 +1470,13 @@ forceShutWellByName(const std::string& wellname,
     // Communicate across processes if a well was shut.
     well_was_shut = comm_.max(well_was_shut);
 
-    // the wellTesteState is updated between timesteps and we also need to update the privous WGstate
-    if(well_was_shut)
+    // The wellTestState is updated between timesteps and we also need to update the previous WGstate.
+    if (well_was_shut != 0) {
         this->commitWGState();
+    }
 
     // Only log a message on the output rank.
-    if (terminal_output_ && well_was_shut) {
+    if (terminal_output_ && well_was_shut != 0) {
         const std::string msg = "Well " + wellname
             + " will be shut because it fails to converge.";
         OpmLog::info(msg);
@@ -1934,8 +1939,7 @@ reportGroupSwitching(DeferredLogger& local_deferredLogger) const
         }
     }
     for (const auto& [grname, grdata] : this->switched_inj_groups_) {
-        const Phase all[] = {Phase::WATER, Phase::OIL, Phase::GAS};
-        for (Phase phase : all) {
+        for (const Phase phase : {Phase::WATER, Phase::OIL, Phase::GAS}) {
             if (!this->groupState().has_injection_control(grname, phase)) {
                 continue;
             }
@@ -1980,6 +1984,19 @@ operator==(const BlackoilWellModelGeneric& rhs) const
         && this->gen_gaslift_ == rhs.gen_gaslift_;
 }
 
+
+template<typename Scalar, typename IndexTraits>
+bool BlackoilWellModelGeneric<Scalar, IndexTraits>::
+allConnectionsClosed(const Well& well_ecl) const
+{
+    return std::ranges::all_of(well_ecl.getConnections(),
+                               [this, &well_name = well_ecl.name()](const auto& connection)
+                               {
+                                   return connection.state() != Connection::State::OPEN
+                                       || this->wellTestState().completion_is_closed(well_name,
+                                                                                     connection.complnum());
+                               });
+}
 
 template class BlackoilWellModelGeneric<double, BlackOilDefaultFluidSystemIndices>;
 

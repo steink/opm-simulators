@@ -43,7 +43,6 @@
 #include <opm/material/fluidstates/BlackOilFluidState.hpp>
 #include <opm/material/fluidsystems/BlackOilFluidSystem.hpp>
 
-#include <opm/models/blackoil/blackoilenergymodules.hh>
 #include <opm/models/blackoil/blackoilproperties.hh>
 #include <opm/models/discretization/common/fvbaseproperties.hh>
 #include <opm/models/utils/parametersystem.hpp>
@@ -63,6 +62,7 @@
 #include <cassert>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -74,6 +74,12 @@ namespace Opm {
 // forward declaration
 template <class TypeTag>
 class EcfvDiscretization;
+
+namespace detail {
+    //! \brief Utility to silence "unused variable" warnings in lambdas.
+    template <typename... T>
+    constexpr void ignoreUnused(T&&...) noexcept {}
+}
 
 /*!
  * \ingroup BlackOilSimulator
@@ -115,11 +121,16 @@ class OutputBlackOilModule : public GenericOutputBlackoilModule<GetPropType<Type
     static constexpr int oilCompIdx = FluidSystem::oilCompIdx;
     static constexpr int waterCompIdx = FluidSystem::waterCompIdx;
     static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
-    enum { enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>() };
+    static constexpr bool enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>();
+    static constexpr bool enableExtbo = getPropValue<TypeTag, Properties::EnableExtbo>();
+    static constexpr bool enableFoam = getPropValue<TypeTag, Properties::EnableFoam>();
+    static constexpr bool enablePolymer = getPropValue<TypeTag, Properties::EnablePolymer>();
+    static constexpr bool enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>();
     enum { enableMICP = Indices::enableMICP };
     enum { enableVapwat = getPropValue<TypeTag, Properties::EnableVapwat>() };
     enum { enableDisgasInWater = getPropValue<TypeTag, Properties::EnableDisgasInWater>() };
-    enum { enableDissolvedGas = Indices::compositionSwitchIdx >= 0 };
+    static constexpr bool enableDissolvedGas =
+        Indices::compositionSwitchIdx != std::numeric_limits<unsigned>::max();
 
     template<class VectorType>
     static Scalar value_or_zero(int idx, const VectorType& v)
@@ -144,7 +155,7 @@ public:
                    [&collectOnIORank](const int idx)
                    { return collectOnIORank.isCartIdxOnThisRank(idx); },
                    simulator.vanguard().grid().comm(),
-                   energyModuleType == EnergyModules::FullyImplicitThermal || 
+                   energyModuleType == EnergyModules::FullyImplicitThermal ||
                    energyModuleType == EnergyModules::SequentialImplicitThermal,
                    energyModuleType == EnergyModules::ConstantTemperature,
                    getPropValue<TypeTag, Properties::EnableMech>(),
@@ -1191,15 +1202,16 @@ private:
             Entry{PhaseEntry{&this->viscosity_,
                              [this](const unsigned phaseIdx, const Context& ectx)
                              {
-                                if (this->extboC_.allocated() && phaseIdx == oilPhaseIdx) {
-                                    return getValue(ectx.intQuants.oilViscosity());
+                                detail::ignoreUnused(this);
+                                if constexpr (enableExtbo) {
+                                    if (this->extboC_.allocated() && phaseIdx == oilPhaseIdx) {
+                                        return getValue(ectx.intQuants.oilViscosity());
+                                    }
+                                    else if (this->extboC_.allocated() && phaseIdx == gasPhaseIdx) {
+                                        return getValue(ectx.intQuants.gasViscosity());
+                                    }
                                 }
-                                else if (this->extboC_.allocated() && phaseIdx == gasPhaseIdx) {
-                                    return getValue(ectx.intQuants.gasViscosity());
-                                }
-                                else {
-                                    return getValue(ectx.fs.viscosity(phaseIdx));
-                                }
+                                return getValue(ectx.fs.viscosity(phaseIdx));
                              }
                   }
             },
@@ -1285,22 +1297,50 @@ private:
             },
             Entry{ScalarEntry{&this->sSol_,
                               [](const Context& ectx)
-                              { return getValue(ectx.intQuants.solventSaturation()); }
+                              {
+                                  if constexpr (enableSolvent) {
+                                      return getValue(ectx.intQuants.solventSaturation());
+                                  }
+                                  else {
+                                      return Scalar{0};
+                                  }
+                              }
                   }
             },
             Entry{ScalarEntry{&this->rswSol_,
                               [](const Context& ectx)
-                              { return getValue(ectx.intQuants.rsSolw()); }
+                              {
+                                  if constexpr (enableSolvent) {
+                                      return getValue(ectx.intQuants.rsSolw());
+                                  }
+                                  else {
+                                      return Scalar{0};
+                                  }
+                              }
                   }
             },
             Entry{ScalarEntry{&this->cPolymer_,
                               [](const Context& ectx)
-                              { return getValue(ectx.intQuants.polymerConcentration()); }
+                              {
+                                  if constexpr (enablePolymer) {
+                                      return getValue(ectx.intQuants.polymerConcentration());
+                                  }
+                                  else {
+                                      return Scalar{0};
+                                  }
+                              }
                   }
             },
             Entry{ScalarEntry{&this->cFoam_,
                               [](const Context& ectx)
-                              { return getValue(ectx.intQuants.foamConcentration()); }
+                              {
+                                  if constexpr (enableFoam) {
+                                      return getValue(ectx.intQuants.foamConcentration());
+                                  }
+                                  else {
+                                      return Scalar{0};
+                                  }
+                              }
                   }
             },
             Entry{ScalarEntry{&this->cSalt_,
@@ -1566,51 +1606,57 @@ private:
             },
             Entry{[&extboC = this->extboC_](const Context& ectx)
                   {
-                      extboC.assignVolumes(ectx.globalDofIdx,
-                                           ectx.intQuants.xVolume().value(),
-                                           ectx.intQuants.yVolume().value());
-                      extboC.assignZFraction(ectx.globalDofIdx,
-                                             ectx.intQuants.zFraction().value());
+                      detail::ignoreUnused(extboC);
+                      if constexpr (enableExtbo) {
+                          extboC.assignVolumes(ectx.globalDofIdx,
+                                               ectx.intQuants.xVolume().value(),
+                                               ectx.intQuants.yVolume().value());
+                          extboC.assignZFraction(ectx.globalDofIdx,
+                                                 ectx.intQuants.zFraction().value());
 
-                      const Scalar stdVolOil = getValue(ectx.fs.saturation(oilPhaseIdx)) *
-                                               getValue(ectx.fs.invB(oilPhaseIdx)) +
-                                               getValue(ectx.fs.saturation(gasPhaseIdx)) *
-                                               getValue(ectx.fs.invB(gasPhaseIdx)) *
-                                               getValue(ectx.fs.Rv());
-                      const Scalar stdVolGas = getValue(ectx.fs.saturation(gasPhaseIdx)) *
-                                               getValue(ectx.fs.invB(gasPhaseIdx)) *
-                                               (1.0 - ectx.intQuants.yVolume().value()) +
-                                               getValue(ectx.fs.saturation(oilPhaseIdx)) *
-                                               getValue(ectx.fs.invB(oilPhaseIdx)) *
-                                               getValue(ectx.fs.Rs()) *
-                                               (1.0 - ectx.intQuants.xVolume().value());
-                      const Scalar stdVolCo2 = getValue(ectx.fs.saturation(gasPhaseIdx)) *
-                                               getValue(ectx.fs.invB(gasPhaseIdx)) *
-                                               ectx.intQuants.yVolume().value() +
-                                               getValue(ectx.fs.saturation(oilPhaseIdx)) *
-                                               getValue(ectx.fs.invB(oilPhaseIdx)) *
-                                               getValue(ectx.fs.Rs()) *
-                                               ectx.intQuants.xVolume().value();
-                      const Scalar rhoO = FluidSystem::referenceDensity(gasPhaseIdx, ectx.pvtRegionIdx);
-                      const Scalar rhoG = FluidSystem::referenceDensity(gasPhaseIdx, ectx.pvtRegionIdx);
-                      const Scalar rhoCO2 = ectx.intQuants.zRefDensity();
-                      const Scalar stdMassTotal = 1.0e-10 + stdVolOil * rhoO + stdVolGas * rhoG + stdVolCo2 * rhoCO2;
-                      extboC.assignMassFractions(ectx.globalDofIdx,
-                                                 stdVolGas * rhoG / stdMassTotal,
-                                                 stdVolOil * rhoO / stdMassTotal,
-                                                 stdVolCo2 * rhoCO2 / stdMassTotal);
+                          const Scalar stdVolOil = getValue(ectx.fs.saturation(oilPhaseIdx)) *
+                                                   getValue(ectx.fs.invB(oilPhaseIdx)) +
+                                                   getValue(ectx.fs.saturation(gasPhaseIdx)) *
+                                                   getValue(ectx.fs.invB(gasPhaseIdx)) *
+                                                   getValue(ectx.fs.Rv());
+                          const Scalar stdVolGas = getValue(ectx.fs.saturation(gasPhaseIdx)) *
+                                                   getValue(ectx.fs.invB(gasPhaseIdx)) *
+                                                   (1.0 - ectx.intQuants.yVolume().value()) +
+                                                   getValue(ectx.fs.saturation(oilPhaseIdx)) *
+                                                   getValue(ectx.fs.invB(oilPhaseIdx)) *
+                                                   getValue(ectx.fs.Rs()) *
+                                                   (1.0 - ectx.intQuants.xVolume().value());
+                          const Scalar stdVolCo2 = getValue(ectx.fs.saturation(gasPhaseIdx)) *
+                                                   getValue(ectx.fs.invB(gasPhaseIdx)) *
+                                                   ectx.intQuants.yVolume().value() +
+                                                   getValue(ectx.fs.saturation(oilPhaseIdx)) *
+                                                   getValue(ectx.fs.invB(oilPhaseIdx)) *
+                                                   getValue(ectx.fs.Rs()) *
+                                                   ectx.intQuants.xVolume().value();
+                          const Scalar rhoO = FluidSystem::referenceDensity(oilPhaseIdx, ectx.pvtRegionIdx);
+                          const Scalar rhoG = FluidSystem::referenceDensity(gasPhaseIdx, ectx.pvtRegionIdx);
+                          const Scalar rhoCO2 = ectx.intQuants.zRefDensity();
+                          const Scalar stdMassTotal = 1.0e-10 + stdVolOil * rhoO + stdVolGas * rhoG + stdVolCo2 * rhoCO2;
+                          extboC.assignMassFractions(ectx.globalDofIdx,
+                                                     stdVolGas * rhoG / stdMassTotal,
+                                                     stdVolOil * rhoO / stdMassTotal,
+                                                     stdVolCo2 * rhoCO2 / stdMassTotal);
+                      }
                     }, this->extboC_.allocated()
             },
             Entry{[&bioeffectsC = this->bioeffectsC_](const Context& ectx)
                   {
-                      bioeffectsC.assign(ectx.globalDofIdx,
-                                         ectx.intQuants.microbialConcentration().value(),
-                                         ectx.intQuants.biofilmVolumeFraction().value());
-                      if (Indices::enableMICP) {
+                      detail::ignoreUnused(bioeffectsC);
+                      if constexpr (enableBioeffects) {
                           bioeffectsC.assign(ectx.globalDofIdx,
-                                             ectx.intQuants.oxygenConcentration().value(),
-                                             ectx.intQuants.ureaConcentration().value(),
-                                             ectx.intQuants.calciteVolumeFraction().value());
+                                             ectx.intQuants.microbialConcentration().value(),
+                                             ectx.intQuants.biofilmVolumeFraction().value());
+                          if (Indices::enableMICP) {
+                              bioeffectsC.assign(ectx.globalDofIdx,
+                                                 ectx.intQuants.oxygenConcentration().value(),
+                                                 ectx.intQuants.ureaConcentration().value(),
+                                                 ectx.intQuants.calciteVolumeFraction().value());
+                          }
                       }
                   }, this->bioeffectsC_.allocated()
             },
@@ -1935,7 +1981,12 @@ private:
             Entry{ScalarEntry{"BNSAT",
                               [](const Context& ectx)
                               {
-                                  return ectx.intQuants.solventSaturation().value();
+                                  if constexpr (enableSolvent) {
+                                      return ectx.intQuants.solventSaturation().value();
+                                  }
+                                  else {
+                                      return Scalar{0};
+                                  }
                               }
                   }
             },
@@ -2612,44 +2663,69 @@ private:
             Entry{ScalarEntry{"BMMIP",
                               [&model = this->simulator_.model()](const Context& ectx)
                               {
-                                  return getValue(ectx.intQuants.microbialConcentration()) *
-                                         getValue(ectx.fs.saturation(waterPhaseIdx)) *
-                                         getValue(ectx.intQuants.porosity()) *
-                                         model.dofTotalVolume(ectx.globalDofIdx);
+                                  if constexpr (enableBioeffects) {
+                                      return getValue(ectx.intQuants.microbialConcentration()) *
+                                             getValue(ectx.fs.saturation(waterPhaseIdx)) *
+                                             getValue(ectx.intQuants.porosity()) *
+                                             model.dofTotalVolume(ectx.globalDofIdx);
+                                  }
+                                  else {
+                                      return Scalar{0};
+                                  }
                               }
                   }
             },
             Entry{ScalarEntry{"BMOIP",
                               [&model = this->simulator_.model()](const Context& ectx)
                               {
-                                  return getValue(ectx.intQuants.oxygenConcentration()) *
-                                         getValue(ectx.intQuants.porosity()) *
-                                         model.dofTotalVolume(ectx.globalDofIdx);
+                                  if constexpr (enableBioeffects) {
+                                      return getValue(ectx.intQuants.oxygenConcentration()) *
+                                             getValue(ectx.intQuants.porosity()) *
+                                             model.dofTotalVolume(ectx.globalDofIdx);
+                                  }
+                                  else {
+                                      return Scalar{0};
+                                  }
                               }
                   }
             },
             Entry{ScalarEntry{"BMUIP",
                               [&model = this->simulator_.model()](const Context& ectx)
                               {
-                                  return getValue(ectx.intQuants.ureaConcentration()) *
-                                         getValue(ectx.intQuants.porosity()) *
-                                         model.dofTotalVolume(ectx.globalDofIdx) * 1;
+                                  if constexpr (enableBioeffects) {
+                                      return getValue(ectx.intQuants.ureaConcentration()) *
+                                             getValue(ectx.intQuants.porosity()) *
+                                             model.dofTotalVolume(ectx.globalDofIdx);
+                                  }
+                                  else {
+                                      return Scalar{0};
+                                  }
                               }
                   }
             },
             Entry{ScalarEntry{"BMBIP",
                               [&model = this->simulator_.model()](const Context& ectx)
                               {
-                                  return model.dofTotalVolume(ectx.globalDofIdx) *
-                                         getValue(ectx.intQuants.biofilmMass());
+                                  if constexpr (enableBioeffects) {
+                                      return model.dofTotalVolume(ectx.globalDofIdx) *
+                                            getValue(ectx.intQuants.biofilmMass());
+                                  }
+                                  else {
+                                      return Scalar{0};
+                                  }
                               }
                   }
             },
             Entry{ScalarEntry{"BMCIP",
                               [&model = this->simulator_.model()](const Context& ectx)
                               {
-                                  return model.dofTotalVolume(ectx.globalDofIdx) *
-                                         getValue(ectx.intQuants.calciteMass());
+                                  if constexpr (enableBioeffects) {
+                                      return model.dofTotalVolume(ectx.globalDofIdx) *
+                                             getValue(ectx.intQuants.calciteMass());
+                                  }
+                                  else {
+                                      return Scalar{0};
+                                  }
                               }
                   }
             },

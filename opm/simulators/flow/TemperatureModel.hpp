@@ -42,10 +42,13 @@
 #include <opm/simulators/linalg/istlsparsematrixadapter.hh>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
-#include <string>
+#include <memory>
+#include <limits>
+#include <set>
 #include <vector>
 
 namespace Opm::Properties {
@@ -72,15 +75,14 @@ class BlackOilEnergyIntensiveQuantitiesTemp
     using Indices = GetPropType<TypeTag, Properties::Indices>;
     using Problem = GetPropType<TypeTag, Properties::Problem>;
 
-
-
-    enum { enableBrine = getPropValue<TypeTag, Properties::EnableBrine>() };
+    static constexpr bool enableBrine = getPropValue<TypeTag, Properties::EnableBrine>();
     enum { enableVapwat = getPropValue<TypeTag, Properties::EnableVapwat>() };
     enum { enableDisgasInWater = getPropValue<TypeTag, Properties::EnableDisgasInWater>() };
     enum { enableSaltPrecipitation = getPropValue<TypeTag, Properties::EnableSaltPrecipitation>() };
-    enum { enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>() };
+    static constexpr bool enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>();
     enum { numPhases = getPropValue<TypeTag, Properties::NumPhases>() };
-    static constexpr bool compositionSwitchEnabled = Indices::compositionSwitchIdx >= 0;
+    static constexpr bool compositionSwitchEnabled =
+        Indices::compositionSwitchIdx != std::numeric_limits<unsigned>::max();
 
     public:
     using EvaluationTemp = DenseAd::Evaluation<Scalar, 1>;
@@ -198,7 +200,8 @@ class TemperatureModel : public GenericTemperatureModel<GetPropType<TypeTag, Pro
     using Indices = GetPropType<TypeTag, Properties::Indices>;
     using LocalResidual = GetPropType<TypeTag, Properties::LocalResidual>;
     using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
-    using EnergyModule = BlackOilEnergyModule<TypeTag>;
+    static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
+    using EnergyModule = BlackOilEnergyModule<TypeTag, energyModuleType>;
     using IndexTraits = typename FluidSystem::IndexTraitsType;
     using WellStateType = WellState<Scalar, IndexTraits>;
 
@@ -226,7 +229,7 @@ class TemperatureModel : public GenericTemperatureModel<GetPropType<TypeTag, Pro
     enum { waterPhaseIdx = FluidSystem::waterPhaseIdx };
     enum { oilPhaseIdx = FluidSystem::oilPhaseIdx };
     enum { gasPhaseIdx = FluidSystem::gasPhaseIdx };
-    static constexpr int temperatureIdx = 0;
+    static constexpr unsigned temperatureIdx = 0;
 
 public:
     explicit TemperatureModel(Simulator& simulator)
@@ -556,7 +559,7 @@ protected:
         flux *= scalingFactor_;
     }
 
-    template < class ResidualNBInfo>
+    template <class ResidualNBInfo>
     void computeHeatFluxTerm(const IntensiveQuantitiesTemp& intQuantsIn,
                              const IntensiveQuantitiesTemp& intQuantsEx,
                              const ResidualNBInfo& res_nbinfo,
@@ -564,17 +567,18 @@ protected:
     {
         short interiorDofIdx = 0; // NB
         short exteriorDofIdx = 1; // NB
-        EnergyModule::ExtensiveQuantities::updateEnergy(heatFlux,
-                                                        interiorDofIdx, // focusDofIndex,
-                                                        interiorDofIdx,
-                                                        exteriorDofIdx,
-                                                        intQuantsIn,
-                                                        intQuantsEx,
-                                                        intQuantsIn.fluidStateTemp(),
-                                                        intQuantsEx.fluidStateTemp(),
-                                                        res_nbinfo.inAlpha,
-                                                        res_nbinfo.outAlpha,
-                                                        res_nbinfo.faceArea);
+        BlackOilEnergyExtensiveQuantities<TypeTag, energyModuleType>::
+            updateEnergy(heatFlux,
+                         interiorDofIdx, // focusDofIndex,
+                         interiorDofIdx,
+                         exteriorDofIdx,
+                         intQuantsIn,
+                         intQuantsEx,
+                         intQuantsIn.fluidStateTemp(),
+                         intQuantsEx.fluidStateTemp(),
+                         res_nbinfo.inAlpha,
+                         res_nbinfo.outAlpha,
+                         res_nbinfo.faceArea);
         heatFlux *= scalingFactor_*res_nbinfo.faceArea;
     }
 

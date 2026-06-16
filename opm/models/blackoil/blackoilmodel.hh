@@ -32,26 +32,18 @@
 
 #include <opm/material/fluidsystems/BlackOilFluidSystem.hpp>
 
-#include <opm/models/blackoil/blackoilbioeffectsmodules.hh>
+#include <opm/models/blackoil/blackoilmodules.hpp>
 #include <opm/models/blackoil/blackoilboundaryratevector.hh>
-#include <opm/models/blackoil/blackoilbrinemodules.hh>
 #include <opm/models/blackoil/blackoildarcyfluxmodule.hh>
-#include <opm/models/blackoil/blackoildiffusionmodule.hh>
-#include <opm/models/blackoil/blackoildispersionmodule.hh>
-#include <opm/models/blackoil/blackoilenergymodules.hh>
-#include <opm/models/blackoil/blackoilextbomodules.hh>
 #include <opm/models/blackoil/blackoilextensivequantities.hh>
-#include <opm/models/blackoil/blackoilfoammodules.hh>
 #include <opm/models/blackoil/blackoilvariableandequationindices.hh>
 #include <opm/models/blackoil/blackoilintensivequantities.hh>
 #include <opm/models/blackoil/blackoillocalresidual.hh>
 #include <opm/models/blackoil/blackoilnewtonmethod.hpp>
-#include <opm/models/blackoil/blackoilpolymermodules.hh>
 #include <opm/models/blackoil/blackoilprimaryvariables.hh>
 #include <opm/models/blackoil/blackoilproblem.hh>
 #include <opm/models/blackoil/blackoilproperties.hh>
 #include <opm/models/blackoil/blackoilratevector.hh>
-#include <opm/models/blackoil/blackoilsolventmodules.hh>
 #include <opm/models/blackoil/blackoiltwophaseindices.hh>
 
 #include <opm/models/common/multiphasebasemodel.hh>
@@ -60,8 +52,11 @@
 #include <opm/models/io/vtkcompositionmodule.hpp>
 #include <opm/models/io/vtkdiffusionmodule.hpp>
 
+#include <opm/models/utils/propertysystem.hh>
+
 #include <cassert>
 #include <istream>
+#include <limits>
 #include <memory>
 #include <ostream>
 #include <sstream>
@@ -83,7 +78,8 @@ namespace TTag {
 
 //! The type tag for the black-oil problems
 struct BlackOilModel
-{ using InheritsFrom = std::tuple<VtkBlackOilPolymer, MultiPhaseBaseModel>; };
+{ using InheritsFrom = std::tuple<MultiPhaseBaseModel>; };
+
 } // namespace TTag
 
 //! Set the local residual function
@@ -354,19 +350,26 @@ private:
 
     enum { numComponents = FluidSystem::numComponents };
     enum { numEq = getPropValue<TypeTag, Properties::NumEq>() };
-    enum { enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>() };
-    enum { enableDispersion = getPropValue<TypeTag, Properties::EnableDispersion>() };
 
-    static constexpr bool compositionSwitchEnabled = Indices::compositionSwitchIdx >= 0;
+    static constexpr bool compositionSwitchEnabled =
+        Indices::compositionSwitchIdx != std::numeric_limits<unsigned>::max();
+    static constexpr bool enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>();
+    static constexpr bool enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>();
+    static constexpr bool enableDispersion = getPropValue<TypeTag, Properties::EnableDispersion>();
+    static constexpr bool enableExtbo = getPropValue<TypeTag, Properties::EnableExtbo>();
+    static constexpr bool enablePolymer = getPropValue<TypeTag, Properties::EnablePolymer>();
+    static constexpr bool enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>();
+    static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
+    static constexpr bool enableFullyImplicitThermal = energyModuleType == EnergyModules::FullyImplicitThermal;
     static constexpr bool waterEnabled = Indices::waterEnabled;
 
-    using SolventModule = BlackOilSolventModule<TypeTag>;
-    using ExtboModule = BlackOilExtboModule<TypeTag>;
-    using PolymerModule = BlackOilPolymerModule<TypeTag>;
-    using EnergyModule = BlackOilEnergyModule<TypeTag>;
+    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag, enableBioeffects>;
     using DiffusionModule = BlackOilDiffusionModule<TypeTag, enableDiffusion>;
     using DispersionModule = BlackOilDispersionModule<TypeTag, enableDispersion>;
-    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag>;
+    using EnergyModule = BlackOilEnergyModule<TypeTag, energyModuleType>;
+    using ExtboModule = BlackOilExtboModule<TypeTag, enableExtbo>;
+    using PolymerModule = BlackOilPolymerModule<TypeTag, enablePolymer>;
+    using SolventModule = BlackOilSolventModule<TypeTag, enableSolvent>;
 
 public:
     using LocalResidual = GetPropType<TypeTag, Properties::LocalResidual>;
@@ -384,17 +387,31 @@ public:
     {
         ParentType::registerParameters();
 
-        SolventModule::registerParameters();
-        ExtboModule::registerParameters();
-        PolymerModule::registerParameters();
-        EnergyModule::registerParameters();
-        DiffusionModule::registerParameters();
-        BioeffectsModule::registerParameters();
+        if constexpr (enableSolvent) {
+            SolventModule::registerParameters();
+        }
+        if constexpr (enableExtbo) {
+            ExtboModule::registerParameters();
+        }
+        if constexpr (enablePolymer) {
+            PolymerModule::registerParameters();
+        }
+        if constexpr (enableFullyImplicitThermal) {
+            EnergyModule::registerParameters();
+        }
+        if constexpr (enableDiffusion) {
+            DiffusionModule::registerParameters();
+        }
+        if constexpr (enableBioeffects) {
+            BioeffectsModule::registerParameters();
+        }
 
         // register runtime parameters of the VTK output modules
         VtkBlackOilModule<TypeTag>::registerParameters();
         VtkCompositionModule<TypeTag>::registerParameters();
-        VtkDiffusionModule<TypeTag>::registerParameters();
+        if constexpr (enableDiffusion) {
+            VtkDiffusionModule<TypeTag>::registerParameters();
+        }
     }
 
     /*!
@@ -406,7 +423,7 @@ public:
     /*!
      * \copydoc FvBaseDiscretization::primaryVarName
      */
-    std::string primaryVarName(int pvIdx) const
+    std::string primaryVarName(unsigned pvIdx) const
     {
         if (pvIdx == Indices::waterSwitchIdx) {
             return "water_switching";
@@ -414,24 +431,35 @@ public:
         else if (pvIdx == Indices::pressureSwitchIdx) {
             return "pressure_switching";
         }
-        else if (static_cast<int>(pvIdx) == Indices::compositionSwitchIdx) {
+        else if (pvIdx == Indices::compositionSwitchIdx) {
             return "composition_switching";
         }
-        else if (SolventModule::primaryVarApplies(pvIdx)) {
-            return SolventModule::primaryVarName(pvIdx);
+
+        if constexpr (enableSolvent) {
+            if (SolventModule::primaryVarApplies(pvIdx)) {
+                return SolventModule::primaryVarName(pvIdx);
+            }
         }
-        else if (ExtboModule::primaryVarApplies(pvIdx)) {
-            return ExtboModule::primaryVarName(pvIdx);
+
+        if constexpr (enableExtbo) {
+            if (ExtboModule::primaryVarApplies(pvIdx)) {
+                return ExtboModule::primaryVarName(pvIdx);
+            }
         }
-        else if (PolymerModule::primaryVarApplies(pvIdx)) {
-            return PolymerModule::primaryVarName(pvIdx);
+
+        if constexpr (enablePolymer) {
+            if (PolymerModule::primaryVarApplies(pvIdx)) {
+                return PolymerModule::primaryVarName(pvIdx);
+            }
         }
-        else if (EnergyModule::primaryVarApplies(pvIdx)) {
-            return EnergyModule::primaryVarName(pvIdx);
+
+        if constexpr (enableFullyImplicitThermal) {
+            if (EnergyModule::primaryVarApplies(pvIdx)) {
+                return EnergyModule::primaryVarName(pvIdx);
+            }
         }
-        else {
-            throw std::logic_error("Invalid primary variable index");
-        }
+
+        throw std::logic_error("Invalid primary variable index");
     }
 
     /*!
@@ -444,21 +472,32 @@ public:
             oss << "conti_" << FluidSystem::phaseName(eqIdx - Indices::conti0EqIdx);
             return oss.str();
         }
-        else if (SolventModule::eqApplies(eqIdx)) {
-            return SolventModule::eqName(eqIdx);
+
+        if constexpr (enableSolvent) {
+            if (SolventModule::eqApplies(eqIdx)) {
+                return SolventModule::eqName(eqIdx);
+            }
         }
-        else if (ExtboModule::eqApplies(eqIdx)) {
-            return ExtboModule::eqName(eqIdx);
+
+        if constexpr (enableExtbo) {
+            if (ExtboModule::eqApplies(eqIdx)) {
+                return ExtboModule::eqName(eqIdx);
+            }
         }
-        else if (PolymerModule::eqApplies(eqIdx)) {
-            return PolymerModule::eqName(eqIdx);
+
+        if constexpr (enablePolymer) {
+            if (PolymerModule::eqApplies(eqIdx)) {
+                return PolymerModule::eqName(eqIdx);
+            }
         }
-        else if (EnergyModule::eqApplies(eqIdx)) {
-            return EnergyModule::eqName(eqIdx);
+
+        if constexpr (enableFullyImplicitThermal) {
+            if (EnergyModule::eqApplies(eqIdx)) {
+                return EnergyModule::eqName(eqIdx);
+            }
         }
-        else {
-            throw std::logic_error("Invalid equation index");
-        }
+
+        throw std::logic_error("Invalid equation index");
     }
 
     /*!
@@ -473,7 +512,7 @@ public:
         }
 
         // saturations are always in the range [0, 1]!
-        if (int(Indices::waterSwitchIdx) == int(pvIdx)) {
+        if (Indices::waterSwitchIdx == pvIdx) {
             return 1.0;
         }
 
@@ -484,27 +523,35 @@ public:
         }
 
         // deal with primary variables stemming from the solvent module
-        else if (SolventModule::primaryVarApplies(pvIdx)) {
-            return SolventModule::primaryVarWeight(pvIdx);
+        if constexpr (enableSolvent) {
+            if (SolventModule::primaryVarApplies(pvIdx)) {
+                return SolventModule::primaryVarWeight(pvIdx);
+            }
         }
 
         // deal with primary variables stemming from the extBO module
-        else if (ExtboModule::primaryVarApplies(pvIdx)) {
-            return ExtboModule::primaryVarWeight(pvIdx);
+        if constexpr (enableExtbo) {
+            if (ExtboModule::primaryVarApplies(pvIdx)) {
+                return ExtboModule::primaryVarWeight(pvIdx);
+            }
         }
 
         // deal with primary variables stemming from the polymer module
-        else if (PolymerModule::primaryVarApplies(pvIdx)) {
-            return PolymerModule::primaryVarWeight(pvIdx);
+        if constexpr (enablePolymer) {
+            if (PolymerModule::primaryVarApplies(pvIdx)) {
+                return PolymerModule::primaryVarWeight(pvIdx);
+            }
         }
 
         // deal with primary variables stemming from the energy module
-        else if (EnergyModule::primaryVarApplies(pvIdx)) {
-            return EnergyModule::primaryVarWeight(pvIdx);
+        if constexpr (enableFullyImplicitThermal) {
+            if (EnergyModule::primaryVarApplies(pvIdx)) {
+                return EnergyModule::primaryVarWeight(pvIdx);
+            }
         }
 
         // if the primary variable is either the gas saturation, Rs or Rv
-        assert(int(Indices::compositionSwitchIdx) == int(pvIdx));
+        assert(Indices::compositionSwitchIdx == pvIdx);
 
         switch (this->solution(0)[globalDofIdx].primaryVarsMeaningGas()) {
         case PrimaryVariables::GasMeaning::Sg: return 1.0; // gas saturation
@@ -565,10 +612,18 @@ public:
 
         outstream << priVars.pvtRegionIndex() << " ";
 
-        SolventModule::serializeEntity(asImp_(), outstream, dof);
-        ExtboModule::serializeEntity(asImp_(), outstream, dof);
-        PolymerModule::serializeEntity(asImp_(), outstream, dof);
-        EnergyModule::serializeEntity(asImp_(), outstream, dof);
+        if constexpr (enableSolvent) {
+            SolventModule::serializeEntity(asImp_(), outstream, dof);
+        }
+        if constexpr (enableExtbo) {
+            ExtboModule::serializeEntity(asImp_(), outstream, dof);
+        }
+        if constexpr (enablePolymer) {
+            PolymerModule::serializeEntity(asImp_(), outstream, dof);
+        }
+        if constexpr (enableFullyImplicitThermal) {
+            EnergyModule::serializeEntity(asImp_(), outstream, dof);
+        }
     }
 
     /*!
@@ -611,10 +666,18 @@ public:
             throw std::runtime_error("Could not deserialize degree of freedom " + std::to_string(dofIdx));
         }
 
-        SolventModule::deserializeEntity(asImp_(), instream, dof);
-        ExtboModule::deserializeEntity(asImp_(), instream, dof);
-        PolymerModule::deserializeEntity(asImp_(), instream, dof);
-        EnergyModule::deserializeEntity(asImp_(), instream, dof);
+        if constexpr (enableSolvent) {
+            SolventModule::deserializeEntity(asImp_(), instream, dof);
+        }
+        if constexpr (enableExtbo) {
+            ExtboModule::deserializeEntity(asImp_(), instream, dof);
+        }
+        if constexpr (enablePolymer) {
+            PolymerModule::deserializeEntity(asImp_(), instream, dof);
+        }
+        if constexpr (enableFullyImplicitThermal) {
+            EnergyModule::deserializeEntity(asImp_(), instream, dof);
+        }
 
         using PVM_G = typename PrimaryVariables::GasMeaning;
         using PVM_W = typename PrimaryVariables::WaterMeaning;
@@ -675,10 +738,18 @@ protected:
         ParentType::registerOutputModules_();
 
         // add the VTK output modules which make sense for the blackoil model
-        SolventModule::registerOutputModules(asImp_(), this->simulator_);
-        PolymerModule::registerOutputModules(asImp_(), this->simulator_);
-        EnergyModule::registerOutputModules(asImp_(), this->simulator_);
-        BioeffectsModule::registerOutputModules(asImp_(), this->simulator_);
+        if constexpr (enableSolvent) {
+            SolventModule::registerOutputModules(asImp_(), this->simulator_);
+        }
+        if constexpr (enablePolymer) {
+            PolymerModule::registerOutputModules(asImp_(), this->simulator_);
+        }
+        if constexpr (enableFullyImplicitThermal) {
+            EnergyModule::registerOutputModules(asImp_(), this->simulator_);
+        }
+        if constexpr (enableBioeffects) {
+            BioeffectsModule::registerOutputModules(asImp_(), this->simulator_);
+        }
 
         this->addOutputModule(std::make_unique<VtkBlackOilModule<TypeTag>>(this->simulator_));
         this->addOutputModule(std::make_unique<VtkCompositionModule<TypeTag>>(this->simulator_));

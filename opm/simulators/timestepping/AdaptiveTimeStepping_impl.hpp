@@ -525,7 +525,7 @@ maybeModifySuggestedTimeStepAtBeginningOfReportStep_(const double original_time_
     );
 }
 
-// The maybeUpdateTuning_() lambda callback is defined in SimulatorFullyImplicitBlackoil::runStep()
+// The maybeUpdateTuning_() lambda callback is defined in SimulatorFullyImplicit::runStep()
 // It has to be called for each substep since TUNING might have been changed for next sub step due
 // to ACTIONX (via NEXTSTEP) or WCYCLE keywords.
 template<class TypeTag>
@@ -581,6 +581,24 @@ suggestedNextTimestep_() const
 
 
 #ifdef RESERVOIR_COUPLING_ENABLED
+// Throw if the slave has already been terminated by the master. A terminated slave has
+// disconnected its intercommunicator, so running another coupled substep loop would issue
+// an MPI_Recv on a null communicator and abort the job. The run loop in
+// SimulatorFullyImplicit::runStep() stops before this can happen, so this guards
+// against future regressions of that logic.
+template <class TypeTag>
+template <class Solver>
+void
+AdaptiveTimeStepping<TypeTag>::SubStepper<Solver>::
+checkIfSlaveIsTerminated_()
+{
+    if (reservoirCouplingSlave_().terminated()) {
+        OPM_THROW(ReservoirCouplingError,
+                  "Internal error: attempt to run a coupled substep loop after the slave "
+                  "has been terminated by the master process");
+    }
+}
+
 // Pick the master's sync-step length for the next outer-loop iteration of
 // `runStepReservoirCouplingMaster_()`.  Includes the chop against slave-
 // report dates and emits the user-visible log line.  See the block comment
@@ -716,6 +734,8 @@ runStepReservoirCouplingMaster_()
     const double original_time_step = this->simulator_timer_.currentStepLength();
     double current_time{this->simulator_timer_.simulationTimeElapsed()};
     double step_end_time = current_time + original_time_step;
+    const double report_step_start_time = current_time;
+    int report_step_substep_offset = 0;
     // In RSYNC mode this variable persists across outer iterations and
     // carries the previously-chopped sync span into the next iteration.  In
     // TSYNC mode it is overwritten each iteration by
@@ -750,6 +770,12 @@ runStepReservoirCouplingMaster_()
             /*reportStep=*/this->simulator_timer_.reportStepNum(),
             maxTimeStep_()
         };
+        // Make the per-chunk timer log the enclosing report step's span and a
+        // cumulative substep counter (see AdaptiveSimulatorTimer "report step
+        // view"). Without this, log lines would show one sync chunk only.
+        substep_timer.setReportStepStartTime(report_step_start_time);
+        substep_timer.setReportStepTotalTime(step_end_time);
+        substep_timer.setReportStepSubstepOffset(report_step_substep_offset);
         const bool final_step = ReservoirCoupling::Seconds::compare_gt_or_eq(
             current_time + current_step_length, step_end_time
         );
@@ -764,6 +790,7 @@ runStepReservoirCouplingMaster_()
         SubStepIteration<Solver> substepIteration{*this, substep_timer, current_step_length, final_step};
         const auto sub_steps_report = substepIteration.run();
         report += sub_steps_report;
+        report_step_substep_offset += substep_timer.currentStepNum();
         current_time += current_step_length;
         if (final_step) {
             break;
@@ -779,10 +806,13 @@ SimulatorReport
 AdaptiveTimeStepping<TypeTag>::SubStepper<Solver>::
 runStepReservoirCouplingSlave_()
 {
+    checkIfSlaveIsTerminated_();
     int iteration = 0;
     const double original_time_step = this->simulator_timer_.currentStepLength();
     double current_time{this->simulator_timer_.simulationTimeElapsed()};
     double step_end_time = current_time + original_time_step;
+    const double report_step_start_time = current_time;
+    int report_step_substep_offset = 0;
     SimulatorReport report;
     auto report_step_idx = this->simulator_timer_.currentStepNum();
     if (report_step_idx == 0 && iteration == 0) {
@@ -808,6 +838,12 @@ runStepReservoirCouplingSlave_()
             this->simulator_timer_.reportStepNum(),
             maxTimeStep_()
         };
+        // Make the per-chunk timer log the enclosing report step's span and a
+        // cumulative substep counter (see AdaptiveSimulatorTimer "report step
+        // view"). Without this, log lines would show one sync chunk only.
+        substep_timer.setReportStepStartTime(report_step_start_time);
+        substep_timer.setReportStepTotalTime(step_end_time);
+        substep_timer.setReportStepSubstepOffset(report_step_substep_offset);
         const bool final_step = ReservoirCoupling::Seconds::compare_gt_or_eq(
             current_time + timestep, step_end_time
         );
@@ -818,6 +854,7 @@ runStepReservoirCouplingSlave_()
         SubStepIteration<Solver> substepIteration{*this, substep_timer, timestep, final_step};
         const auto sub_steps_report = substepIteration.run();
         report += sub_steps_report;
+        report_step_substep_offset += substep_timer.currentStepNum();
         current_time += timestep;
         if (final_step) {
             break;
@@ -1245,7 +1282,7 @@ maybeUpdateLastSubstepOfSyncTimestep_([[maybe_unused]] const double dt)
 #endif
 }
 
-// The maybeUpdateTuning_() lambda callback is defined in SimulatorFullyImplicitBlackoil::runStep()
+// The maybeUpdateTuning_() lambda callback is defined in SimulatorFullyImplicit::runStep()
 // It has to be called for each substep since TUNING might have been changed for next sub step due
 // to ACTIONX (via NEXTSTEP) or WCYCLE keywords.
 template<class TypeTag>
@@ -1259,7 +1296,7 @@ maybeUpdateTuningAndTimeStep_()
     // be named maybeUpdateTimeStep_() or similar, since it should not update the tuning. However,
     // the current definition of the maybeUpdateTuning_() callback is actually calling
     // adaptiveTimeStepping_->updateTUNING(max_next_tstep, tuning) which is updating the tuning
-    // see SimulatorFullyImplicitBlackoil::runStep() for more details.
+    // see SimulatorFullyImplicit::runStep() for more details.
     const auto old_value = suggestedNextTimestep_();
     if (this->substepper_.maybeUpdateTuning_(this->substep_timer_.simulationTimeElapsed(),
                                              this->substep_timer_.currentStepLength(),

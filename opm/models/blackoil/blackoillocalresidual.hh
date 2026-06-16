@@ -31,18 +31,13 @@
 #include <opm/material/common/MathToolbox.hpp>
 #include <opm/material/fluidstates/BlackOilFluidState.hpp>
 
-#include <opm/models/blackoil/blackoilbioeffectsmodules.hh>
-#include <opm/models/blackoil/blackoilbrinemodules.hh>
-#include <opm/models/blackoil/blackoilconvectivemixingmodule.hh>
-#include <opm/models/blackoil/blackoildiffusionmodule.hh>
-#include <opm/models/blackoil/blackoilenergymodules.hh>
-#include <opm/models/blackoil/blackoilextbomodules.hh>
-#include <opm/models/blackoil/blackoilfoammodules.hh>
-#include <opm/models/blackoil/blackoilpolymermodules.hh>
+#include <opm/models/blackoil/blackoilmodules.hpp>
 #include <opm/models/blackoil/blackoilproperties.hh>
-#include <opm/models/blackoil/blackoilsolventmodules.hh>
+
+#include <opm/models/discretization/common/fvbaseproperties.hh>
 
 #include <cassert>
+#include <limits>
 
 namespace Opm {
 
@@ -75,28 +70,38 @@ class BlackOilLocalResidual : public GetPropType<TypeTag, Properties::DiscLocalR
     enum { gasCompIdx = FluidSystem::gasCompIdx };
     enum { oilCompIdx = FluidSystem::oilCompIdx };
     enum { waterCompIdx = FluidSystem::waterCompIdx };
-    enum { compositionSwitchIdx = Indices::compositionSwitchIdx };
+    static constexpr unsigned compositionSwitchIdx = Indices::compositionSwitchIdx;
 
     static constexpr bool waterEnabled = Indices::waterEnabled;
     static constexpr bool gasEnabled = Indices::gasEnabled;
     static constexpr bool oilEnabled = Indices::oilEnabled;
-    static constexpr bool compositionSwitchEnabled = (compositionSwitchIdx >= 0);
+    static constexpr bool compositionSwitchEnabled =
+        compositionSwitchIdx != std::numeric_limits<unsigned>::max();
 
-    static constexpr bool blackoilConserveSurfaceVolume = getPropValue<TypeTag, Properties::BlackoilConserveSurfaceVolume>();
-    static constexpr bool enableFullyImplicitThermal = (getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::FullyImplicitThermal);
-    static constexpr bool enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>();
+    static constexpr bool blackoilConserveSurfaceVolume = 
+        getPropValue<TypeTag, Properties::BlackoilConserveSurfaceVolume>();
+    static constexpr bool enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>();
+    static constexpr bool enableBrine = getPropValue<TypeTag, Properties::EnableBrine>();
     static constexpr bool enableConvectiveMixing = getPropValue<TypeTag, Properties::EnableConvectiveMixing>();
+    static constexpr bool enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>();
+    static constexpr bool enableExtbo = getPropValue<TypeTag, Properties::EnableExtbo>();
+    static constexpr bool enableFoam = getPropValue<TypeTag, Properties::EnableFoam>();
+    static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
+    static constexpr bool enableFullyImplicitThermal = energyModuleType == EnergyModules::FullyImplicitThermal;
+    static constexpr bool enablePolymer = getPropValue<TypeTag, Properties::EnablePolymer>();
+    static constexpr bool enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>();
 
     using Toolbox = MathToolbox<Evaluation>;
-    using SolventModule = BlackOilSolventModule<TypeTag>;
-    using ExtboModule = BlackOilExtboModule<TypeTag>;
-    using PolymerModule = BlackOilPolymerModule<TypeTag>;
-    using EnergyModule = BlackOilEnergyModule<TypeTag>;
-    using FoamModule = BlackOilFoamModule<TypeTag>;
-    using BrineModule = BlackOilBrineModule<TypeTag>;
-    using DiffusionModule = BlackOilDiffusionModule<TypeTag, enableDiffusion>;
-    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag>;
+
+    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag, enableBioeffects>;
+    using BrineModule = BlackOilBrineModule<TypeTag, enableBrine>;
     using ConvectiveMixingModule = BlackOilConvectiveMixingModule<TypeTag, enableConvectiveMixing>;
+    using DiffusionModule = BlackOilDiffusionModule<TypeTag, enableDiffusion>;
+    using EnergyModule = BlackOilEnergyModule<TypeTag, energyModuleType>;
+    using ExtboModule = BlackOilExtboModule<TypeTag, enableExtbo>;
+    using FoamModule = BlackOilFoamModule<TypeTag, enableFoam>;
+    using PolymerModule = BlackOilPolymerModule<TypeTag, enablePolymer>;
+    using SolventModule = BlackOilSolventModule<TypeTag, enableSolvent>;
 
 public:
     /*!
@@ -174,25 +179,39 @@ public:
         adaptMassConservationQuantities_(storage, intQuants.pvtRegionIndex());
 
         // deal with solvents (if present)
-        SolventModule::addStorage(storage, intQuants);
+        if constexpr (enableSolvent) {
+            SolventModule::addStorage(storage, intQuants);
+        }
 
         // deal with zFracton (if present)
-        ExtboModule::addStorage(storage, intQuants);
+        if constexpr (enableExtbo) {
+            ExtboModule::addStorage(storage, intQuants);
+        }
 
         // deal with polymer (if present)
-        PolymerModule::addStorage(storage, intQuants);
+        if constexpr (enablePolymer) {
+            PolymerModule::addStorage(storage, intQuants);
+        }
 
         // deal with energy (if present)
-        EnergyModule::addStorage(storage, intQuants);
+        if constexpr (enableFullyImplicitThermal) {
+            EnergyModule::addStorage(storage, intQuants);
+        }
 
         // deal with foam (if present)
-        FoamModule::addStorage(storage, intQuants);
+        if constexpr (enableFoam) {
+            FoamModule::addStorage(storage, intQuants);
+        }
 
         // deal with salt (if present)
-        BrineModule::addStorage(storage, intQuants);
+        if constexpr (enableBrine) {
+            BrineModule::addStorage(storage, intQuants);
+        }
 
         // deal with bioeffects (if present)
-        BioeffectsModule::addStorage(storage, intQuants);
+        if constexpr (enableBioeffects) {
+            BioeffectsModule::addStorage(storage, intQuants);
+        }
     }
 
     /*!
@@ -224,32 +243,51 @@ public:
                 evalPhaseFluxes_<Scalar>(flux, phaseIdx, pvtRegionIdx, extQuants, up.fluidState());
             }
         }
+
         // deal with solvents (if present)
-        SolventModule::computeFlux(flux, elemCtx, scvfIdx, timeIdx);
+        if constexpr (enableSolvent) {
+            SolventModule::computeFlux(flux, elemCtx, scvfIdx, timeIdx);
+        }
 
         // deal with zFracton (if present)
-        ExtboModule::computeFlux(flux, elemCtx, scvfIdx, timeIdx);
+        if constexpr (enableExtbo) {
+            ExtboModule::computeFlux(flux, elemCtx, scvfIdx, timeIdx);
+        }
 
         // deal with polymer (if present)
-        PolymerModule::computeFlux(flux, elemCtx, scvfIdx, timeIdx);
+        if constexpr (enablePolymer) {
+            PolymerModule::computeFlux(flux, elemCtx, scvfIdx, timeIdx);
+        }
 
         // deal with energy (if present)
-        EnergyModule::computeFlux(flux, elemCtx, scvfIdx, timeIdx);
+        if constexpr (enableFullyImplicitThermal) {
+            EnergyModule::computeFlux(flux, elemCtx, scvfIdx, timeIdx);
+        }
 
         // deal with foam (if present)
-        FoamModule::computeFlux(flux, elemCtx, scvfIdx, timeIdx);
+        if constexpr (enableFoam) {
+            FoamModule::computeFlux(flux, elemCtx, scvfIdx, timeIdx);
+        }
 
         // deal with salt (if present)
-        BrineModule::computeFlux(flux, elemCtx, scvfIdx, timeIdx);
+        if constexpr (enableBrine) {
+            BrineModule::computeFlux(flux, elemCtx, scvfIdx, timeIdx);
+        }
 
         // deal with bioeffects (if present)
-        BioeffectsModule::computeFlux(flux, elemCtx, scvfIdx, timeIdx);
+        if constexpr (enableBioeffects) {
+            BioeffectsModule::computeFlux(flux, elemCtx, scvfIdx, timeIdx);
+        }
 
         // deal with diffusion (if present)
-        DiffusionModule::addDiffusiveFlux(flux, elemCtx, scvfIdx, timeIdx);
+        if constexpr (enableDiffusion) {
+            DiffusionModule::addDiffusiveFlux(flux, elemCtx, scvfIdx, timeIdx);
+        }
 
         // deal with convective mixing (if enabled)
-        ConvectiveMixingModule::addConvectiveMixingFlux(flux, elemCtx, scvfIdx, timeIdx);
+        if constexpr (enableConvectiveMixing) {
+            ConvectiveMixingModule::addConvectiveMixingFlux(flux, elemCtx, scvfIdx, timeIdx);
+        }
     }
 
     /*!
@@ -264,7 +302,9 @@ public:
         elemCtx.problem().source(source, elemCtx, dofIdx, timeIdx);
 
         // deal with MICP (if present)
-        BioeffectsModule::addSource(source, elemCtx, dofIdx, timeIdx);
+        if constexpr (enableBioeffects) {
+            BioeffectsModule::addSource(source, elemCtx, dofIdx, timeIdx);
+        }
 
         // scale the source term of the energy equation
         if constexpr (enableFullyImplicitThermal) {

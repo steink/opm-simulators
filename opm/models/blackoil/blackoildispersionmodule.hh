@@ -33,6 +33,7 @@
 #include <opm/material/common/MathToolbox.hpp>
 #include <opm/material/common/Valgrind.hpp>
 
+#include <opm/models/blackoil/blackoilmodules.hpp>
 #include <opm/models/blackoil/blackoilproperties.hh>
 #include <opm/models/common/multiphasebaseproperties.hh>
 #include <opm/models/discretization/common/fvbaseproperties.hh>
@@ -52,53 +53,6 @@ namespace Opm {
  * \brief Provides the auxiliary methods required for consideration of the
  * dispersion equation.
  */
-template <class TypeTag, bool enableDispersion>
-class BlackOilDispersionModule;
-
-template <class TypeTag, bool enableDispersion>
-class BlackOilDispersionExtensiveQuantities;
-
-/*!
- * \copydoc Opm::BlackOilDispersionModule
- */
-template <class TypeTag>
-class BlackOilDispersionModule<TypeTag, /*enableDispersion=*/false>
-{
-    using Scalar = GetPropType<TypeTag, Properties::Scalar>;
-    using RateVector = GetPropType<TypeTag, Properties::RateVector>;
-    using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
-    using Evaluation = GetPropType<TypeTag, Properties::Evaluation>;
-    using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
-
-public:
-    using ExtensiveQuantities = BlackOilDispersionExtensiveQuantities<TypeTag,false>;
-
-    static void initFromState(const EclipseState&)
-    {}
-
-    /*!
-     * \brief Adds the dispersive flux to the flux vector over a flux
-     *        integration point.
-     */
-    template <class Context>
-    static void addDispersiveFlux(RateVector&,
-                                  const Context&,
-                                  unsigned,
-                                  unsigned)
-    {}
-
-    template<class IntensiveQuantities, class Scalar>
-    static void addDispersiveFlux(RateVector&,
-                                  const IntensiveQuantities&,
-                                  const IntensiveQuantities&,
-                                  const Evaluation&,
-                                  const Scalar&)
-    {}
-};
-
-/*!
- * \copydoc Opm::BlackOilDispersionModule
- */
 template <class TypeTag>
 class BlackOilDispersionModule<TypeTag, /*enableDispersion=*/true>
 {
@@ -116,8 +70,8 @@ class BlackOilDispersionModule<TypeTag, /*enableDispersion=*/true>
     enum { numPhases = FluidSystem::numPhases };
     enum { numComponents = FluidSystem::numComponents };
     enum { conti0EqIdx = Indices::conti0EqIdx };
-    enum { enableDispersion = getPropValue<TypeTag, Properties::EnableDispersion>() };
-    enum { enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>() };
+    static constexpr bool enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>();
+    static constexpr bool enableDispersion = true;
     enum { enableMICP = Indices::enableMICP };
 
     static constexpr unsigned contiMicrobialEqIdx = Indices::contiMicrobialEqIdx;
@@ -317,43 +271,6 @@ private:
  * \brief Provides the volumetric quantities required for the
  *        calculation of dispersive fluxes.
  */
-template <class TypeTag, bool enableDispersion>
-class BlackOilDispersionIntensiveQuantities;
-
-/*!
- * \copydoc Opm::DispersionIntensiveQuantities
- */
-template <class TypeTag>
-class BlackOilDispersionIntensiveQuantities<TypeTag, /*enableDispersion=*/false>
-{
-    using Scalar = GetPropType<TypeTag, Properties::Scalar>;
-    using ElementContext = GetPropType<TypeTag, Properties::ElementContext>;
-
-public:
-    /*!
-     * \brief Returns the max. norm of the filter velocity of the cell.
-     */
-    Scalar normVelocityCell(unsigned, unsigned) const
-    {
-        throw std::logic_error("Method normVelocityCell() "
-                               "does not make sense if dispersion is disabled");
-    }
-
-protected:
-    /*!
-     * \brief Update the quantities required to calculate dispersive
-     *        fluxes.
-     */
-    template<class ElementContext>
-    void update_(ElementContext&,
-                 unsigned,
-                 unsigned)
-    {}
-};
-
-/*!
- * \copydoc Opm::DispersionIntensiveQuantities
- */
 template <class TypeTag>
 class BlackOilDispersionIntensiveQuantities<TypeTag, /*enableDispersion=*/true>
 {
@@ -371,7 +288,7 @@ class BlackOilDispersionIntensiveQuantities<TypeTag, /*enableDispersion=*/true>
     enum { oilCompIdx = FluidSystem::oilCompIdx };
     enum { waterCompIdx = FluidSystem::waterCompIdx };
     enum { conti0EqIdx = Indices::conti0EqIdx };
-    enum { enableDispersion = getPropValue<TypeTag, Properties::EnableDispersion>() };
+    static constexpr bool enableDispersion = true;
 
 public:
     /*!
@@ -429,74 +346,6 @@ private:
  * \class Opm::BlackOilDispersionExtensiveQuantities
  *
  * \brief Provides the quantities required to calculate dispersive mass fluxes.
- */
-template <class TypeTag, bool enableDispersion>
-class BlackOilDispersionExtensiveQuantities;
-
-/*!
- * \copydoc Opm::DispersionExtensiveQuantities
- */
-template <class TypeTag>
-class BlackOilDispersionExtensiveQuantities<TypeTag, /*enableDispersion=*/false>
-{
-    using Scalar = GetPropType<TypeTag, Properties::Scalar>;
-    using ElementContext = GetPropType<TypeTag, Properties::ElementContext>;
-    using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
-    using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
-
-    enum { numPhases = FluidSystem::numPhases };
-
-protected:
-    /*!
-     * \brief Update the quantities required to calculate
-     *        the dispersive fluxes.
-     */
-    void update_(const ElementContext&,
-                 unsigned,
-                 unsigned)
-    {}
-
-    template <class Context, class FluidState>
-    void updateBoundary_(const Context&,
-                         unsigned,
-                         unsigned,
-                         const FluidState&)
-    {}
-
-public:
-    using ScalarArray = Scalar[numPhases];
-
-    static void update(ScalarArray&,
-                       const IntensiveQuantities&,
-                       const IntensiveQuantities&)
-    {}
-
-    /*!
-     * \brief The dispersivity the face.
-     *
-     */
-    Scalar dispersivity() const
-    {
-        throw std::logic_error("The method dispersivity() does not "
-                               "make sense if dispersion is disabled.");
-    }
-
-    /*!
-     * \brief The effective filter velocity coefficient in a
-     *        fluid phase at the face's integration point
-     *
-     * \copydoc Doxygen::phaseIdxParam
-     * \copydoc Doxygen::compIdxParam
-     */
-    Scalar normVelocityAvg(unsigned) const
-    {
-        throw std::logic_error("The method normVelocityAvg() "
-                               "does not make sense if dispersion is disabled.");
-    }
-};
-
-/*!
- * \copydoc Opm::BlackOilDispersionExtensiveQuantities
  */
 template <class TypeTag>
 class BlackOilDispersionExtensiveQuantities<TypeTag, /*enableDispersion=*/true>

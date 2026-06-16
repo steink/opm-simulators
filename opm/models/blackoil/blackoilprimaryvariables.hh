@@ -25,6 +25,7 @@
 #define EWOMS_BLACK_OIL_PRIMARY_VARIABLES_HH
 
 #include <dune/common/fvector.hh>
+
 #include <opm/common/OpmLog/OpmLog.hpp>
 #include <opm/common/utility/gpuDecorators.hpp>
 
@@ -33,24 +34,21 @@
 #include <opm/material/fluidsystems/BlackOilFluidSystem.hpp>
 #include <opm/material/fluidstates/SimpleModularFluidState.hpp>
 
-#include <opm/models/blackoil/blackoilbioeffectsmodules.hh>
-#include <opm/models/blackoil/blackoilbrinemodules.hh>
-#include <opm/models/blackoil/blackoilenergymodules.hh>
-#include <opm/models/blackoil/blackoilextbomodules.hh>
+#include <opm/models/blackoil/blackoilmodules.hpp>
 #include <opm/models/blackoil/blackoilmeanings.hh>
 #include <opm/models/blackoil/blackoilproperties.hh>
-#include <opm/models/blackoil/blackoilsolventmodules.hh>
 
 #include <opm/models/discretization/common/fvbaseprimaryvariables.hh>
-
-#include <fmt/format.h>
 
 #include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstddef>
+#include <limits>
 #include <stdexcept>
 #include <type_traits>
+
+#include <fmt/format.h>
 
 namespace Opm::Parameters {
 
@@ -85,13 +83,14 @@ class BlackOilPrimaryVariables : public FvBasePrimaryVariables<TypeTag, VectorTy
     enum { numEq = getPropValue<TypeTag, Properties::NumEq>() };
 
     // primary variable indices
-    enum { waterSwitchIdx = Indices::waterSwitchIdx };
-    enum { pressureSwitchIdx = Indices::pressureSwitchIdx };
-    enum { compositionSwitchIdx = Indices::compositionSwitchIdx };
-    enum { saltConcentrationIdx  = Indices::saltConcentrationIdx };
-    enum { solventSaturationIdx  = Indices::solventSaturationIdx };
+    static constexpr unsigned waterSwitchIdx = Indices::waterSwitchIdx;
+    static constexpr unsigned pressureSwitchIdx = Indices::pressureSwitchIdx;
+    static constexpr unsigned compositionSwitchIdx = Indices::compositionSwitchIdx;
+    static constexpr unsigned saltConcentrationIdx  = Indices::saltConcentrationIdx;
+    static constexpr unsigned solventSaturationIdx  = Indices::solventSaturationIdx;
 
-    static constexpr bool compositionSwitchEnabled = Indices::compositionSwitchIdx >= 0;
+    static constexpr bool compositionSwitchEnabled =
+        Indices::compositionSwitchIdx != std::numeric_limits<unsigned>::max();
     static constexpr bool waterEnabled = Indices::waterEnabled;
     static constexpr bool gasEnabled = Indices::gasEnabled;
     static constexpr bool oilEnabled = Indices::oilEnabled;
@@ -104,15 +103,19 @@ class BlackOilPrimaryVariables : public FvBasePrimaryVariables<TypeTag, VectorTy
 
     // component indices from the fluid system
     enum { numComponents = getPropValue<TypeTag, Properties::NumComponents>() };
-    enum { enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>() };
-    enum { enableExtbo = getPropValue<TypeTag, Properties::EnableExtbo>() };
-    enum { enablePolymer = getPropValue<TypeTag, Properties::EnablePolymer>() };
-    enum { enableFoam = getPropValue<TypeTag, Properties::EnableFoam>() };
-    enum { enableBrine = getPropValue<TypeTag, Properties::EnableBrine>() };
+
+    static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
+
+    static constexpr bool enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>();
+    static constexpr bool enableBrine = getPropValue<TypeTag, Properties::EnableBrine>();
+    static constexpr bool enableExtbo = getPropValue<TypeTag, Properties::EnableExtbo>();
+    static constexpr bool enableFoam = getPropValue<TypeTag, Properties::EnableFoam>();
+    static constexpr bool enableFullyImplicitThermal = energyModuleType == EnergyModules::FullyImplicitThermal;
+    static constexpr bool enablePolymer = getPropValue<TypeTag, Properties::EnablePolymer>();
+    static constexpr bool enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>();
+
     enum { enableSaltPrecipitation = getPropValue<TypeTag, Properties::EnableSaltPrecipitation>() };
     enum { enableVapwat = getPropValue<TypeTag, Properties::EnableVapwat>() };
-    static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
-    enum { enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>() };
     enum { enableMICP = Indices::enableMICP };
     enum { gasCompIdx = FluidSystem::gasCompIdx };
     enum { waterCompIdx = FluidSystem::waterCompIdx };
@@ -124,7 +127,7 @@ class BlackOilPrimaryVariables : public FvBasePrimaryVariables<TypeTag, VectorTy
     using ExtboModule = BlackOilExtboModule<TypeTag, enableExtbo>;
     using EnergyModule = BlackOilEnergyModule<TypeTag, energyModuleType>;
     using BrineModule = BlackOilBrineModule<TypeTag, enableBrine>;
-    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag>;
+    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag, enableBioeffects>;
 
     static_assert(numPhases == 3, "The black-oil model assumes three phases!");
     static_assert(numComponents == 3, "The black-oil model assumes three components!");
@@ -340,7 +343,9 @@ public:
         const bool precipitatedSaltPresent = enableSaltPrecipitation ? saltSaturation > 0.0 : false;
         const bool oneActivePhases = fluidState.fluidSystem().numActivePhases() == 1;
         // deal with the primary variables for the energy extension
-        EnergyModule::assignPrimaryVars(*this, fluidState);
+        if constexpr (enableFullyImplicitThermal) {
+            EnergyModule::assignPrimaryVars(*this, fluidState);
+        }
 
         // Determine the meaning of the pressure primary variables
         // Depending on the phases present, this variable is either interpreted as the
@@ -747,14 +752,17 @@ public:
                     setPrimaryVarsMeaningGas(GasMeaning::Rs);
                     const Scalar soMax = std::max(s, problem.maxOilSaturation(globalDofIdx));
                     const Scalar rsMax = problem.maxGasDissolutionFactor(/*timeIdx=*/0, globalDofIdx);
-                    const Scalar rsSat =
-                        enableExtbo
-                            ? ExtboModule::rs(pvtRegionIndex(), po, zFraction_())
-                            : FluidSystem::oilPvt().saturatedGasDissolutionFactor(pvtRegionIdx_,
-                                                                                  T,
-                                                                                  po,
-                                                                                  s,
-                                                                                  soMax);
+                    Scalar rsSat;
+                    if constexpr (enableExtbo) {
+                        rsSat = ExtboModule::rs(pvtRegionIndex(), po, zFraction_());
+                    }
+                    else {
+                        rsSat = FluidSystem::oilPvt().saturatedGasDissolutionFactor(pvtRegionIdx_,
+                                                                                    T,
+                                                                                    po,
+                                                                                    s,
+                                                                                    soMax);
+                    }
                     (*this)[Indices::compositionSwitchIdx] = std::min(rsMax, rsSat);
                     changed = true;
                 }
@@ -776,14 +784,17 @@ public:
                     this->setScaledPressure_(pg);
                     const Scalar soMax = problem.maxOilSaturation(globalDofIdx);
                     const Scalar rvMax = problem.maxOilVaporizationFactor(/*timeIdx=*/0, globalDofIdx);
-                    const Scalar rvSat =
-                        enableExtbo
-                            ? ExtboModule::rv(pvtRegionIndex(), pg, zFraction_())
-                            : FluidSystem::gasPvt().saturatedOilVaporizationFactor(pvtRegionIdx_,
-                                                                                   T,
-                                                                                   pg,
-                                                                                   Scalar(0),
-                                                                                   soMax);
+                    Scalar rvSat;
+                    if constexpr (enableExtbo) {
+                        rvSat = ExtboModule::rv(pvtRegionIndex(), pg, zFraction_());
+                    }
+                    else {
+                        rvSat = FluidSystem::gasPvt().saturatedOilVaporizationFactor(pvtRegionIdx_,
+                                                                                     T,
+                                                                                     pg,
+                                                                                     Scalar(0),
+                                                                                     soMax);
+                    }
                     setPrimaryVarsMeaningGas(GasMeaning::Rv);
                     (*this)[Indices::compositionSwitchIdx] = std::min(rvMax, rvSat);
                     changed = true;
@@ -799,15 +810,17 @@ public:
                 const Scalar so = 1.0 - sw - solventSaturation_();
                 const Scalar soMax = std::max(so, problem.maxOilSaturation(globalDofIdx));
                 const Scalar rsMax = problem.maxGasDissolutionFactor(/*timeIdx=*/0, globalDofIdx);
-                const Scalar rsSat =
-                    enableExtbo
-                        ? ExtboModule::rs(pvtRegionIndex(), po, zFraction_())
-                        : FluidSystem::oilPvt().saturatedGasDissolutionFactor(pvtRegionIdx_,
-                                                                              T,
-                                                                              po,
-                                                                              so,
-                                                                              soMax);
-
+                Scalar rsSat;
+                if constexpr (enableExtbo) {
+                    rsSat = ExtboModule::rs(pvtRegionIndex(), po, zFraction_());
+                }
+                else {
+                    rsSat = FluidSystem::oilPvt().saturatedGasDissolutionFactor(pvtRegionIdx_,
+                                                                                T,
+                                                                                po,
+                                                                                so,
+                                                                                soMax);
+                }
                 const Scalar rs = (*this)[Indices::compositionSwitchIdx];
                 if (rs > std::min(rsMax, rsSat * (Scalar{1.0} + eps))) {
                     // the gas phase appears, i.e., switch the primary variables to GasMeaning::Sg
@@ -826,15 +839,17 @@ public:
                 const Scalar pg = this->pressure_();
                 const Scalar soMax = problem.maxOilSaturation(globalDofIdx);
                 const Scalar rvMax = problem.maxOilVaporizationFactor(/*timeIdx=*/0, globalDofIdx);
-                const Scalar rvSat =
-                    enableExtbo
-                        ? ExtboModule::rv(pvtRegionIndex(), pg, zFraction_())
-                        : FluidSystem::gasPvt().saturatedOilVaporizationFactor(pvtRegionIdx_,
-                                                                               T,
-                                                                               pg,
-                                                                               /*so=*/Scalar(0.0),
-                                                                               soMax);
-
+                Scalar rvSat;
+                if constexpr (enableExtbo) {
+                    rvSat = ExtboModule::rv(pvtRegionIndex(), pg, zFraction_());
+                }
+                else {
+                    rvSat = FluidSystem::gasPvt().saturatedOilVaporizationFactor(pvtRegionIdx_,
+                                                                                 T,
+                                                                                 pg,
+                                                                                 /*so=*/Scalar(0.0),
+                                                                                 soMax);
+                }
                 const Scalar rv = (*this)[Indices::compositionSwitchIdx];
                 if (rv > std::min(rvMax, rvSat * (Scalar{1.0} + eps))) {
                     // switch to phase equilibrium mode because the oil phase appears. here

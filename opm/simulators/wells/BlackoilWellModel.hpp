@@ -125,14 +125,15 @@ template<class Scalar> class WellContributions;
             static constexpr bool has_energy_ = (energyModuleType_ == EnergyModules::FullyImplicitThermal);
             static constexpr bool has_micp_ = Indices::enableMICP;
             static constexpr bool has_geochem_ = getPropValue<TypeTag, Properties::EnableGeochemistry>();
+            static constexpr bool has_bioeffects_ = getPropValue<TypeTag, Properties::EnableBioeffects>();
 
             // TODO: where we should put these types, WellInterface or Well Model?
             // or there is some other strategy, like TypeTag
             using VectorBlockType = Dune::FieldVector<Scalar, numEq>;
             using BVector = Dune::BlockVector<VectorBlockType>;
 
-            using PolymerModule = BlackOilPolymerModule<TypeTag>;
-            using BioeffectsModule = BlackOilBioeffectsModule<TypeTag>;
+            using PolymerModule = BlackOilPolymerModule<TypeTag, has_polymer_>;
+            using BioeffectsModule = BlackOilBioeffectsModule<TypeTag, has_bioeffects_>;
 
             // For the conversion between the surface volume rate and reservoir voidage rate
             using RateConverterType = RateConverter::
@@ -207,7 +208,7 @@ template<class Scalar> class WellContributions;
             {
                 auto wsrpt = this->wellState()
                     .report(this->simulator_.vanguard().globalCell().data(),
-                            [this](const int well_index)
+                            [this](const std::size_t well_index)
                             { return this->wasDynamicallyShutThisTimeStep(well_index); },
                             this->rsConstInfo());
 
@@ -467,6 +468,19 @@ template<class Scalar> class WellContributions;
 
             const ModelParameters& param() const
             { return param_; }
+
+            /// @brief True when tight (per-sub-iteration) reservoir-coupling network
+            ///   coupling is in effect.  This is the default; --rc-network-loose-coupling=true
+            ///   selects the loose (per-outer-iteration) coupling instead.
+            bool useTightRcNetworkCoupling() const
+            { return !param_.rc_network_loose_coupling_; }
+
+#ifdef RESERVOIR_COUPLING_ENABLED
+            /// @brief Access the reservoir-coupling flow helper (RC builds only).
+            ///   Used e.g. by the network solver to drive the per-sub-iteration
+            ///   cross-rescoup node-pressure / rate exchange.
+            BlackoilWellModelRescoup<TypeTag>& rescoupHelper() { return rescoupHelper_; }
+#endif
 
 
             template<class FluidState, class SingleWellState>

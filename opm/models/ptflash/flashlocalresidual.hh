@@ -61,10 +61,10 @@ class FlashLocalResidual: public GetPropType<TypeTag, Properties::DiscLocalResid
 
     enum { waterPhaseIdx = FluidSystem::waterPhaseIdx };
 
-    enum { enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>() };
+    static constexpr bool enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>();
     using DiffusionModule = ::Opm::DiffusionModule<TypeTag, enableDiffusion>;
 
-    enum { enableEnergy = getPropValue<TypeTag, Properties::EnableEnergy>() };
+    static constexpr bool enableEnergy = getPropValue<TypeTag, Properties::EnableEnergy>();
     using EnergyModule = ::Opm::EnergyModule<TypeTag, enableEnergy>;
 
     static constexpr bool waterEnabled = Indices::waterEnabled;

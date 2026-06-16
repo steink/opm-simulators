@@ -937,28 +937,66 @@ namespace Opm {
                     }
                 }
 
+                // WELOPEN/COMPDAT can reopen individual connections shut at run
+                // time by physical/economic limits, without touching the rest
+                // of the well.  Act only when the well is open (a SHUT well
+                // would not flow) and the schedule changed completions this
+                // step (global COMPLETION_CHANGE, set by both COMPDAT and
+                // WELOPEN).
+                auto& well_test_state = this->wellTestState();
+                const auto& sched_state = this->schedule()[report_step];
+                const bool may_reopen_completions =
+                    ws.status == Well::Status::OPEN &&
+                    sched_state.events().hasEvent(ScheduleEvents::COMPLETION_CHANGE) &&
+                    well_test_state.num_closed_completions() > 0;
+
+                if (may_reopen_completions) {
+                    const auto& completion_events = sched_state.wellcompletion_events();
+                    for (const auto& connection : well_ecl.getConnections()) {
+                        const int complnum = connection.complnum();
+
+                        // Reopen only connections currently shut at run time
+                        // that are explicitly requested OPEN this step.
+                        if (!well_test_state.completion_is_closed(well_name, complnum) ||
+                            !completion_events.hasEvent(well_name, complnum, ScheduleEvents::REQUEST_OPEN_COMPLETION)) {
+                            continue;
+                        }
+
+                        // ... but not one closed during the current timestep
+                        const bool closed_this_step =
+                            (well_test_state.lastCompletionCloseTime(well_name, complnum) == simulator_.time());
+                        if (closed_this_step) {
+                            continue;
+                        }
+
+                        well_test_state.open_completion(well_name, complnum);
+                        local_deferredLogger.info(
+                            fmt::format("Completion {} - block ({}, {}, {}) for well {} "
+                                        "is reopened due to an explicit WELOPEN/COMPDAT "
+                                        "OPEN request",
+                                        complnum,
+                                        connection.getI() + 1,
+                                        connection.getJ() + 1,
+                                        connection.getK() + 1,
+                                        well_name));
+                    }
+                }
+
                 // TODO: should we do this for all kinds of closing reasons?
                 // something like wellTestState().hasWell(well_name)?
                 if (this->wellTestState().well_is_closed(well_name))
                 {
-                    if (well_ecl.getAutomaticShutIn()) {
-                        // shut wells are not added to the well container
+                    if (well_ecl.getAutomaticShutIn() ||
+                        !well_ecl.getAllowCrossFlow() ||
+                        this->allConnectionsClosed(well_ecl))
+                    {
                         this->wellState().shutWell(w);
                         this->well_close_times_.erase(well_name);
                         this->well_open_times_.erase(well_name);
                         continue;
-                    } else {
-                        if (!well_ecl.getAllowCrossFlow()) {
-                            // stopped wells where cross flow is not allowed
-                            // are not added to the well container
-                            this->wellState().shutWell(w);
-                            this->well_close_times_.erase(well_name);
-                            this->well_open_times_.erase(well_name);
-                            continue;
-                        }
-                        // stopped wells are added to the container but marked as stopped
-                        this->wellState().stopWell(w);
                     }
+                    // stopped wells are added to the container but marked as stopped
+                    this->wellState().stopWell(w);
                 }
 
                 // shut wells with zero rante constraints and disallowing
@@ -1280,14 +1318,8 @@ namespace Opm {
                                       local_deferredLogger,
                                       relax_network_tolerance);
 #ifdef RESERVOIR_COUPLING_ENABLED
-        if (this->isRescoupMasterCoupledNetworkIteration_()) {
-            const bool is_final = !more_inner_network_update;
-            // send the pressures freshly computed by network_.update() to all activated slaves
-            this->rescoupHelper_.sendMasterGroupNodePressuresToSlaves(is_final);
-            if (!is_final) {
-                // receive slaves' updated network_surface_rates for the next outer iteration.
-                this->rescoupHelper_.receiveSlaveGroupData();
-            }
+        if (this->isReservoirCouplingMaster()) {
+            this->rescoupHelper_.maybeExchangeNetworkOuterIterationWithSlaves(more_inner_network_update);
         }
 #endif
 
@@ -1550,15 +1582,12 @@ namespace Opm {
     {
         int nw =  this->numLocalWellsEnd();
         int rdofs = local_num_cells_;
-        for (int i = 0; i < nw; ++i) {
-            int wdof = rdofs + i;
-            jacobian.entry(wdof,wdof) = 1.0;// better scaling ?
-        }
         const auto wellconnections = this->getMaxWellConnections();
         for (int i = 0; i < nw; ++i) {
+            int wdof = rdofs + i;
+            jacobian.entry(wdof,wdof) = 0.0;
             const auto& perfcells = wellconnections[i];
             for (int perfcell : perfcells) {
-                int wdof = rdofs + i;
                 jacobian.entry(wdof, perfcell) = 0.0;
                 jacobian.entry(perfcell, wdof) = 0.0;
             }
@@ -2464,10 +2493,7 @@ namespace Opm {
     bool BlackoilWellModel<TypeTag>::isRescoupMasterCoupledNetworkIteration_() const
     {
 #ifdef RESERVOIR_COUPLING_ENABLED
-        return this->isReservoirCouplingMaster()
-            && this->reservoirCouplingMaster().isFirstSubstepOfSyncTimestep()
-            && this->rescoupHelper_.masterNetworkHasMasterGroupLeaves()
-            && !this->rescoupHelper_.lastSentMasterGroupNodePressuresIsFinal();
+        return this->rescoupHelper_.masterIsInCoupledNetworkIteration();
 #else
         return false;
 #endif

@@ -33,7 +33,6 @@
 #include <opm/material/densead/Math.hpp>
 #include <opm/material/fluidstates/BlackOilFluidState.hpp>
 
-#include <opm/models/blackoil/blackoilenergymodules.hh>
 #include <opm/models/blackoil/blackoilproperties.hh>
 #include <opm/models/utils/basicproperties.hh>
 
@@ -66,10 +65,10 @@ public:
     using ElementMapper = GetPropType<TypeTag, Properties::ElementMapper>;
 
     static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
-    enum { enableBrine = getPropValue<TypeTag, Properties::EnableBrine>() };
+    static constexpr bool enableBrine = getPropValue<TypeTag, Properties::EnableBrine>();
     enum { enableVapwat = getPropValue<TypeTag, Properties::EnableVapwat>() };
     enum { has_disgas_in_water = getPropValue<TypeTag, Properties::EnableDisgasInWater>() };
-    enum { enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>() };
+    static constexpr bool enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>();
 
     enum { enableSaltPrecipitation = getPropValue<TypeTag, Properties::EnableSaltPrecipitation>() };
 

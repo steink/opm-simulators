@@ -974,6 +974,17 @@ GroupStateHelper<Scalar, IndexTraits>::groupControlledWells(const std::string& g
 }
 
 template <typename Scalar, typename IndexTraits>
+bool GroupStateHelper<Scalar, IndexTraits>::isMasterGroupEligibleForGuideRate(
+                                                                const std::string& group_name) const
+{
+    if (!this->rescoup_.isMasterGroup(group_name)) {
+        return false;
+    }
+    const auto& group = this->schedule_.getGroup(group_name, this->report_step_);
+    return group.productionGroupControlAvailable();
+}
+
+template <typename Scalar, typename IndexTraits>
 int
 GroupStateHelper<Scalar, IndexTraits>::phaseToActivePhaseIdx(const Phase phase) const
 {
@@ -1273,24 +1284,35 @@ GroupStateHelper<Scalar, IndexTraits>::updateGroupTargetReduction(const Group& g
 
 template <typename Scalar, typename IndexTraits>
 void
-GroupStateHelper<Scalar, IndexTraits>::updateNetworkLeafNodeProductionRates()
+GroupStateHelper<Scalar, IndexTraits>::updateNetworkLeafNodeRates()
 {
-    const auto& network = this->schedule_[this->report_step_].network();
-    if (network.active()) {
-        const int np = this->numPhases();
-        for (const auto& group_name : network.leaf_nodes()) {
-            std::vector<Scalar> network_rates(np, 0.0);
-            if (this->schedule_[this->report_step_].groups.has(
-                    group_name)) { // Allow empty leaf nodes that are not groups
-                const auto& group = this->schedule_[this->report_step_].groups.get(group_name);
-                for (int phase = 0; phase < np; ++phase) {
-                    network_rates[phase] = this->sumWellPhaseRates(
-                        /*res_rates=*/false, group, phase, /*injector=*/false, /*network=*/true);
+    auto do_update = [&](const Network::ExtNetwork& network,
+                         const bool is_injector) -> void
+    {
+        if (network.active()) {
+            const int np = this->numPhases();
+            for (const auto& group_name : network.leaf_nodes()) {
+                std::vector<Scalar> network_rates(np, 0.0);
+                if (this->schedule_[this->report_step_].groups.has(
+                        group_name)) { // Allow empty leaf nodes that are not groups
+                    const auto& group = this->schedule_[this->report_step_].groups.get(group_name);
+                    for (int phase = 0; phase < np; ++phase) {
+                        network_rates[phase] = this->sumWellPhaseRates(
+                            /*res_rates=*/false, group, phase, is_injector, /*network=*/true);
+                    }
+                }
+                if (is_injector) {
+                    this->groupState().update_network_leaf_node_injection_rates(group_name, network_rates);
+                } else {
+                    this->groupState().update_network_leaf_node_production_rates(group_name, network_rates);
                 }
             }
-            this->groupState().update_network_leaf_node_production_rates(group_name, network_rates);
         }
-    }
+    };
+    do_update(this->schedule_[this->report_step_].network(), /*is_injector=*/false);
+    // TODO: do the below to support injection networks when available.
+    // do_update(this->schedule_[this->report_step_].gas_injection_network(), /*is_injector=*/true);
+    // do_update(this->schedule_[this->report_step_].water_injection_network(), /*is_injector=*/true);
 }
 
 template <typename Scalar, typename IndexTraits>
@@ -2006,7 +2028,9 @@ getInjectionGroupTargetForMode_(
     }
     default:
         OPM_DEFLOG_THROW(std::logic_error,
-                         "Invalid Group::InjectionCMode in getInjectionGroupTargetForMode_",
+                         fmt::format("Invalid Group::InjectionCMode in getInjectionGroupTargetForMode_ for {} cmode: {}",
+                                     group.name(),
+                                     Group::InjectionCMode2String(cmode)),
                          this->deferredLogger());
         return 0.0;
     }
@@ -2245,7 +2269,8 @@ GroupStateHelper<Scalar, IndexTraits>::isInGroupChainTopBot_(const std::string& 
 // ============================================================================
 // Private: Reservoir coupling helpers
 //   Called from: getInjectionGroupTarget(), getProductionConstraintTarget_(),
-//               sumWellPhaseRates(), updateNONEProductionGroups()
+//               sumWellPhaseRates(), updateNONEProductionGroups(),
+//               updateGroupControlledWellsRecursive_()
 // ============================================================================
 
 #ifdef RESERVOIR_COUPLING_ENABLED
@@ -2375,6 +2400,47 @@ getInjectionFilterFlag_(const std::string& group_name,
     default:
         return ReservoirCoupling::GrupSlav::FilterFlag::MAST;
     }
+}
+
+// Called from updateGroupControlledWellsRecursive_().
+// - Returns the effective GCW (group controlled wells) for a master group.
+template <typename Scalar, typename IndexTraits>
+int
+GroupStateHelper<Scalar, IndexTraits>::getMasterGroupEffectiveGCW_(const std::string& group_name,
+                                                                   bool is_production_group) const
+{
+    const auto& group = this->schedule_.getGroup(group_name, this->report_step_);
+    int num_wells = 0;
+    // NOTE: If "group" is a reservoir coupling master group, it should have no child groups or wells.
+    //   During master group constraint calculation, we will set individual control on master groups
+    //   to exclude them from guide rate distribution, see
+    //   RescoupConstraintsCalculator::calculateMasterGroupConstraintsAndSendToSlaves().
+    if (is_production_group) {
+        if (group.productionGroupControlAvailable()) {
+            // Either [individual control AND GCONPROD item 8 RESPOND_TO_PARENT
+            // = YES], OR a plain FLD/NONE group: the group participates in the
+            // parent's guide-rate distribution.  Its GCW is decoupled from the
+            // production control mode and read from the rescoup master, which
+            // sets it to 1 when participating-and-uncapped and 0 when capped at
+            // the slave potential or belonging to an inactive slave.  See
+            // RescoupConstraintsCalculator::calculateMasterGroupConstraintsAndSendToSlaves().
+            num_wells = this->reservoirCouplingMaster().effectiveGCW(group_name);
+        } else {
+            if (groupState().has_field_or_none_control(group_name)) {
+                // A group with GCONPROD item 8 RESPOND_TO_PARENT = NO but still on FLD/NONE control
+                // is an error, throw an exception.
+                OPM_DEFLOG_THROW(std::logic_error,
+                                 "Group with GCONPROD item 8 RESPOND_TO_PARENT = NO but still on FLD/NONE control",
+                                 this->deferredLogger());
+            }
+            // Individual control with RESPOND_TO_PARENT = NO: not available
+            // for higher-level control, so it is excluded from guide-rate distribution (GCW=0).
+            num_wells = 0;
+        }
+    } else {
+        num_wells = 1;  // injection: not yet handled
+    }
+    return num_wells;
 }
 
 // Called from getEffectiveProductionLimit_().
@@ -2659,25 +2725,9 @@ GroupStateHelper<Scalar, IndexTraits>::updateGroupControlledWellsRecursive_(
     const Group& group = this->schedule_.getGroup(group_name, this->report_step_);
     int num_wells = 0;
     if (this->isReservoirCouplingMasterGroup(group)) {
-        // NOTE: If "group" is a reservoir coupling master group, it should have no child groups or wells.
-        //   During master group constraint calculation, we will set individual control on master groups
-        //   to exclude them from guide rate distribution, see
-        //   RescoupConstraintsCalculator::calculateMasterGroupConstraintsAndSendToSlaves().
-        // TODO: a master group with individual control and GCONPROD item 8 = "YES"
-        //   (RESPOND_TO_PARENT = YES) has an own rate limit AND is available for
-        //   higher-level group control. The current control mode-driven check
-        //   below assigns GCW=0 for such groups, which excludes them from
-        //   guide-rate distribution and yields a wrong target.
-        //   Proposed fix: effective-GCW accessor on ReservoirCouplingMaster + extension
-        //   to FractionCalculator::guideRateSum. Deferred to a follow-up PR.
-        if (is_production_group) {
-            const auto ctrl = this->groupState().production_control(group_name);
-            const bool individual = (ctrl != Group::ProductionCMode::FLD
-                                  && ctrl != Group::ProductionCMode::NONE);
-            num_wells = individual ? 0 : 1;
-        } else {
-            num_wells = 1;  // injection: not yet handled
-        }
+#ifdef RESERVOIR_COUPLING_ENABLED
+        num_wells = this->getMasterGroupEffectiveGCW_(group_name, is_production_group);
+#endif
     }
     else {
         // NOTE: A group with sub groups cannot also have direct wells (one level below) under its control.
@@ -2688,8 +2738,13 @@ GroupStateHelper<Scalar, IndexTraits>::updateGroupControlledWellsRecursive_(
         for (const std::string& child_group : group.groups()) {
             bool included = false;
             if (is_production_group) {
-                const auto ctrl = this->groupState().production_control(child_group);
-                included = (ctrl == Group::ProductionCMode::FLD || ctrl == Group::ProductionCMode::NONE);
+                included = this->groupState().has_field_or_none_control(child_group);
+                // A participating reservoir-coupling master group (GCONPROD item 8
+                // = YES) counts toward its parent's GCW even on individual control,
+                // so the parent is itself treated as group-controlled rather than individual.
+                // Without this the parent gets GCW=0 and its aggregate slave rate is added to the field
+                // reduction.  Its effective GCW (1 uncapped, 0 capped) is added by the recursive call below.
+                included |= this->isMasterGroupEligibleForGuideRate(child_group);
             } else {
                 const auto ctrl = this->groupState().injection_control(child_group, injection_phase);
                 included = (ctrl == Group::InjectionCMode::FLD || ctrl == Group::InjectionCMode::NONE);
@@ -2798,11 +2853,18 @@ GroupStateHelper<Scalar, IndexTraits>::updateGroupTargetReductionRecursive_(
                 }
             }
         } else {
-            const Group::ProductionCMode& current_group_control
-                = this->groupState().production_control(sub_group.name());
-            const bool individual_control = (current_group_control != Group::ProductionCMode::FLD
-                                             && current_group_control != Group::ProductionCMode::NONE);
-            // NOTE: A reservoir coupling master group: will have GCW (group controlled wells) set to 1 by convention.
+            bool individual_control = !this->groupState().has_field_or_none_control(sub_group.name());
+            // A participating reservoir-coupling master group (GCONPROD item 8
+            // RESPOND_TO_PARENT = YES) has its target guide-rate distributed by the
+            // parent, so its rate must NOT also be subtracted from the parent's
+            // available target.  Its control mode is set to individual control for
+            // slave communication, see RescoupConstraintsCalculator::capAndRedistributeProductionTargets_(),
+            // which would otherwise flag it as individual and
+            // double-count it here. Treat it as group-controlled; a capped or inactive participating
+            // group keeps effective GCW = 0 and is still reduced via the num==0 branch below.
+            if (this->isMasterGroupEligibleForGuideRate(sub_group.name())) {
+                individual_control = false;
+            }
             const int num_group_controlled_wells
                 = this->groupControlledWells(sub_group.name(),
                                              /*always_included_child=*/"",

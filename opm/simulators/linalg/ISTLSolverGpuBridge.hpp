@@ -184,7 +184,8 @@ public:
                                                                             linsolver);
     }
 
-    void prepare(const Matrix& M, Vector& b)
+    using ISTLSolver<TypeTag>::prepare;
+    void prepare(const Matrix& M, Vector& b) override
     {
         OPM_TIMEBLOCK(prepare);
         [[maybe_unused]] const bool firstcall = (this->matrix_ == nullptr);
@@ -216,22 +217,22 @@ public:
     }
 
 
-    void setResidual(Vector& /* b */)
+    void setResidual(Vector& /* b */) override
     {
         // rhs_ = &b; // Must be handled in prepare() instead.
     }
 
-    void getResidual(Vector& b) const
+    void getResidual(Vector& b) const override
     {
         b = *(this->rhs_);
     }
 
-    void setMatrix(const SparseMatrixAdapter& /* M */)
+    void setMatrix(const SparseMatrixAdapter& /* M */) override
     {
         // matrix_ = &M.istlMatrix(); // Must be handled in prepare() instead.
     }
 
-    bool solve(Vector& x)
+    bool solve(Vector& x) override
     {
         if (!gpuBridge_) {
             return ParentType::solve(x);

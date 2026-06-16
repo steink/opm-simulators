@@ -19,8 +19,8 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef OPM_SIMULATOR_FULLY_IMPLICIT_BLACKOIL_HEADER_INCLUDED
-#define OPM_SIMULATOR_FULLY_IMPLICIT_BLACKOIL_HEADER_INCLUDED
+#ifndef OPM_SIMULATOR_FULLY_IMPLICIT_HEADER_INCLUDED
+#define OPM_SIMULATOR_FULLY_IMPLICIT_HEADER_INCLUDED
 
 #include <opm/common/ErrorMacros.hpp>
 #include <opm/simulators/flow/rescoup/ReservoirCouplingEnabled.hpp>
@@ -37,7 +37,7 @@
 #include <opm/grid/utility/StopWatch.hpp>
 
 #include <opm/simulators/aquifers/BlackoilAquiferModel.hpp>
-#include <opm/simulators/flow/BlackoilModel.hpp>
+#include <opm/simulators/flow/NonlinearSystemBlackOilReservoir.hpp>
 #include <opm/simulators/flow/BlackoilModelParameters.hpp>
 #include <opm/simulators/flow/ConvergenceOutputConfiguration.hpp>
 #include <opm/simulators/flow/ExtraConvergenceOutputThread.hpp>
@@ -83,7 +83,7 @@ void logTuning(const Tuning& tuning);
 
 namespace Opm {
 
-/** \brief Top-level driver for a fully implicit black-oil simulation.
+/** \brief Top-level driver for a fully implicit flow simulation.
  *
  * Owns the per-report-step loop: \ref run repeatedly invokes
  * \ref runStep until `timer.done()` is reached.  Each \ref runStep
@@ -110,7 +110,7 @@ namespace Opm {
  * program startup.
  */
 template<class TypeTag>
-class SimulatorFullyImplicitBlackoil : private SerializableSim
+class SimulatorFullyImplicit : private SerializableSim
 {
 protected:
     struct MPI_Comm_Deleter;
@@ -129,13 +129,15 @@ public:
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
 
     using TimeStepper = AdaptiveTimeStepping<TypeTag>;
-    using PolymerModule = BlackOilPolymerModule<TypeTag>;
-    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag>;
+    static constexpr bool enablePolymer = getPropValue<TypeTag, Properties::EnablePolymer>();
+    using PolymerModule = BlackOilPolymerModule<TypeTag, enablePolymer>;
+    static constexpr bool enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>();
+    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag, enableBioeffects>;
 
     using Solver = NonlinearSolver<TypeTag, Model>;
     using ModelParameters = typename Model::ModelParameters;
     using SolverParameters = typename Solver::SolverParameters;
-    using WellModel = BlackoilWellModel<TypeTag>;
+    using WellModel = GetPropType<TypeTag, Properties::WellModel>;
 
     /** \brief Construct from the surrounding eWoms `Simulator`.
      *
@@ -146,10 +148,10 @@ public:
      *
      * \param simulator The surrounding eWoms simulator; observed, not owned.
      */
-    explicit SimulatorFullyImplicitBlackoil(Simulator& simulator);
+    explicit SimulatorFullyImplicit(Simulator& simulator);
 
     /// Ends the convergence-output thread cleanly on all ranks.
-    ~SimulatorFullyImplicitBlackoil() override;
+    ~SimulatorFullyImplicit() override;
 
     /** \brief Register all parameters consumed by this class and its
      *         major collaborators.
@@ -325,6 +327,21 @@ protected:
 
     const WellModel& wellModel_() const { return simulator_.problem().wellModel(); }
 
+#ifdef RESERVOIR_COUPLING_ENABLED
+    /** \brief Reservoir-coupling slave: tear down the current report step
+     *         after the master has ended the coupled run.
+     *
+     * Called from \ref runStep when the slave received the terminate signal
+     * from the master and disconnected its intercommunicator during the
+     * adaptive time stepping. The terminate step ran zero substeps, so the
+     * simulator state is unchanged from the previous (fully-coupled) report
+     * step and there is no new state to write; \ref finalize will flush all
+     * output. Logs the stop and balances the beginReportStep() issued
+     * earlier in \ref runStep; the caller then stops the run loop.
+     */
+    void handleSlaveTerminated_();
+#endif
+
     /// Surrounding eWoms simulator; observed, not owned.
     Simulator& simulator_;
 
@@ -372,6 +389,6 @@ protected:
 
 } // namespace Opm
 
-#include <opm/simulators/flow/SimulatorFullyImplicitBlackoil_impl.hpp>
+#include <opm/simulators/flow/SimulatorFullyImplicit_impl.hpp>
 
-#endif // OPM_SIMULATOR_FULLY_IMPLICIT_BLACKOIL_HEADER_INCLUDED
+#endif // OPM_SIMULATOR_FULLY_IMPLICIT_HEADER_INCLUDED

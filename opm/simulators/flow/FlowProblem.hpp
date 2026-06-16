@@ -117,21 +117,22 @@ protected:
     enum { numPhases = FluidSystem::numPhases };
     enum { numComponents = FluidSystem::numComponents };
 
-    enum { enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>() };
-    enum { enableBrine = getPropValue<TypeTag, Properties::EnableBrine>() };
-    enum { enableConvectiveMixing = getPropValue<TypeTag, Properties::EnableConvectiveMixing>() };
-    enum { enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>() };
-    enum { enableDispersion = getPropValue<TypeTag, Properties::EnableDispersion>() };
+    static constexpr bool enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>();
+    static constexpr bool enableBrine = getPropValue<TypeTag, Properties::EnableBrine>();
+    static constexpr bool enableConvectiveMixing = getPropValue<TypeTag, Properties::EnableConvectiveMixing>();
+    static constexpr bool enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>();
+    static constexpr bool enableDispersion = getPropValue<TypeTag, Properties::EnableDispersion>();
+    static constexpr bool enableExtbo = getPropValue<TypeTag, Properties::EnableExtbo>();
+    static constexpr bool enableFoam = getPropValue<TypeTag, Properties::EnableFoam>();
+    static constexpr bool enablePolymer = getPropValue<TypeTag, Properties::EnablePolymer>();
+    static constexpr bool enablePolymerMolarWeight = getPropValue<TypeTag, Properties::EnablePolymerMW>();
+    static constexpr bool enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>();
+
     static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
     enum { enableFullyImplicitThermal = getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::FullyImplicitThermal };
     enum { enableExperiments = getPropValue<TypeTag, Properties::EnableExperiments>() };
-    enum { enableExtbo = getPropValue<TypeTag, Properties::EnableExtbo>() };
-    enum { enableFoam = getPropValue<TypeTag, Properties::EnableFoam>() };
     enum { enableMICP = Indices::enableMICP };
-    enum { enablePolymer = getPropValue<TypeTag, Properties::EnablePolymer>() };
-    enum { enablePolymerMolarWeight = getPropValue<TypeTag, Properties::EnablePolymerMW>() };
     enum { enableSaltPrecipitation = getPropValue<TypeTag, Properties::EnableSaltPrecipitation>() };
-    enum { enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>() };
     enum { enableThermalFluxBoundaries = getPropValue<TypeTag, Properties::EnableThermalFluxBoundaries>() };
 
     enum { gasPhaseIdx = FluidSystem::gasPhaseIdx };
@@ -228,7 +229,8 @@ public:
                               simulator.vanguard().grid(),
                               simulator.vanguard().cellCentroids(),
                               (energyModuleType == EnergyModules::FullyImplicitThermal ||
-                               energyModuleType == EnergyModules::SequentialImplicitThermal),                       enableDiffusion,
+                               energyModuleType == EnergyModules::SequentialImplicitThermal),
+                              enableDiffusion,
                               enableDispersion)
         , wellModel_(simulator, this->iterationContext())
         , aquiferModel_(simulator)
@@ -832,6 +834,9 @@ public:
      */
     std::shared_ptr<const EclMaterialLawManager> materialLawManager() const
     { return materialLawManager_; }
+
+    std::shared_ptr<const EclThermalLawManager> thermalLawManager() const
+    { return thermalLawManager_; }
 
     template <class FluidState, class ...Args>
     void updateRelperms(

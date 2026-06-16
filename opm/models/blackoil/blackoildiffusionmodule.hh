@@ -34,9 +34,12 @@
 
 #include <opm/input/eclipse/EclipseState/EclipseState.hpp>
 
+#include <opm/material/common/MathToolbox.hpp>
 #include <opm/material/common/Valgrind.hpp>
 
-#include <opm/models/blackoil/blackoilbioeffectsmodules.hh>
+#include <opm/models/blackoil/blackoilmodules.hpp>
+#include <opm/models/blackoil/blackoilproperties.hh>
+#include <opm/models/common/multiphasebaseproperties.hh>
 #include <opm/models/discretization/common/fvbaseproperties.hh>
 
 #include <array>
@@ -50,48 +53,6 @@ namespace Opm {
  * \brief Provides the auxiliary methods required for consideration of the
  * diffusion equation.
  */
-template <class TypeTag, bool enableDiffusion>
-class BlackOilDiffusionModule;
-
-template <class TypeTag, bool enableDiffusion>
-class BlackOilDiffusionExtensiveQuantities;
-
-/*!
- * \copydoc Opm::BlackOilDiffusionModule
- */
-template <class TypeTag>
-class BlackOilDiffusionModule<TypeTag, /*enableDiffusion=*/false>
-{
-    using RateVector = GetPropType<TypeTag, Properties::RateVector>;
-
-public:
-    /*!
-     * \brief Initialize all internal data structures needed by the diffusion module
-     */
-    static void initFromState(const EclipseState&)
-    {}
-
-    /*!
-     * \brief Register all run-time parameters for the diffusion module.
-     */
-    static void registerParameters()
-    {}
-
-    /*!
-     * \brief Adds the diffusive mass flux flux to the flux vector over a flux
-     *        integration point.
-      */
-    template <class Context>
-    OPM_HOST_DEVICE static void addDiffusiveFlux(RateVector&,
-                                                 const Context&,
-                                                 unsigned,
-                                                 unsigned)
-    {}
-};
-
-/*!
- * \copydoc Opm::BlackOilDiffusionModule
- */
 template <class TypeTag>
 class BlackOilDiffusionModule<TypeTag, /*enableDiffusion=*/true>
 {
@@ -101,13 +62,13 @@ class BlackOilDiffusionModule<TypeTag, /*enableDiffusion=*/true>
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
     using Indices = GetPropType<TypeTag, Properties::Indices>;
     using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
-    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag>;
-    using BioeffectsParams = BlackOilBioeffectsParams<TypeTag>;
+
+    static constexpr bool enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>();
+    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag, enableBioeffects>;
 
     enum { numPhases = FluidSystem::numPhases };
     enum { conti0EqIdx = Indices::conti0EqIdx };
 
-    enum { enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>() };
     enum { enableMICP = Indices::enableMICP };
 
     static constexpr unsigned contiMicrobialEqIdx = Indices::contiMicrobialEqIdx;
@@ -176,7 +137,7 @@ public:
         const auto& diffusivity = extQuants.diffusivity();
         const auto& effectiveDiffusionCoefficient = extQuants.effectiveDiffusionCoefficient();
         addDiffusiveFlux(flux, inIq, exIq, diffusivity, effectiveDiffusionCoefficient);
-        if constexpr(enableBioeffects) {
+        if constexpr (enableBioeffects) {
             const auto& effectiveBioDiffCoefficient = extQuants.effectiveBioDiffCoefficient();
             addBioDiffFlux(flux, inIq, exIq, diffusivity, effectiveBioDiffCoefficient);
         }
@@ -279,32 +240,35 @@ public:
                                                const Evaluation& diffusivity,
                                                const EvaluationArray& effectiveBioDiffCoefficient)
     {
-        const auto& inFs = inIq.fluidState();
-        const auto& exFs = exIq.fluidState();
-        Evaluation diffR = 0.0;
+        if constexpr (enableBioeffects) {
+            using BioeffectsParams = BlackOilBioeffectsParams<Scalar>;
+            const auto& inFs = inIq.fluidState();
+            const auto& exFs = exIq.fluidState();
+            Evaluation diffR = 0.0;
 
-        // The diffusion coefficients are given for mass concentrations
-        Evaluation bAvg = (inFs.saturation(waterPhaseIdx) * inFs.invB(waterPhaseIdx) +
-            Toolbox::value(exFs.saturation(waterPhaseIdx)) * Toolbox::value(exFs.invB(waterPhaseIdx))) / 2;
-        diffR = inIq.microbialConcentration() - Toolbox::value(exIq.microbialConcentration());
-        flux[contiMicrobialEqIdx] +=
-            bAvg *
-            diffR *
-            diffusivity *
-            effectiveBioDiffCoefficient[BioeffectsParams::micrDiffIdx];
-        if constexpr(enableMICP) {
-            diffR = inIq.oxygenConcentration() - Toolbox::value(exIq.oxygenConcentration());
-            flux[contiOxygenEqIdx] +=
+            // The diffusion coefficients are given for mass concentrations
+            Evaluation bAvg = (inFs.saturation(waterPhaseIdx) * inFs.invB(waterPhaseIdx) +
+                Toolbox::value(exFs.saturation(waterPhaseIdx)) * Toolbox::value(exFs.invB(waterPhaseIdx))) / 2;
+            diffR = inIq.microbialConcentration() - Toolbox::value(exIq.microbialConcentration());
+            flux[contiMicrobialEqIdx] +=
                 bAvg *
                 diffR *
                 diffusivity *
-                effectiveBioDiffCoefficient[BioeffectsParams::oxygDiffIdx];
-            diffR = inIq.ureaConcentration() - Toolbox::value(exIq.ureaConcentration());
-            flux[contiUreaEqIdx] +=
-                bAvg *
-                diffR *
-                diffusivity *
-                effectiveBioDiffCoefficient[BioeffectsParams::ureaDiffIdx];
+                effectiveBioDiffCoefficient[BioeffectsParams::micrDiffIdx];
+            if constexpr(enableMICP) {
+                diffR = inIq.oxygenConcentration() - Toolbox::value(exIq.oxygenConcentration());
+                flux[contiOxygenEqIdx] +=
+                    bAvg *
+                    diffR *
+                    diffusivity *
+                    effectiveBioDiffCoefficient[BioeffectsParams::oxygDiffIdx];
+                diffR = inIq.ureaConcentration() - Toolbox::value(exIq.ureaConcentration());
+                flux[contiUreaEqIdx] +=
+                    bAvg *
+                    diffR *
+                    diffusivity *
+                    effectiveBioDiffCoefficient[BioeffectsParams::ureaDiffIdx];
+            }
         }
     }
 
@@ -349,66 +313,6 @@ BlackOilDiffusionModule<TypeTag, true>::use_mole_fraction_;
  * \brief Provides the volumetric quantities required for the
  *        calculation of molecular diffusive fluxes.
  */
-template <class TypeTag, bool enableDiffusion>
-class BlackOilDiffusionIntensiveQuantities;
-
-/*!
- * \copydoc Opm::DiffusionIntensiveQuantities
- */
-template <class TypeTag>
-class BlackOilDiffusionIntensiveQuantities<TypeTag, /*enableDiffusion=*/false>
-{
-    using Scalar = GetPropType<TypeTag, Properties::Scalar>;
-    using ElementContext = GetPropType<TypeTag, Properties::ElementContext>;
-
-public:
-    /*!
-     * \brief Returns the tortuousity of the sub-domain of a fluid
-     *        phase in the porous medium.
-     */
-    OPM_HOST_DEVICE Scalar tortuosity(unsigned) const
-    {
-        throw std::logic_error("Method tortuosity() does not make sense "
-                               "if diffusion is disabled");
-    }
-
-    /*!
-     * \brief Returns the molecular diffusion coefficient for a
-     *        component in a phase.
-     */
-    OPM_HOST_DEVICE Scalar diffusionCoefficient(unsigned, unsigned) const
-    {
-        throw std::logic_error("Method diffusionCoefficient() does not "
-                               "make sense if diffusion is disabled");
-    }
-
-    /*!
-     * \brief Returns the effective molecular diffusion coefficient of
-     *        the porous medium for a component in a phase.
-     */
-    OPM_HOST_DEVICE Scalar effectiveDiffusionCoefficient(unsigned, unsigned) const
-    {
-        throw std::logic_error("Method effectiveDiffusionCoefficient() "
-                               "does not make sense if diffusion is disabled");
-    }
-
-protected:
-    /*!
-     * \brief Update the quantities required to calculate diffusive
-     *        mass fluxes.
-     */
-    template <class FluidState>
-    void update_(FluidState&,
-                 const unsigned,
-                 const ElementContext&,
-                 unsigned,
-                 unsigned)
-    {}
-};
-
-/*!
- * \copydoc Opm::DiffusionIntensiveQuantities
- */
 template <class TypeTag>
 class BlackOilDiffusionIntensiveQuantities<TypeTag, /*enableDiffusion=*/true>
 {
@@ -418,11 +322,11 @@ class BlackOilDiffusionIntensiveQuantities<TypeTag, /*enableDiffusion=*/true>
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
     using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
     using Indices = GetPropType<TypeTag, Properties::Indices>;
-    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag>;
+    static constexpr bool enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>();
+    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag, enableBioeffects>;
 
     enum { numPhases = FluidSystem::numPhases };
     enum { numComponents = FluidSystem::numComponents };
-    enum { enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>() };
     enum { enableMICP = Indices::enableMICP };
     enum { numBioInWat = Indices::numBioInWat };
 
@@ -439,6 +343,12 @@ public:
                                          const std::array<std::array<Evaluation, numComponents>, numPhases>& diffusionCoefficient)
         : tortuosity_(tortuosity)
         , diffusionCoefficient_(diffusionCoefficient)
+    {}
+
+    template <class OtherTypeTag>
+    BlackOilDiffusionIntensiveQuantities(const BlackOilDiffusionIntensiveQuantities<OtherTypeTag, true>& other)
+        : tortuosity_(other.tortuosity())
+        , diffusionCoefficient_(other.diffusionCoefficients())
     {}
 
     BlackOilDiffusionIntensiveQuantities&
@@ -463,11 +373,23 @@ public:
     { return diffusionCoefficient_[phaseIdx][compIdx]; }
 
     /*!
+     * \brief Returns all the diffusion coefficients
+     */
+    OPM_HOST_DEVICE const std::array<std::array<Evaluation, numComponents>, numPhases>& diffusionCoefficients() const
+    { return diffusionCoefficient_; }
+
+    /*!
      * \brief Returns the tortuousity of the sub-domain of a fluid
      *        phase in the porous medium.
      */
     OPM_HOST_DEVICE Evaluation tortuosity(unsigned phaseIdx) const
     { return tortuosity_[phaseIdx]; }
+
+    /*!
+     * \brief Returns all the tortuosities
+     */
+    OPM_HOST_DEVICE const std::array<Evaluation, numPhases>& tortuosities() const
+    { return tortuosity_; }
 
     /*!
      * \brief Returns the effective molecular diffusion coefficient of
@@ -567,7 +489,7 @@ protected:
             }
         }
 
-        if constexpr(enableBioeffects) {
+        if constexpr (enableBioeffects) {
             unsigned pvtRegionIndex = intQuants.pvtRegionIndex();
             for (unsigned compIdx = 0; compIdx < numBioInWat; ++compIdx) {
                 bioDiffCoefficient_[compIdx] =
@@ -588,65 +510,6 @@ private:
  *
  * \brief Provides the quantities required to calculate diffusive mass fluxes.
  */
-template <class TypeTag, bool enableDiffusion>
-class BlackOilDiffusionExtensiveQuantities;
-
-/*!
- * \copydoc Opm::DiffusionExtensiveQuantities
- */
-template <class TypeTag>
-class BlackOilDiffusionExtensiveQuantities<TypeTag, /*enableDiffusion=*/false>
-{
-    using Scalar = GetPropType<TypeTag, Properties::Scalar>;
-    using Evaluation = GetPropType<TypeTag, Properties::Evaluation>;
-    using ElementContext = GetPropType<TypeTag, Properties::ElementContext>;
-
-protected:
-    /*!
-     * \brief Update the quantities required to calculate
-     *        the diffusive mass fluxes.
-     */
-    void update_(const ElementContext&,
-                 unsigned,
-                 unsigned)
-    {}
-
-    template <class Context, class FluidState>
-    void updateBoundary_(const Context&,
-                         unsigned,
-                         unsigned,
-                         const FluidState&)
-    {}
-
-public:
-    /*!
-     * \brief The diffusivity the face.
-     *
-     */
-    OPM_HOST_DEVICE Scalar diffusivity() const
-    {
-        throw std::logic_error("The method diffusivity() does not "
-                               "make sense if diffusion is disabled.");
-    }
-
-    /*!
-     * \brief The effective diffusion coeffcient of a component in a
-     *        fluid phase at the face's integration point
-     *
-     * \copydoc Doxygen::phaseIdxParam
-     * \copydoc Doxygen::compIdxParam
-     */
-    OPM_HOST_DEVICE const Evaluation& effectiveDiffusionCoefficient(unsigned,
-                                                                    unsigned) const
-    {
-        throw std::logic_error("The method effectiveDiffusionCoefficient() "
-                               "does not make sense if diffusion is disabled.");
-    }
-};
-
-/*!
- * \copydoc Opm::BlackOilDiffusionExtensiveQuantities
- */
 template <class TypeTag>
 class BlackOilDiffusionExtensiveQuantities<TypeTag, /*enableDiffusion=*/true>
 {
@@ -659,7 +522,7 @@ class BlackOilDiffusionExtensiveQuantities<TypeTag, /*enableDiffusion=*/true>
 
     enum { numPhases = getPropValue<TypeTag, Properties::NumPhases>() };
     enum { numComponents = getPropValue<TypeTag, Properties::NumComponents>() };
-    enum { enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>() };
+    static constexpr bool enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>();
     enum { enableMICP = Indices::enableMICP };
     enum { numBioInWat = Indices::numBioInWat };
 
@@ -689,15 +552,15 @@ protected:
         diffusivity_ = diff / faceArea;
         update(effectiveDiffusionCoefficient_, intQuantsInside, intQuantsOutside);
         Valgrind::CheckDefined(diffusivity_);
-        if constexpr(enableBioeffects) {
+        if constexpr (enableBioeffects) {
             updateBio(effectiveBioDiffCoefficient_, intQuantsInside, intQuantsOutside);
         }
     }
 
 public:
-    static void update(EvaluationArray& effectiveDiffusionCoefficient,
-                       const IntensiveQuantities& intQuantsInside,
-                       const IntensiveQuantities& intQuantsOutside)
+    OPM_HOST_DEVICE static void update(EvaluationArray& effectiveDiffusionCoefficient,
+                                       const IntensiveQuantities& intQuantsInside,
+                                       const IntensiveQuantities& intQuantsOutside)
     {
         const FluidSystem& fsys = intQuantsInside.getFluidSystem();
 

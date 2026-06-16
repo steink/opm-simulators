@@ -40,8 +40,9 @@
 #include <opm/material/fluidsystems/blackoilpvt/ConstantCompressibilityWaterPvt.hpp>
 #include <opm/material/fluidsystems/blackoilpvt/ConstantRsDeadOilPvt.hpp>
 
-#include <opm/models/blackoil/blackoilconvectivemixingmodule.hh>
+#include <opm/models/blackoil/blackoilconvectivemixingmoduleparam.hpp>
 #include <opm/models/blackoil/blackoilmoduleparams.hh>
+#include <opm/models/blackoil/blackoilmodules.hpp>
 
 #include <opm/output/eclipse/EclipseIO.hpp>
 
@@ -137,31 +138,32 @@ private:
     using typename FlowProblemType::MaterialLaw;
     using typename FlowProblemType::DimMatrix;
 
-    enum { enableDissolvedGas = Indices::compositionSwitchIdx >= 0 };
+    static constexpr bool enableDissolvedGas =
+        Indices::compositionSwitchIdx != std::numeric_limits<unsigned>::max();
     enum { enableVapwat = getPropValue<TypeTag, Properties::EnableVapwat>() };
     enum { enableDisgasInWater = getPropValue<TypeTag, Properties::EnableDisgasInWater>() };
     enum { enableGeochemistry = getPropValue<TypeTag, Properties::EnableGeochemistry>() };
     enum { enableMech = getPropValue<TypeTag, Properties::EnableMech>() };
 
-    using SolventModule = BlackOilSolventModule<TypeTag>;
-    using PolymerModule = BlackOilPolymerModule<TypeTag>;
-    using FoamModule = BlackOilFoamModule<TypeTag>;
-    using BrineModule = BlackOilBrineModule<TypeTag>;
-    using ExtboModule = BlackOilExtboModule<TypeTag>;
-    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag>;
-    using DispersionModule = BlackOilDispersionModule<TypeTag, enableDispersion>;
-    using DiffusionModule = BlackOilDiffusionModule<TypeTag, enableDiffusion>;
+    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag, enableBioeffects>;
+    using BrineModule = BlackOilBrineModule<TypeTag, enableBrine>;
     using ConvectiveMixingModule = BlackOilConvectiveMixingModule<TypeTag, enableConvectiveMixing>;
-    using ModuleParams = BlackoilModuleParams<ConvectiveMixingModuleParam<Scalar>>;
-    using HybridNewton = BlackOilHybridNewton<TypeTag>;
+    using DiffusionModule = BlackOilDiffusionModule<TypeTag, enableDiffusion>;
+    using DispersionModule = BlackOilDispersionModule<TypeTag, enableDispersion>;
+    using ExtboModule = BlackOilExtboModule<TypeTag, enableExtbo>;
+    using FoamModule = BlackOilFoamModule<TypeTag, enableFoam>;
+    using PolymerModule = BlackOilPolymerModule<TypeTag, enablePolymer>;
+    using SolventModule = BlackOilSolventModule<TypeTag, enableSolvent>;
 
-    using InitialFluidState = typename EquilInitializer<TypeTag>::ScalarFluidState;
     using EclWriterType = EclWriter<TypeTag, OutputBlackOilModule<TypeTag> >;
     using IndexTraits = typename FluidSystem::IndexTraitsType;
+    using InitialFluidState = typename EquilInitializer<TypeTag>::ScalarFluidState;
+    using HybridNewton = BlackOilHybridNewton<TypeTag>;
+    using ModuleParams = BlackoilModuleParams<ConvectiveMixingModuleParam<Scalar>>;
+
 #if HAVE_DAMARIS
     using DamarisWriterType = DamarisWriter<TypeTag>;
 #endif
-
 
 public:
     using FlowProblemType::porosity;
@@ -201,33 +203,50 @@ public:
         // Tell the black-oil extensions to initialize their internal data structures
         const auto& vanguard = simulator.vanguard();
 
-        BlackOilBrineParams<Scalar> brineParams;
-        brineParams.template initFromState<enableBrine,
-                                           enableSaltPrecipitation>(vanguard.eclState());
-        BrineModule::setParams(std::move(brineParams));
+        if constexpr (enableBrine) {
+            BlackOilBrineParams<Scalar> brineParams;
+            brineParams.template initFromState<enableBrine,
+                                               enableSaltPrecipitation>(vanguard.eclState());
+            BrineModule::setParams(std::move(brineParams));
+        }
 
-        DiffusionModule::initFromState(vanguard.eclState());
-        DispersionModule::initFromState(vanguard.eclState());
+        if constexpr (enableDiffusion) {
+            DiffusionModule::initFromState(vanguard.eclState());
+        }
 
-        BlackOilExtboParams<Scalar> extboParams;
-        extboParams.template initFromState<enableExtbo>(vanguard.eclState());
-        ExtboModule::setParams(std::move(extboParams));
+        if constexpr (enableDispersion) {
+            DispersionModule::initFromState(vanguard.eclState());
+        }
 
-        BlackOilFoamParams<Scalar> foamParams;
-        foamParams.template initFromState<enableFoam>(vanguard.eclState());
-        FoamModule::setParams(std::move(foamParams));
+        if constexpr (enableExtbo) {
+            BlackOilExtboParams<Scalar> extboParams;
+            extboParams.template initFromState<enableExtbo>(vanguard.eclState());
+            ExtboModule::setParams(std::move(extboParams));
+        }
 
-        BlackOilBioeffectsParams<Scalar> bioeffectsParams;
-        bioeffectsParams.template initFromState<enableBioeffects, enableMICP>(vanguard.eclState());
-        BioeffectsModule::setParams(std::move(bioeffectsParams));
+        if constexpr (enableFoam) {
+            BlackOilFoamParams<Scalar> foamParams;
+            foamParams.template initFromState<enableFoam>(vanguard.eclState());
+            FoamModule::setParams(std::move(foamParams));
+        }
 
-        BlackOilPolymerParams<Scalar> polymerParams;
-        polymerParams.template initFromState<enablePolymer, enablePolymerMolarWeight>(vanguard.eclState());
-        PolymerModule::setParams(std::move(polymerParams));
+        if constexpr (enableBioeffects) {
+            BlackOilBioeffectsParams<Scalar> bioeffectsParams;
+            bioeffectsParams.template initFromState<enableBioeffects, enableMICP>(vanguard.eclState());
+            BioeffectsModule::setParams(std::move(bioeffectsParams));
+        }
 
-        BlackOilSolventParams<Scalar> solventParams;
-        solventParams.template initFromState<enableSolvent>(vanguard.eclState(), vanguard.schedule());
-        SolventModule::setParams(std::move(solventParams));
+        if constexpr (enablePolymer) {
+            BlackOilPolymerParams<Scalar> polymerParams;
+            polymerParams.template initFromState<enablePolymer, enablePolymerMolarWeight>(vanguard.eclState());
+            PolymerModule::setParams(std::move(polymerParams));
+        }
+
+        if constexpr (enableSolvent) {
+            BlackOilSolventParams<Scalar> solventParams;
+            solventParams.template initFromState<enableSolvent>(vanguard.eclState(), vanguard.schedule());
+            SolventModule::setParams(std::move(solventParams));
+        }
 
         // create the ECL writer
         eclWriter_ = std::make_unique<EclWriterType>(simulator);
@@ -282,10 +301,12 @@ public:
             else {
                 FluidSystem::setVapPars(0.0, 0.0);
             }
-        }
 
-        ConvectiveMixingModule::beginEpisode(simulator.vanguard().eclState(), schedule, episodeIdx,
-                                             this->moduleParams_.convectiveMixingModuleParam);
+            if constexpr (enableConvectiveMixing) {
+                ConvectiveMixingModule::beginEpisode(simulator.vanguard().eclState(), schedule, episodeIdx,
+                                                     this->moduleParams_.convectiveMixingModuleParam);
+            }
+        }
     }
 
     /*!
@@ -924,12 +945,21 @@ public:
      * \brief Return if the storage term of the first iteration is identical to the storage
      *        term for the solution of the previous time step.
      *
-     * For quite technical reasons, the storage term cannot be recycled if either DRSDT
-     * or DRVDT are active. Nor if the porosity is changes between timesteps
-     * using a pore volume multiplier (i.e., poreVolumeMultiplier() != 1.0)
+     * Storage recycling is disabled for configurations where the first iteration storage
+     * can differ from the previous timestep storage:
+     * 1. DRSDT/DRVDT update dissolved/vaporized composition limits explicitly.
+     * 2. Rock compaction multipliers make pore volume state-dependent across timesteps.
+     * 3. TPSA geomechanics can update mechanics state between coupled Flow/TPSA solves,
+     *    which changes porosity/pore-volume terms used by Flow.
      */
     bool recycleFirstIterationStorage() const
     {
+        const auto& rspec = this->simulator().vanguard().eclState().runspec();
+        const bool tpsaActive = rspec.mech() && rspec.mechSolver().tpsa();
+        if (tpsaActive) {
+            return false;
+        }
+
         int episodeIdx = this->episodeIndex();
         return !this->mixControls_.drsdtActive(episodeIdx) &&
                !this->mixControls_.drvdtActive(episodeIdx) &&
@@ -951,15 +981,19 @@ public:
         values.setPvtRegionIndex(pvtRegionIndex(context, spaceIdx, timeIdx));
         values.assignNaive(initialFluidStates_[globalDofIdx]);
 
-        SolventModule::assignPrimaryVars(values,
-                                         enableSolvent ? this->solventSaturation_[globalDofIdx] : 0.0,
-                                         enableSolvent ? this->solventRsw_[globalDofIdx] : 0.0);
+        if constexpr (enableSolvent) {
+            SolventModule::assignPrimaryVars(values,
+                                             this->solventSaturation_[globalDofIdx],
+                                             this->solventRsw_[globalDofIdx]);
+        }
 
-        if constexpr (enablePolymer)
+        if constexpr (enablePolymer) {
             values[Indices::polymerConcentrationIdx] = this->polymer_.concentration[globalDofIdx];
+        }
 
-        if constexpr (enablePolymerMolarWeight)
+        if constexpr (enablePolymerMolarWeight) {
             values[Indices::polymerMoleWeightIdx]= this->polymer_.moleWeight[globalDofIdx];
+        }
 
         if constexpr (enableBrine) {
             if (enableSaltPrecipitation && values.primaryVarsMeaningBrine() == PrimaryVariables::BrineMeaning::Sp) {
@@ -972,11 +1006,11 @@ public:
 
         if constexpr (enableBioeffects) {
             values[Indices::microbialConcentrationIdx] = this->bioeffects_.microbialConcentration[globalDofIdx];
-            values[Indices::biofilmVolumeFractionIdx]= this->bioeffects_.biofilmVolumeFraction[globalDofIdx];
+            values[Indices::biofilmVolumeFractionIdx] = this->bioeffects_.biofilmVolumeFraction[globalDofIdx];
             if constexpr (enableMICP) {
-                values[Indices::oxygenConcentrationIdx]= this->bioeffects_.oxygenConcentration[globalDofIdx];
-                values[Indices::ureaConcentrationIdx]= this->bioeffects_.ureaConcentration[globalDofIdx];
-                values[Indices::calciteVolumeFractionIdx]= this->bioeffects_.calciteVolumeFraction[globalDofIdx];
+                values[Indices::oxygenConcentrationIdx] = this->bioeffects_.oxygenConcentration[globalDofIdx];
+                values[Indices::ureaConcentrationIdx] = this->bioeffects_.ureaConcentration[globalDofIdx];
+                values[Indices::calciteVolumeFractionIdx] = this->bioeffects_.calciteVolumeFraction[globalDofIdx];
             }
         }
 

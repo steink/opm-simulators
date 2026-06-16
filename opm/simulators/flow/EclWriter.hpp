@@ -40,7 +40,6 @@
 #include <opm/output/eclipse/Inplace.hpp>
 #include <opm/output/eclipse/RestartValue.hpp>
 
-#include <opm/models/blackoil/blackoilenergymodules.hh>
 #include <opm/models/blackoil/blackoilproperties.hh> // Properties::EnableMech, EnableSolvent
 #include <opm/models/common/multiphasebaseproperties.hh> // Properties::FluidSystem
 
@@ -133,10 +132,11 @@ class EclWriter : public EclGenericWriter<GetPropType<TypeTag, Properties::Grid>
 
     typedef Dune::MultipleCodimMultipleGeomTypeMapper< GridView > VertexMapper;
 
-    enum { enableEnergy = getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::FullyImplicitThermal ||
-           getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::SequentialImplicitThermal };
+    static constexpr bool enableEnergy =
+        getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::FullyImplicitThermal ||
+        getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::SequentialImplicitThermal;
     enum { enableMech = getPropValue<TypeTag, Properties::EnableMech>() };
-    enum { enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>() };
+    static constexpr bool enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>();
     enum { enableGeochemistry = getPropValue<TypeTag, Properties::EnableGeochemistry>() };
 
 public:

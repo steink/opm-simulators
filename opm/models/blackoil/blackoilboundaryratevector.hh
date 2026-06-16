@@ -31,7 +31,14 @@
 #include <opm/material/common/Valgrind.hpp>
 #include <opm/material/constraintsolvers/NcpFlash.hpp>
 
-#include <opm/models/blackoil/blackoilenergymodules.hh>
+#include <opm/models/blackoil/blackoilmodules.hpp>
+#include <opm/models/blackoil/blackoilproperties.hh>
+
+#include <opm/models/common/multiphasebaseproperties.hh>
+
+#include <opm/models/discretization/common/fvbaseproperties.hh>
+
+#include <opm/models/utils/propertysystem.hh>
 
 #include <algorithm>
 #include <type_traits>
@@ -57,11 +64,11 @@ class BlackOilBoundaryRateVector : public GetPropType<TypeTag, Properties::RateV
 
     enum { numEq = getPropValue<TypeTag, Properties::NumEq>() };
     enum { numPhases = getPropValue<TypeTag, Properties::NumPhases>() };
-    enum { enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>() };
-    enum { enablePolymer = getPropValue<TypeTag, Properties::EnablePolymer>() };
+    static constexpr bool enablePolymer = getPropValue<TypeTag, Properties::EnablePolymer>();
+    static constexpr bool enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>();
     enum { enableFullyImplicitThermal = (getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::FullyImplicitThermal) };
     enum { contiEnergyEqIdx = Indices::contiEnergyEqIdx };
-    enum { enableFoam = getPropValue<TypeTag, Properties::EnableFoam>() };
+    static constexpr bool enableFoam = getPropValue<TypeTag, Properties::EnableFoam>();
     enum { enableMICP = Indices::enableMICP };
 
     static constexpr bool blackoilConserveSurfaceVolume =

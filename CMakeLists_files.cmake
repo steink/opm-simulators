@@ -161,7 +161,7 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/flow/RSTConv.cpp
   opm/simulators/flow/RegionPhasePVAverage.cpp
   opm/simulators/flow/SimulatorConvergenceOutput.cpp
-  opm/simulators/flow/SimulatorFullyImplicitBlackoil.cpp
+  opm/simulators/flow/SimulatorFullyImplicit.cpp
   opm/simulators/flow/SimulatorReportBanners.cpp
   opm/simulators/flow/SimulatorSerializer.cpp
   opm/simulators/flow/SolutionContainers.cpp
@@ -479,6 +479,7 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_ALQState.cpp
   tests/test_aquifergridutils.cpp
   tests/test_blackoil_amg.cpp
+  tests/test_blackoilprimaryvariables.cpp
   tests/test_convergenceoutputconfiguration.cpp
   tests/test_convergencereport.cpp
   tests/test_deferredlogger.cpp
@@ -496,9 +497,11 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_interregflows.cpp
   tests/test_invert.cpp
   tests/test_keyword_validator.cpp
+  tests/test_linearleastsquares.cpp
   tests/test_LogOutputHelper.cpp
   tests/test_milu.cpp
   tests/test_multmatrixtransposed.cpp
+  tests/test_networkpressure.cpp
   tests/test_nonnc.cpp
   tests/test_norne_pvt.cpp
   tests/test_OilSatfuncConsistencyChecks.cpp
@@ -593,6 +596,42 @@ if(CUDA_FOUND OR hip_FOUND)
   if(MPI_FOUND)
     ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_GpuOwnerOverlapCopy.cpp)
   endif()
+
+  # for loop providing the flag --expt-relaxed-constexpr to fix some cuda issues with constexpr
+  if(NOT CONVERT_CUDA_TO_HIP)
+    set(CU_FILES_NEEDING_RELAXED_CONSTEXPR
+      tests/gpuistl/test_gpu_ad.cu
+      tests/gpuistl/test_gpu_linear_two_phase_material.cu
+      tests/gpuistl/test_gpuPvt.cu
+      tests/gpuistl/test_gpuBlackOilFluidSystem.cu
+      tests/gpuistl/test_GpuSparseMatrix.cu
+      tests/gpuistl/test_GpuSparseTable.cu
+      tests/gpuistl/test_blackoilfluidstategpu.cu
+      flow/flow_gpu_gaswater_thermal.cu
+    )
+
+    foreach(file ${CU_FILES_NEEDING_RELAXED_CONSTEXPR})
+      set_source_files_properties(${file}
+        PROPERTIES
+        COMPILE_FLAGS
+          "--expt-relaxed-constexpr"
+      )
+    endforeach()
+
+    set(CU_FILES_NEEDING_FPERMISSIVE
+      tests/gpuistl/test_primary_variables_gpu.cu
+    )
+
+    foreach(file ${CU_FILES_NEEDING_FPERMISSIVE})
+      # Certain structures in OPM requires the -fpermissive flag to compile with nvcc,
+      # this enables this for the specific files
+      set_source_files_properties(${file}
+        PROPERTIES
+        COMPILE_FLAGS
+          "-fpermissive --expt-relaxed-constexpr -Xcompiler=-fpermissive"
+      )
+    endforeach()
+  endif()
 endif()
 
 if(USE_GPU_BRIDGE)
@@ -682,6 +721,9 @@ list (APPEND TEST_DATA_FILES
   tests/include/PVT-WET-GAS.INC
   tests/include/scal_mod2.inc
   tests/include/summary_rc.inc
+  tests/rescoup/slave_parse_error/RC_MASTER.DATA
+  tests/rescoup/slave_parse_error/run_test.sh
+  tests/rescoup/slave_parse_error/slave/RC_SLAVE.DATA
   tests/test10.partition
   tests/parametersystem.ini
   tests/data/co2injection.dgf
@@ -717,6 +759,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/models/blackoil/blackoilbrinemodules.hh
   opm/models/blackoil/blackoilbrineparams.hpp
   opm/models/blackoil/blackoilconvectivemixingmodule.hh
+  opm/models/blackoil/blackoilconvectivemixingmoduleparam.hpp
   opm/models/blackoil/blackoildarcyfluxmodule.hh
   opm/models/blackoil/blackoildiffusionmodule.hh
   opm/models/blackoil/blackoildispersionmodule.hh
@@ -733,6 +776,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/models/blackoil/blackoilmeanings.hh
   opm/models/blackoil/blackoilmodel.hh
   opm/models/blackoil/blackoilmoduleparams.hh
+  opm/models/blackoil/blackoilmodules.hpp
   opm/models/blackoil/blackoilnewtonmethod.hpp
   opm/models/blackoil/blackoilnewtonmethodparams.hpp
   opm/models/blackoil/blackoilonephaseindices.hh
@@ -789,6 +833,9 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/models/discretization/common/linearizationtype.hh
   opm/models/discretization/common/restrictprolong.hh
   opm/models/discretization/common/tpfalinearizer.hh
+  opm/models/discretization/common/tpfalinearizergpukernels.hh
+  opm/models/discretization/common/tpfalinearizergpuparams.hh
+  opm/models/discretization/common/tpfalinearizerstructs.hh
   opm/models/discretization/common/tpsalinearizer.hpp
   opm/models/discretization/ecfv/ecfvbaseoutputmodule.hh
   opm/models/discretization/ecfv/ecfvdiscretization.hh
@@ -920,6 +967,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/models/utils/basicparameters.hh
   opm/models/utils/basicproperties.hh
   opm/models/utils/genericguard.hh
+  opm/models/utils/linearleastsquares.hpp
   opm/models/utils/parametersystem.hpp
   opm/models/utils/pffgridvector.hh
   opm/models/utils/prefetch.hh
@@ -939,13 +987,15 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/flow/Banners.hpp
   opm/simulators/flow/BaseAquiferModel.hpp
   opm/simulators/flow/BioeffectsContainer.hpp
-  opm/simulators/flow/BlackoilModel.hpp
-  opm/simulators/flow/BlackoilModel_impl.hpp
+  opm/simulators/flow/NonlinearSystemBlackOilReservoir.hpp
+  opm/simulators/flow/NonlinearSystemBlackOilReservoir_impl.hpp
   opm/simulators/flow/BlackoilModelConvergenceMonitor.hpp
-  opm/simulators/flow/BlackoilModelNldd.hpp
+  opm/simulators/flow/NonlinearSystemNldd.hpp
   opm/simulators/flow/BlackoilModelParameters.hpp
   opm/simulators/flow/BlackoilModelProperties.hpp
-  opm/simulators/flow/BlackoilModelTPSA.hpp
+  opm/simulators/flow/NonlinearSystemBlackOilReservoirTPSA.hpp
+  opm/simulators/flow/NonlinearSystem.hpp
+  opm/simulators/flow/NonlinearSystem_impl.hpp
   opm/simulators/flow/CO2H2Container.hpp
   opm/simulators/flow/CollectDataOnIORank.hpp
   opm/simulators/flow/CollectDataOnIORank_impl.hpp
@@ -964,6 +1014,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/flow/FacePropertiesTPSA_impl.hpp
   opm/simulators/flow/FemCpGridCompat.hpp
   opm/simulators/flow/FIBlackoilModel.hpp
+  opm/simulators/flow/SimpleFIBlackOilModel.hpp
   opm/simulators/flow/FIPContainer.hpp
   opm/simulators/flow/FlowBaseProblemProperties.hpp
   opm/simulators/flow/FlowBaseVanguard.hpp
@@ -1014,12 +1065,13 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/flow/RSTConv.hpp
   opm/simulators/flow/RegionPhasePVAverage.hpp
   opm/simulators/flow/SimulatorConvergenceOutput.hpp
-  opm/simulators/flow/SimulatorFullyImplicitBlackoil.hpp
-  opm/simulators/flow/SimulatorFullyImplicitBlackoil_impl.hpp
+  opm/simulators/flow/SimulatorFullyImplicit.hpp
+  opm/simulators/flow/SimulatorFullyImplicit_impl.hpp
   opm/simulators/flow/SimulatorReportBanners.hpp
   opm/simulators/flow/SimulatorSerializer.hpp
   opm/simulators/flow/SolutionContainers.hpp
   opm/simulators/flow/SubDomain.hpp
+  opm/simulators/flow/ThermalGasWaterFlowProblem.hpp
   opm/simulators/flow/TTagFlowProblemTPFA.hpp
   opm/simulators/flow/TTagFlowProblemTPSA.hpp
   opm/simulators/flow/TTagFlowProblemGasWater.hpp

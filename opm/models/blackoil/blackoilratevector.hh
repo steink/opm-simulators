@@ -34,11 +34,8 @@
 #include <opm/material/common/Valgrind.hpp>
 #include <opm/material/constraintsolvers/NcpFlash.hpp>
 
-#include <opm/models/blackoil/blackoilbioeffectsmodules.hh>
-#include <opm/models/blackoil/blackoilbrinemodules.hh>
-#include <opm/models/blackoil/blackoilfoammodules.hh>
-#include <opm/models/blackoil/blackoilpolymermodules.hh>
-#include <opm/models/blackoil/blackoilsolventmodules.hh>
+#include <opm/models/blackoil/blackoilmodules.hpp>
+#include <opm/models/blackoil/blackoilproperties.hh>
 #include <opm/models/common/multiphasebaseproperties.hh>
 #include <opm/models/discretization/common/fvbaseproperties.hh>
 
@@ -65,22 +62,24 @@ class BlackOilRateVector
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
     using Indices = GetPropType<TypeTag, Properties::Indices>;
 
-    using SolventModule = BlackOilSolventModule<TypeTag>;
-    using PolymerModule = BlackOilPolymerModule<TypeTag>;
-    using FoamModule = BlackOilFoamModule<TypeTag>;
-    using BrineModule = BlackOilBrineModule<TypeTag>;
-
     enum { numEq = getPropValue<TypeTag, Properties::NumEq>() };
     enum { numComponents = getPropValue<TypeTag, Properties::NumComponents>() };
     enum { conti0EqIdx = Indices::conti0EqIdx };
-    enum { enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>() };
-    enum { enablePolymer = getPropValue<TypeTag, Properties::EnablePolymer>() };
-    enum { enablePolymerMolarWeight = getPropValue<TypeTag, Properties::EnablePolymerMW>() };
-    enum { enableFoam = getPropValue<TypeTag, Properties::EnableFoam>() };
-    enum { enableBrine = getPropValue<TypeTag, Properties::EnableBrine>() };
-    enum { enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>() };
+
+    static constexpr bool enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>();
+    static constexpr bool enableBrine = getPropValue<TypeTag, Properties::EnableBrine>();
+    static constexpr bool enableFoam = getPropValue<TypeTag, Properties::EnableFoam>();
+    static constexpr bool enablePolymer = getPropValue<TypeTag, Properties::EnablePolymer>();
+    static constexpr bool enablePolymerMolarWeight = getPropValue<TypeTag, Properties::EnablePolymerMW>();
+    static constexpr bool enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>();
+
     using Toolbox = MathToolbox<Evaluation>;
     using ParentType = Dune::FieldVector<Evaluation, numEq>;
+
+    using BrineModule = BlackOilBrineModule<TypeTag, enableBrine>;
+    using FoamModule = BlackOilFoamModule<TypeTag, enableFoam>;
+    using PolymerModule = BlackOilPolymerModule<TypeTag, enablePolymer>;
+    using SolventModule = BlackOilSolventModule<TypeTag, enableSolvent>;
 
 public:
     BlackOilRateVector() : ParentType()
@@ -140,8 +139,10 @@ public:
             (*this)[conti0EqIdx + compIdx] *= FluidSystem::molarMass(compIdx, pvtRegionIdx);
         }
 
-        const auto& solventPvt = SolventModule::solventPvt();
-        (*this)[Indices::contiSolventEqIdx] *= solventPvt.molarMass(pvtRegionIdx);
+        if constexpr (enableSolvent) {
+            const auto& solventPvt = SolventModule::solventPvt();
+            (*this)[Indices::contiSolventEqIdx] *= solventPvt.molarMass(pvtRegionIdx);
+        }
 
         if constexpr (enablePolymer) {
             if constexpr (enablePolymerMolarWeight) {
@@ -178,6 +179,7 @@ public:
                         FluidSystem::referenceDensity(FluidSystem::waterPhaseIdx, pvtRegionIdx);
             }
             if constexpr (enableSolvent) {
+                const auto& solventPvt = SolventModule::solventPvt();
                 (*this)[Indices::contiSolventEqIdx] /=
                         solventPvt.referenceDensity(pvtRegionIdx);
             }

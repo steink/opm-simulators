@@ -20,8 +20,10 @@
 */
 #include "config.h"
 
+#include <opm/models/blackoil/blackoilconvectivemixingmodule.hh>
 #include <opm/models/blackoil/blackoillocalresidualtpfa.hh>
 #include <opm/models/blackoil/blackoilonephaseindices.hh>
+
 #include <opm/models/discretization/common/tpfalinearizer.hh>
 
 #include <opm/simulators/flow/BlackoilModelProperties.hpp>
@@ -91,7 +93,7 @@ struct Problem<TypeTag, TTag::FlowWaterOnlyProblemTPSA>
 
 template <class TypeTag>
 struct NonlinearSystem<TypeTag, TTag::FlowWaterOnlyProblemTPSA>
-{ using type = BlackoilModelTPSA<TypeTag>; };
+{ using type = NonlinearSystemBlackOilReservoirTPSA<TypeTag>; };
 
 }  // namespace Opm::Properties
 

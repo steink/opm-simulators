@@ -20,8 +20,15 @@
 */
 #include "config.h"
 
+#include <flow/flow_gaswater_dissolution_tpsa.hpp>
+
+#include <opm/material/thermal/EnergyModuleType.hpp>
+
+#include <opm/models/blackoil/blackoilconvectivemixingmodule.hh>
+#include <opm/models/blackoil/blackoilenergymodules.hh>
 #include <opm/models/blackoil/blackoillocalresidualtpfa.hh>
 #include <opm/models/blackoil/blackoiltwophaseindices.hh>
+
 #include <opm/models/discretization/common/tpfalinearizer.hh>
 
 #include <opm/simulators/flow/BlackoilModelProperties.hpp>
@@ -63,6 +70,10 @@ template<class TypeTag>
 struct EnableVapwat<TypeTag, TTag::FlowGasWaterDissolutionProblemTPSA>
 { static constexpr bool value = true; };
 
+template<class TypeTag>
+struct EnergyModuleType<TypeTag, TTag::FlowGasWaterDissolutionProblemTPSA>
+{ static constexpr EnergyModules value = EnergyModules::ConstantTemperature; };
+
 //! The indices required by the model
 template<class TypeTag>
 struct Indices<TypeTag, TTag::FlowGasWaterDissolutionProblemTPSA>
@@ -101,7 +112,7 @@ struct Problem<TypeTag, TTag::FlowGasWaterDissolutionProblemTPSA>
 
 template <class TypeTag>
 struct NonlinearSystem<TypeTag, TTag::FlowGasWaterDissolutionProblemTPSA>
-{ using type = BlackoilModelTPSA<TypeTag>; };
+{ using type = NonlinearSystemBlackOilReservoirTPSA<TypeTag>; };
 
 }  // namespace Opm::Properties
 

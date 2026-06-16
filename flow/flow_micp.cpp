@@ -21,12 +21,18 @@
 #include <opm/grid/CpGrid.hpp>
 
 #include <opm/material/common/ResetLocale.hpp>
+
+#include <opm/models/blackoil/blackoilbioeffectsmodules.hh>
+#include <opm/models/blackoil/blackoilconvectivemixingmodule.hh>
+#include <opm/models/blackoil/blackoildiffusionmodule.hh>
+#include <opm/models/blackoil/blackoildispersionmodule.hh>
 #include <opm/models/blackoil/blackoillocalresidualtpfa.hh>
 #include <opm/models/blackoil/blackoilonephaseindices.hh>
+
 #include <opm/models/discretization/common/tpfalinearizer.hh>
 
 #include <opm/simulators/flow/Main.hpp>
-#include <opm/simulators/flow/SimulatorFullyImplicitBlackoil.hpp>
+#include <opm/simulators/flow/SimulatorFullyImplicit.hpp>
 
 namespace Opm::Properties {
 

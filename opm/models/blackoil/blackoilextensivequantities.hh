@@ -28,11 +28,9 @@
 #ifndef EWOMS_BLACK_OIL_EXTENSIVE_QUANTITIES_HH
 #define EWOMS_BLACK_OIL_EXTENSIVE_QUANTITIES_HH
 
-#include <opm/models/blackoil/blackoilbioeffectsmodules.hh>
-#include <opm/models/blackoil/blackoildiffusionmodule.hh>
-#include <opm/models/blackoil/blackoilenergymodules.hh>
-#include <opm/models/blackoil/blackoilpolymermodules.hh>
-#include <opm/models/blackoil/blackoilsolventmodules.hh>
+#include <opm/models/blackoil/blackoilmodules.hpp>
+#include <opm/models/blackoil/blackoilproperties.hh>
+
 #include <opm/models/common/multiphasebaseextensivequantities.hh>
 
 namespace Opm {
@@ -62,8 +60,12 @@ class BlackOilExtensiveQuantities
     using Implementation = GetPropType<TypeTag, Properties::ExtensiveQuantities>;
     using ElementContext = GetPropType<TypeTag, Properties::ElementContext>;
 
-    enum { enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>() };
+    static constexpr bool enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>();
     using DiffusionExtensiveQuantities = BlackOilDiffusionExtensiveQuantities<TypeTag, enableDiffusion>;
+
+    static constexpr bool enableEnergy =
+        getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::FullyImplicitThermal ||
+        getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::SequentialImplicitThermal;
 
 public:
     /*!
@@ -80,8 +82,12 @@ public:
 
         asImp_().updateSolvent(elemCtx, scvfIdx, timeIdx);
         asImp_().updatePolymer(elemCtx, scvfIdx, timeIdx);
-        asImp_().updateEnergy(elemCtx, scvfIdx, timeIdx);
-        DiffusionExtensiveQuantities::update_(elemCtx, scvfIdx, timeIdx);
+        if constexpr (enableEnergy) {
+            asImp_().updateEnergy(elemCtx, scvfIdx, timeIdx);
+        }
+        if constexpr (enableDiffusion) {
+            DiffusionExtensiveQuantities::update_(elemCtx, scvfIdx, timeIdx);
+        }
     }
 
     template <class Context, class FluidState>
@@ -92,7 +98,9 @@ public:
     {
         MultiPhaseParent::updateBoundary(ctx, bfIdx, timeIdx, fluidState);
 
-        asImp_().updateEnergyBoundary(ctx, bfIdx, timeIdx, fluidState);
+        if constexpr (enableEnergy) {
+            asImp_().updateEnergyBoundary(ctx, bfIdx, timeIdx, fluidState);
+        }
     }
 
 protected:

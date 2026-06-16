@@ -52,10 +52,10 @@ class NcpExtensiveQuantities
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
     using ElementContext = GetPropType<TypeTag, Properties::ElementContext>;
 
-    enum { enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>() };
+    static constexpr bool enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>();
     using DiffusionExtensiveQuantities = ::Opm::DiffusionExtensiveQuantities<TypeTag, enableDiffusion>;
 
-    enum { enableEnergy = getPropValue<TypeTag, Properties::EnableEnergy>() };
+    static constexpr bool enableEnergy = getPropValue<TypeTag, Properties::EnableEnergy>();
     using EnergyExtensiveQuantities = ::Opm::EnergyExtensiveQuantities<TypeTag, enableEnergy>;
 
 public:
