@@ -498,6 +498,37 @@ namespace Opm {
         }
 
         this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
+
+        // --- Potential-based group-tree balance ---
+        // Run BEFORE the initial well-solve loop so that wells on GRUP control
+        // receive consistent group targets before their equations are solved.
+        // Potentials and guide rates have been computed above; group state
+        // (including GPMAINT targets) has been synced by the call above.
+        if (this->wellsActive() && (true || param_.enable_group_tree_balancer_)) {
+            OPM_BEGIN_PARALLEL_TRY_CATCH()
+            {
+                const auto& balancerComm = simulator_.vanguard().grid().comm();
+                prepareWellsForBalancingFromPotentials_(local_deferredLogger);
+                this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ false);
+                if (balancerComm.rank() == 0) {
+                    ProdGroupTreeBalancer::runGroupTreeBalancer(
+                        *this,
+                        this->summaryState(),
+                        reportStepIdx,
+                        param_.group_tree_balancer_tolerance_,
+                        param_.group_tree_balancer_max_iterations_,
+                        local_deferredLogger);
+                }
+                // Broadcast the balanced targets to all ranks without
+                // re-computing the group targets via the full chain.
+                this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ false);
+            }
+            OPM_END_PARALLEL_TRY_CATCH_LOG(local_deferredLogger,
+                                           "beginTimeStep() group-tree balance failed: ",
+                                           this->terminal_output_,
+                                           simulator_.vanguard().grid().comm())
+        }
+
         try {
             // Compute initial well solution for new wells and injectors that change injection type i.e. WAG.
             for (auto& well : well_container_) {
@@ -707,7 +738,7 @@ namespace Opm {
 
         this->calculateProductivityIndexValues(local_deferredLogger);
 
-        //this->groupStateHelper().updateNONEProductionGroups();
+        this->groupStateHelper().updateNONEProductionGroups();
 
 #ifdef RESERVOIR_COUPLING_ENABLED
         this->rescoupHelper_.rescoupSyncSummaryData();
@@ -1277,6 +1308,31 @@ namespace Opm {
                                                           local_deferredLogger);
             }
             prepareWellsBeforeAssembling(dt);
+            
+            if (false || param_.enable_group_tree_balancer_) {
+                // Refresh IPR-based limits only within nupcol iterations: after nupcol
+                // the Newton iterate is no longer considered converged enough to
+                // re-linearize IPR, so we reuse the limits cached by the last
+                // in-nupcol call (or by the potential-based call in beginTimeStep).
+                const auto& iterCtx = simulator_.problem().iterationContext();
+                const int nupcol = this->schedule()[reportStepIdx].nupcol();
+                if (iterCtx.withinNupcol(nupcol)) {
+                    prepareWellsForBalancing_(local_deferredLogger);
+                    this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ false);
+                
+                    const auto& comm = simulator_.vanguard().grid().comm();
+                    if (comm.rank() == 0) {
+                        ProdGroupTreeBalancer::runGroupTreeBalancer(
+                            *this,
+                            this->summaryState(),
+                            reportStepIdx,
+                            param_.group_tree_balancer_tolerance_,
+                            param_.group_tree_balancer_max_iterations_,
+                            local_deferredLogger);
+                    }
+                    this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ false);
+                }
+            }
         }
         OPM_END_PARALLEL_TRY_CATCH_LOG(local_deferredLogger,
                                        "updateWellControlsAndNetworkIteration() failed: ",
@@ -1628,19 +1684,24 @@ namespace Opm {
         bool changed_well_group = false;
         const Group& fieldGroup = this->schedule().getGroup("FIELD", episodeIdx);
 
-        // Run the production group-tree balancing predictor (rank-0 only; result is
-        // broadcast via updateAndCommunicate).  It sets initial control modes and
-        // rates before the existing switching logic runs as a corrector below.
+        // Run the production group-tree balancing predictor.
+        // prepareWellsForBalancing_ runs on all ranks (IPR update + limit
+        // computation + MPI communication).  runGroupTreeBalancer then
+        // executes on rank 0 only and its result is broadcast via
+        // updateAndCommunicateGroupData.
+        #if 0
         if (true || param_.enable_group_tree_balancer_) {
+            // Refresh IPR-based limits only within nupcol iterations: after nupcol
+            // the Newton iterate is no longer considered converged enough to
+            // re-linearize IPR, so we reuse the limits cached by the last
+            // in-nupcol call (or by the potential-based call in beginTimeStep).
+            const auto& iterCtx = simulator_.problem().iterationContext();
+            const int nupcol = this->schedule()[episodeIdx].nupcol();
+            if (iterCtx.withinNupcol(nupcol)) {
+                prepareWellsForBalancing_(deferred_logger);
+                this->updateAndCommunicateGroupData(episodeIdx, /*update_wellgrouptarget*/ false);
+            }
             if (comm.rank() == 0) {
-                if (param_.use_implicit_ipr_) {
-                    for (auto& well : well_container_) {
-                        const auto& ws = this->wellState().well(well->indexOfWell());
-                        if (well->wellEcl().isProducer() && ws.status == WellStatus::OPEN) {
-                            well->updateIPRImplicit(simulator_, this->groupStateHelper(), this->wellState());
-                        }
-                    }
-                }
                 ProdGroupTreeBalancer::runGroupTreeBalancer(
                     *this,
                     this->summaryState(),
@@ -1650,10 +1711,8 @@ namespace Opm {
                     deferred_logger);
             }
             this->updateAndCommunicateGroupData(episodeIdx, /*update_wellgrouptarget*/ false);
-            // updateAndCommunicate(episodeIdx);
-            // Note: changed_well_group remains false so the corrector loop below
-            // still runs to handle injection, economic limits, and any remaining violations.
         }
+        #endif
 
         // Check group individual constraints.
         // iterate a few times to make sure all constraints are honored
@@ -2142,6 +2201,153 @@ namespace Opm {
 
 
 
+
+    template<typename TypeTag>
+    void
+    BlackoilWellModel<TypeTag>::
+    prepareWellsForBalancingFromPotentials_([[maybe_unused]] DeferredLogger& deferred_logger)
+    {
+        OPM_TIMEFUNCTION();
+        const int nw = static_cast<int>(this->wellState().size());
+        if (nw == 0) return;
+
+        // Reset every well's cached limit so stale values don't survive.
+        for (int w = 0; w < nw; ++w) {
+            auto& ws = this->wellState().well(w);
+            ws.balancer_limit_mode  = static_cast<int>(Well::ProducerCMode::CMODE_UNDEFINED);
+            ws.balancer_limit_value = Scalar(0);
+        }
+
+        for (auto& well : well_container_) {
+            const auto widx = well->indexOfWell();
+            auto& ws = this->wellState().well(widx);
+            if (!well->wellEcl().isProducer() || ws.status != WellStatus::OPEN) {
+                continue;
+            }
+
+            // Use potentials as the pressure-constraint proxy — no IPR solve needed.
+            const auto result =
+                well->estimateStrictestProductionLimitFromPotentials(
+                    this->wellState(), this->summaryState(), deferred_logger);
+
+            if (!result.has_value()) {
+                // Well can't operate, stop and set rates to zero
+                well->stopWell();
+                ws.balancer_limit_mode  = static_cast<int>(Well::ProducerCMode::CMODE_UNDEFINED);
+                ws.balancer_limit_value = Scalar(0);
+                for (int p = 0; p < this->numPhases(); ++p) {
+                    ws.surface_rates[p] = Scalar(0);
+                }
+                continue;
+            }
+
+            ws.balancer_limit_mode  = static_cast<int>(result->first);
+            ws.balancer_limit_value = result->second;
+        }
+
+        // Communicate across MPI ranks: same sum()-based gather as prepareWellsForBalancing_.
+        const int stride = 2;
+        std::vector<Scalar> buf(nw * stride, Scalar(0));
+        for (int w = 0; w < nw; ++w) {
+            const auto& ws = this->wellState().well(w);
+            if (ws.balancer_limit_mode != static_cast<int>(Well::ProducerCMode::CMODE_UNDEFINED)) {
+                buf[w * stride + 0] = static_cast<Scalar>(ws.balancer_limit_mode + 1);
+                buf[w * stride + 1] = ws.balancer_limit_value;
+            }
+        }
+        const auto& comm = simulator_.vanguard().grid().comm();
+        comm.sum(buf.data(), static_cast<int>(buf.size()));
+
+        for (int w = 0; w < nw; ++w) {
+            auto& ws = this->wellState().well(w);
+            const Scalar encodedMode = buf[w * stride + 0];
+            if (encodedMode > Scalar(0)) {
+                ws.balancer_limit_mode  = static_cast<int>(encodedMode) - 1;
+                ws.balancer_limit_value = buf[w * stride + 1];
+            }
+        }
+    }
+
+    template<typename TypeTag>
+    void
+    BlackoilWellModel<TypeTag>::
+    prepareWellsForBalancing_(DeferredLogger& deferred_logger)
+    {
+        OPM_TIMEFUNCTION();
+        const int nw = static_cast<int>(this->wellState().size());
+        if (nw == 0) return;
+
+        // --- Step 1 & 2: per-rank, per-locally-owned-well ---
+        // Reset every well's cached limit first so shut/injector wells
+        // carry CMODE_UNDEFINED rather than a stale value.
+        for (int w = 0; w < nw; ++w) {
+            auto& ws = this->wellState().well(w);
+            ws.balancer_limit_mode  = static_cast<int>(Well::ProducerCMode::CMODE_UNDEFINED);
+            ws.balancer_limit_value = Scalar(0);
+        }
+
+        for (auto& well : well_container_) {
+            const auto widx = well->indexOfWell();
+            auto& ws = this->wellState().well(widx);
+            if (!well->wellEcl().isProducer() || ws.status != WellStatus::OPEN) {
+                continue;
+            }
+
+            // 1. Refresh IPR coefficients (requires a solved Newton iterate).
+            if (param_.use_implicit_ipr_) {
+                well->updateIPRImplicit(
+                    simulator_, this->groupStateHelper(), this->wellState());
+            }
+
+            // 2. Compute strictest individual limit at current rate fractions.
+            const auto result =
+                well->estimateStrictestProductionLimitForBalancer(
+                    this->wellState(), this->summaryState(), deferred_logger);
+
+            if (!result.has_value()) {
+                // Well can't operate, stop and set rates to zero
+                well->stopWell();
+                ws.balancer_limit_mode  = static_cast<int>(Well::ProducerCMode::CMODE_UNDEFINED);
+                ws.balancer_limit_value = Scalar(0);
+                for (int p = 0; p < this->numPhases(); ++p) {
+                    ws.surface_rates[p] = Scalar(0);
+                }
+                continue;
+            }
+
+            ws.balancer_limit_mode  = static_cast<int>(result->first);
+            ws.balancer_limit_value = result->second;
+        }
+
+        // --- Step 3: communicate so every rank (especially rank 0) has the
+        // limits for all wells, not just locally-owned ones. ---
+        // Pack two Scalar-sized values per well into a flat buffer and reduce
+        // with sum() — each well is owned by exactly one rank, so summing
+        // is equivalent to gathering.
+        const int stride = 2; // [mode_as_scalar, limit]
+        std::vector<Scalar> buf(nw * stride, Scalar(0));
+        for (int w = 0; w < nw; ++w) {
+            const auto& ws = this->wellState().well(w);
+            if (ws.balancer_limit_mode
+                    != static_cast<int>(Well::ProducerCMode::CMODE_UNDEFINED))
+            {
+                buf[w * stride + 0] = static_cast<Scalar>(ws.balancer_limit_mode + 1); // +1 so 0 stays sentinel
+                buf[w * stride + 1] = ws.balancer_limit_value;
+            }
+        }
+        const auto& comm = simulator_.vanguard().grid().comm();
+        comm.sum(buf.data(), static_cast<int>(buf.size()));
+
+        // Write the gathered values back into the well state on all ranks.
+        for (int w = 0; w < nw; ++w) {
+            auto& ws = this->wellState().well(w);
+            const Scalar encodedMode = buf[w * stride + 0];
+            if (encodedMode > Scalar(0)) {
+                ws.balancer_limit_mode  = static_cast<int>(encodedMode) - 1; // undo +1 sentinel
+                ws.balancer_limit_value = buf[w * stride + 1];
+            }
+        }
+    }
 
     template<typename TypeTag>
     void

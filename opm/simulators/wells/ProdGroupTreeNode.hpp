@@ -74,6 +74,11 @@ struct ProdGroupTreeNode {
     // ---- Group control status --------------------------------------------
     bool availableForGroupControl{true};      ///< well: isAvailableForGroupControl()
                                        ///< group: productionGroupControlAvailable()
+    
+    // A group/well that has no ancestor with production limits, needs to be balanced
+    // individually if it has limits itself (it may still be flagged as available for 
+    // group control).
+    bool hasLimitedAncestor{true};
 
     //ProdNodeCtrlStatus ctrlStatus{ProdNodeCtrlStatus::Undetermined};
     ProdNodeModeCategory modeCategory{ProdNodeModeCategory::Group};

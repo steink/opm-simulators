@@ -106,6 +106,15 @@ protected:
                                               const bool check_group_constraints,
                                               DeferredLogger& deferred_logger) const;
 
+    /// Find the strictest rate constraint using explicit positive-valued rate vectors
+    /// (e.g. ws.well_potentials and corresponding reservoir rates).
+    std::pair<Well::ProducerCMode, typename FluidSystem::Scalar>
+    estimateStrictestProductionRateConstraintFromRates(
+        const std::vector<Scalar>& pos_surface_rates,
+        const std::vector<Scalar>& pos_reservoir_rates,
+        const Well::ProductionControls& controls,
+        DeferredLogger& deferred_logger) const;
+
     bool checkGroupConstraints(const GroupStateHelperType& groupStateHelper,
                                const Schedule& schedule,
                                const SummaryState& summaryState,

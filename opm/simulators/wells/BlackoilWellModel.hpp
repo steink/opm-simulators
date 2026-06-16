@@ -697,6 +697,21 @@ template<class Scalar> class WellContributions;
             /// @brief Refresh the network's cached `active_` flag.
             void updateNetworkActiveState_();
 
+            /// @brief Prepare wells for the group-tree balancer:
+            ///   (1) update implicit IPR coefficients from the current Newton iterate,
+            ///   (2) compute the strictest individual production limit at current rate
+            ///       fractions and cache it in SingleWellState::balancer_limit_mode/value,
+            ///   (3) communicate the cached limits to all MPI ranks via comm_.sum().
+            /// Must be called on all ranks before runGroupTreeBalancer().
+            void prepareWellsForBalancing_(DeferredLogger& deferred_logger);
+
+            /// @brief Prepare wells for the group-tree balancer using well potentials
+            ///   as the pressure-based production capacity proxy.  Does not require a
+            ///   converged Newton iterate; uses ws.well_potentials from
+            ///   updateWellPotentials() to estimate the strictest individual limit.
+            /// Must be called on all ranks before runGroupTreeBalancer().
+            void prepareWellsForBalancingFromPotentials_(DeferredLogger& deferred_logger);
+
             BlackoilWellModelGasLift<TypeTag> gaslift_;
             BlackoilWellModelNetwork<TypeTag> network_;
 #ifdef RESERVOIR_COUPLING_ENABLED
