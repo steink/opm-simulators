@@ -367,11 +367,19 @@ void populateWellNode(ProdGroupTreeNode<Scalar>& node,
                       int reportStep,
                       int fipnum,
                       int pvtreg,
-                      const BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel)
+                      const BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
+                      const std::unordered_map<std::string, std::pair<int, Scalar>>& limits)
 {
-    const auto& ws = wellState.well(wellName);
-    const auto& pu = ws.pu;
+    // Use globally available state so this function produces the same result on
+    // every MPI rank regardless of which rank owns the well.
+    //
+    // - well_rates / currentWellRates: populated for ALL wells on ALL ranks.
+    // - isProductionGrup(): from GlobalWellInfo, communicated via updateGlobalIsGrup().
+    // - getGlobalEfficiencyScalingFactor(): from GlobalWellInfo (comm.min reduction).
+    // - limits: passed in from prepareWellsForBalancing_*() — globally consistent.
+
     const auto& eclWell = schedule.getWell(wellName, reportStep);
+    const auto& pu      = wellModel.phaseUsage();
 
     node.name   = wellName;
     node.type   = ProdNodeType::Well;
@@ -379,27 +387,46 @@ void populateWellNode(ProdGroupTreeNode<Scalar>& node,
     node.availableForGroupControl = eclWell.isAvailableForGroupControl();
     node.hasGuideRate = true;
     node.efficiencyFactor = eclWell.getEfficiencyFactor()
-                          * ws.efficiency_scaling_factor;
+                          * wellState.getGlobalEfficiencyScalingFactor(wellName);
 
-    // Rates: canonical 3-component (negative = production)
-    node.rates = toCanonical3(ws.surface_rates, pu);
-
-    // Current control mode
-    node.mode = ws.production_cmode;
-
-    // Determine modeCategory from current control mode
-    if (ws.production_cmode == Well::ProducerCMode::GRUP) {
-        node.modeCategory= ProdNodeModeCategory::Group;
-    } else {
-        node.modeCategory= ProdNodeModeCategory::Individual;
+    // well_rates/currentWellRates stores positive = production; the balancer uses negative = production.
+    // Convert via the same active→canonical mapping as toCanonical3.
+    {
+        const auto& wr = wellState.currentWellRates(wellName);
+        for (int c = 0; c < 3; ++c) {
+            const int a = activeIdx(pu, c);
+            node.rates[c] = (a >= 0 && a < static_cast<int>(wr.size())) ? -wr[a] : Scalar(0);
+        }
     }
 
-    // RESV conversion coefficients for this well
+    // Control mode — use the boolean GRUP flag from GlobalWellInfo.
+    // The full production_cmode enum is not communicated; only GRUP vs. non-GRUP is.
+    if (wellState.isProductionGrup(wellName)) {
+        node.mode         = Well::ProducerCMode::GRUP;
+        node.modeCategory = ProdNodeModeCategory::Group;
+    } else {
+        // Individually-controlled well.  node.mode must carry the current
+        // production control mode because single-node subtree balancing
+        // (when this well is a subtree root with no ancestor limit) uses
+        // node.mode to determine the operating mode in balanceGroupTree().
+        // We read from globalBalancerLimits_ (populated for ALL wells via
+        // comm.sum in prepareWellsForBalancing_*) so the value is identical
+        // on every MPI rank regardless of which rank owns the well.
+        node.modeCategory = ProdNodeModeCategory::Individual;
+        if (const auto it = limits.find(wellName); it != limits.end()) {
+            node.mode = static_cast<Well::ProducerCMode>(it->second.first);
+        } else {
+            node.mode = Well::ProducerCMode::CMODE_UNDEFINED;
+        }
+    }
+
+    // RESV conversion coefficients — computed from globally consistent rates.
     {
         std::vector<Scalar> coeffVec(pu.numPhases, Scalar(0));
         std::vector<Scalar> posRates(pu.numPhases, Scalar(0));
-        for (int i = 0; i < static_cast<int>(ws.surface_rates.size()); ++i) {
-            posRates[i] = -ws.surface_rates[i]; // negate since production is negative
+        for (int c = 0; c < 3; ++c) {
+            const int a = activeIdx(pu, c);
+            if (a >= 0) posRates[a] = -node.rates[c]; // node.rates is negative = production
         }
         wellModel.calcResvCoeff(fipnum, pvtreg, posRates, coeffVec);
         for (int c = 0; c < 3; ++c) {
@@ -408,33 +435,36 @@ void populateWellNode(ProdGroupTreeNode<Scalar>& node,
         }
     }
 
-    // Individual limits — read from the pre-gathered WellState cache.
-    // BlackoilWellModel::prepareWellsForBalancing_() has already called
-    // estimateStrictestProductionLimitForBalancer on every rank and
-    // communicated the results via comm.sum(), so ws.balancer_limit_mode is
-    // valid on all ranks including rank 0.
+    // Individual limits — read from the globally consistent limits map.
+    // Valid for all MPI ranks regardless of which rank owns this well.
     if (!eclWell.isProducer()) return;
 
-    const auto cachedMode = static_cast<Well::ProducerCMode>(ws.balancer_limit_mode);
-
-    if (cachedMode == Well::ProducerCMode::CMODE_UNDEFINED) {
-        // No usable limit available (shutting well, no converged IPR, etc.).
+    const auto limIt = limits.find(wellName);
+    if (limIt == limits.end()) {
         node.Limits.clear();
         return;
     }
 
-    if (cachedMode == Well::ProducerCMode::THP && ws.balancer_limit_value <= Scalar(0)) {
+    const auto cachedMode = static_cast<Well::ProducerCMode>(limIt->second.first);
+    const Scalar limitValue = limIt->second.second;
+
+    if (cachedMode == Well::ProducerCMode::CMODE_UNDEFINED) {
+        node.Limits.clear();
+        return;
+    }
+
+    if (cachedMode == Well::ProducerCMode::THP && limitValue <= Scalar(0)) {
         // No stable operating point at THP limit: well cannot produce.
-        node.rates         = {};
-        node.modeCategory  = ProdNodeModeCategory::Individual;
-        node.mode          = Well::ProducerCMode::THP;
+        node.rates        = {};
+        node.modeCategory = ProdNodeModeCategory::Individual;
+        node.mode         = Well::ProducerCMode::THP;
         node.Limits.clear();
         return;
     }
 
     node.Limits.clear();
-    if (ws.balancer_limit_value > Scalar(0)) {
-        node.Limits[cachedMode] = ws.balancer_limit_value;
+    if (limitValue > Scalar(0)) {
+        node.Limits[cachedMode] = limitValue;
     }
 }
 
@@ -628,7 +658,8 @@ void populateGroupNode(ProdGroupTreeNode<Scalar>& node,
 template<class Scalar, typename IndexTraits>
 Tree<Scalar> buildTree(const BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
                        const SummaryState& summaryState,
-                       int reportStep)
+                       int reportStep,
+                       const std::unordered_map<std::string, std::pair<int, Scalar>>& limits)
 {
     const auto& schedule   = wellModel.schedule();
     const auto& wellState  = wellModel.wellState();
@@ -639,23 +670,19 @@ Tree<Scalar> buildTree(const BlackoilWellModelGeneric<Scalar, IndexTraits>& well
     // Get RESV conversion parameters (fipnum, pvtreg)
     const auto [fipnum, pvtreg] = wellModel.getGroupFipnumAndPvtreg();
 
-    // Well limits are already cached in SingleWellState::balancer_limit_mode/value
-    // by BlackoilWellModel::prepareWellsForBalancing_() and communicated to all ranks.
-    // No additional MPI gather is required here.
-
     Tree<Scalar> tree;
 
-    std::function<bool(const SingleWellState<Scalar, IndexTraits>&)> 
-            validWellNode = [&](const SingleWellState<Scalar, IndexTraits>& ws) {
-        // A well node is valid if it is a producer and has non-zero rates
-        if (!ws.producer) return false;
-        for (const auto& r : ws.surface_rates) {
-            if (std::abs(r) != Scalar(0)) {
-                return true;
-            }
+    // A well node is valid if it is a producer and has non-zero rates.
+    // Uses currentWellRates() (available on all ranks) rather than local ws.surface_rates.
+    auto validWellNode = [&](const std::string& wname) -> bool {
+        if (!schedule.getWell(wname, reportStep).isProducer()) return false;
+        if (!wellState.hasWellRates(wname)) return false;
+        for (const auto& r : wellState.currentWellRates(wname)) {
+            if (std::abs(r) != Scalar(0)) return true;
         }
         return false;
     };
+
     // Use a stack-based traversal starting from FIELD
     std::vector<std::string> toVisit = {"FIELD"};
     while (!toVisit.empty()) {
@@ -663,15 +690,12 @@ Tree<Scalar> buildTree(const BlackoilWellModelGeneric<Scalar, IndexTraits>& well
         toVisit.pop_back();
 
         if (schedule.hasWell(name, reportStep)) {
-            // Well node: only populate if locally available (producer only)
-            if (wellState.has(name)) {
-                const auto& ws = wellState.well(name);
-                if (validWellNode(ws)) {
-                    auto& node = tree[name];
-                    populateWellNode(node, name, schedule, wellState, groupState,
-                                     guideRate, summaryState, reportStep,
-                                     fipnum, pvtreg, wellModel);
-                }
+            // Well node: visible to all ranks via currentWellRates().
+            if (wellState.hasWellRates(name) && validWellNode(name)) {
+                auto& node = tree[name];
+                populateWellNode(node, name, schedule, wellState, groupState,
+                                 guideRate, summaryState, reportStep,
+                                 fipnum, pvtreg, wellModel, limits);
             }
         } else {
             // Group node: populate and push children onto the stack
@@ -1359,8 +1383,8 @@ void distributeFallbackRates(Tree<Scalar>& tree,
         // Add efficiency-scaled rates, zeroing the control-mode component to
         // avoid triggering re-balancing for this fallback child.
         std::array<Scalar, 3> scaledRates;
-        for (int c = 0; c < 3; ++c) {
-            scaledRates[c] = ck.efficiencyFactor * (-ck.rates[c]);
+        for (int ph = 0; ph < 3; ++ph) {
+            scaledRates[ph] = ck.efficiencyFactor * (-ck.rates[ph]);
         }
         if (modeIdx >= 0) {
             scaledRates[modeIdx] = Scalar(0);
@@ -1883,6 +1907,7 @@ bool runBalancingAlgorithm(const BlackoilWellModelGeneric<Scalar, IndexTraits>& 
             initializeCategories(child);
         }
 
+        /*
         // Set initial category based on availableForGroupControl
         if (!node.availableForGroupControl) {
             node.modeCategory = ProdNodeModeCategory::Individual;
@@ -1891,6 +1916,7 @@ bool runBalancingAlgorithm(const BlackoilWellModelGeneric<Scalar, IndexTraits>& 
         } else {
             node.modeCategory = ProdNodeModeCategory::Transparent;
         }
+        */
     };
     initializeCategories("FIELD");
 
@@ -2056,12 +2082,13 @@ void applyTreeToState(const Tree<Scalar>& tree,
             }
             groupState.update_production_rates(name, activeRates);
 
-            // Update group control mode
-            if (node.modeCategory== ProdNodeModeCategory::Group) {
+            // Update group control mode.
+            // applyTreeToState() now runs on all MPI ranks simultaneously (each rank
+            // runs the same deterministic algorithm on globally consistent inputs and
+            // reaches the same result), so production_control writes are valid.
+            if (node.modeCategory == ProdNodeModeCategory::Group) {
                 groupState.production_control(name, Group::ProductionCMode::FLD);
-            } else if (node.modeCategory== ProdNodeModeCategory::Individual) {
-                // Map individualCtrl (Well::ProducerCMode) to Group::ProductionCMode
-                // These are separate enums but share the same name mappings.
+            } else if (node.modeCategory == ProdNodeModeCategory::Individual) {
                 switch (node.mode) {
                 case Well::ProducerCMode::ORAT:
                     groupState.production_control(name, Group::ProductionCMode::ORAT); break;
@@ -2091,6 +2118,7 @@ bool runGroupTreeBalancer(BlackoilWellModelGeneric<Scalar, IndexTraits>& wellMod
                           int reportStep,
                           Scalar tol,
                           [[maybe_unused]] int maxIter,
+                          const std::unordered_map<std::string, std::pair<int, Scalar>>& limits,
                           DeferredLogger& logger)
 {
     OPM_TIMEFUNCTION();
@@ -2098,7 +2126,7 @@ bool runGroupTreeBalancer(BlackoilWellModelGeneric<Scalar, IndexTraits>& wellMod
 
     const auto t0 = std::chrono::steady_clock::now();
 
-    auto tree = buildTree(wellModel, summaryState, reportStep);
+    auto tree = buildTree(wellModel, summaryState, reportStep, limits);
 
     const bool converged = runBalancingAlgorithm(wellModel, tree, tol);
 
@@ -2134,7 +2162,8 @@ bool runGroupTreeBalancer(BlackoilWellModelGeneric<Scalar, IndexTraits>& wellMod
 
 template Tree<double> buildTree<double, BlackOilDefaultFluidSystemIndices>(
     const BlackoilWellModelGeneric<double, BlackOilDefaultFluidSystemIndices>&,
-    const SummaryState&, int);
+    const SummaryState&, int,
+    const std::unordered_map<std::string, std::pair<int, double>>&);
 
 template std::vector<std::string>
 getSubTreeOrdering<double>(const Tree<double>&, const std::string&);
@@ -2190,13 +2219,16 @@ template void applyTreeToState<double, BlackOilDefaultFluidSystemIndices>(
 
 template bool runGroupTreeBalancer<double, BlackOilDefaultFluidSystemIndices>(
     BlackoilWellModelGeneric<double, BlackOilDefaultFluidSystemIndices>&,
-    const SummaryState&, int, double, int, DeferredLogger&);
+    const SummaryState&, int, double, int,
+    const std::unordered_map<std::string, std::pair<int, double>>&,
+    DeferredLogger&);
 
 #ifdef FLOW_INSTANTIATE_FLOAT
 
 template Tree<float> buildTree<float, BlackOilDefaultFluidSystemIndices>(
     const BlackoilWellModelGeneric<float, BlackOilDefaultFluidSystemIndices>&,
-    const SummaryState&, int);
+    const SummaryState&, int,
+    const std::unordered_map<std::string, std::pair<int, float>>&);
 
 template std::vector<std::string>
 getSubTreeOrdering<float>(const Tree<float>&, const std::string&);
@@ -2244,7 +2276,9 @@ template void applyTreeToState<float, BlackOilDefaultFluidSystemIndices>(
 
 template bool runGroupTreeBalancer<float, BlackOilDefaultFluidSystemIndices>(
     BlackoilWellModelGeneric<float, BlackOilDefaultFluidSystemIndices>&,
-    const SummaryState&, int, float, int, DeferredLogger&);
+    const SummaryState&, int, float, int,
+    const std::unordered_map<std::string, std::pair<int, float>>&,
+    DeferredLogger&);
 
 #endif
 

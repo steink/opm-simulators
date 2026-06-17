@@ -788,7 +788,7 @@ namespace Opm
     template<typename TypeTag>
     bool
     WellInterface<TypeTag>::
-    solveWellWithOperabilityCheckOld(const Simulator& simulator,
+    solveWellWithOperabilityCheck(const Simulator& simulator,
                                   const double dt,
                                   const Well::InjectionControls& inj_controls,
                                   const Well::ProductionControls& prod_controls,
@@ -900,7 +900,7 @@ namespace Opm
     template<typename TypeTag>
     bool
     WellInterface<TypeTag>::
-    solveWellWithOperabilityCheck(const Simulator& simulator,
+    solveWellWithOperabilityCheckTmp(const Simulator& simulator,
                                   const double dt,
                                   const Well::InjectionControls& inj_controls,
                                   const Well::ProductionControls& prod_controls,

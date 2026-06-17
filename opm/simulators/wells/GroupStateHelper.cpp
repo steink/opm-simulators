@@ -403,24 +403,40 @@ checkGroupProductionConstraints(const Group& group) const
         Group::ProductionCMode::LRAT,
         Group::ProductionCMode::RESV})
     {
-        if (!group.has_control(cmode) || currentControl == cmode) {
+        // has_control() is schedule-based and identical on all MPI ranks — safe to skip early.
+        if (!group.has_control(cmode)) {
             continue;
         }
 
-        Scalar current_rate = this->sumProductionRateForControlMode_(group, cmode);
-        Scalar target = this->getProductionConstraintTarget_(group, cmode, controls);
+        // sumProductionRateForControlMode_() issues MPI_Allreduce and must be reached by
+        // all ranks symmetrically.  The check (currentControl == cmode) depends on
+        // production_control which is NOT communicated by communicate_rates(), so it can
+        // differ between ranks.  Call the allreduce unconditionally for every cmode the
+        // group has a control for, then skip using the result if the mode is already active.
+        const Scalar current_rate = this->sumProductionRateForControlMode_(group, cmode);
 
-        // LRAT skip heuristic: if liquid and oil targets are equal
-        // and water rate is ~0, skip the LRAT check.
+        // LRAT skip heuristic: comm().sum must also be called before any state-dependent
+        // continue so that all ranks reach it symmetrically.
+        Scalar lrat_water_rate = 0.0;
+        if (cmode == Group::ProductionCMode::LRAT) {
+            const auto& pu = this->phaseUsage();
+            lrat_water_rate = this->sumWellSurfaceRates(group,
+                pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx),
+                /*injector=*/false);
+            lrat_water_rate = this->comm().sum(lrat_water_rate);
+        }
+
+        // Now it is safe to skip based on currentControl (state-dependent).
+        if (currentControl == cmode) {
+            continue;
+        }
+
+        const Scalar target = this->getProductionConstraintTarget_(group, cmode, controls);
+
         if (cmode == Group::ProductionCMode::LRAT
             && target == controls.oil_target)
         {
-            const auto& pu = this->phaseUsage();
-            Scalar water_rate = this->sumWellSurfaceRates(group,
-                pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx),
-                /*injector=*/false);
-            water_rate = this->comm().sum(water_rate);
-            if (std::abs(water_rate) < 1e-12) {
+            if (std::abs(lrat_water_rate) < 1e-12) {
                 this->deferredLogger().debug(
                     "LRAT_ORAT_GROUP",
                     "GROUP " + group.name()

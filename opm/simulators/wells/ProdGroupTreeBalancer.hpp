@@ -24,6 +24,7 @@
 
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -57,11 +58,13 @@ using Tree = std::map<std::string, ProdGroupTreeNode<Scalar>>;
 /// \param[in]  wellModel     Well model (for RESV coefficient computation)
 /// \param[in]  summaryState  Summary state (for evaluating schedule quantities)
 /// \param[in]  reportStep    Current report step index
+/// \param[in]  limits        Globally gathered well limits (from prepareWellsForBalancing_*)
 /// \return     Map from node name to ProdGroupTreeNode
 template<class Scalar, typename IndexTraits>
 Tree<Scalar> buildTree(const BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
                        const SummaryState& summaryState,
-                       int reportStep);
+                       int reportStep,
+                       const std::unordered_map<std::string, std::pair<int, Scalar>>& limits);
 
 // ---------------------------------------------------------------------------
 // Algorithm core
@@ -304,6 +307,7 @@ void applyTreeToState(const Tree<Scalar>& tree,
 /// \param[in]    reportStep    Current report step index
 /// \param[in]    tol           Convergence tolerance (default: 1e-4)
 /// \param[in]    maxIter       Maximum iterations per subtree (default: 100)
+/// \param[in]    limits        Globally gathered well limits (from prepareWellsForBalancing_*)
 /// \param[in]    logger        Deferred logger
 /// \return       true if the result passed checkTreeValidity
 template<class Scalar, typename IndexTraits>
@@ -312,6 +316,7 @@ bool runGroupTreeBalancer(BlackoilWellModelGeneric<Scalar, IndexTraits>& wellMod
                           int reportStep,
                           Scalar tol,
                           [[maybe_unused]] int maxIter,
+                          const std::unordered_map<std::string, std::pair<int, Scalar>>& limits,
                           DeferredLogger& logger);
 
 } // namespace Opm::ProdGroupTreeBalancer

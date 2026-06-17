@@ -91,8 +91,6 @@ public:
         serializer(use_group_target_fallback);
         serializer(forced_bhp_from_thp);
         serializer(was_shut_before_action_applied);
-        serializer(balancer_limit_mode);
-        serializer(balancer_limit_value);
     }
 
     bool operator==(const SingleWellState&) const;
@@ -172,13 +170,6 @@ public:
     // if it was SHUT, even the action set the well to OPEN, the data in the well state
     // is not well-defined. We do not use it to overwrite the current well state.
     bool was_shut_before_action_applied {false};
-
-    /// Cached strictest individual production limit for the group-tree balancer.
-    /// Updated every Newton iteration in BlackoilWellModel::prepareWellsForBalancing_().
-    /// Stored as an int so that serializeOp does not depend on the Well::ProducerCMode enum header.
-    /// CMODE_UNDEFINED (= -1) means no valid limit is available.
-    int  balancer_limit_mode {static_cast<int>(WellProducerCMode::CMODE_UNDEFINED)};
-    Scalar balancer_limit_value {0};
 
     /// Special purpose method to support dynamically rescaling a well's
     /// CTFs through WELPI.

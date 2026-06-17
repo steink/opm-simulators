@@ -157,9 +157,7 @@ struct ProdGroupTreeNode {
     /// Whether this node participates in guide-rate balancing (false for transparent groups)
     bool hasGuideRate{false};
 
-    /// Guide rates indexed by canonical phase [oil, water, gas]
-    /// Corresponds to ORAT, WRAT, GRAT guide rates
-    //std::array<Scalar, 3> guideRates{};
+
 
     /// Accumulated rates during balancing (sum of children's rates)
     std::array<Scalar, 3> rateSums{};
@@ -182,11 +180,9 @@ struct ProdGroupTreeNode {
     /// Iteration counter for this node
     int balancingCount{0};
 
-    /// Mode category: Group, Individual, None, Transparent, Satellite
-    //std::string modeCategory{"Group"};
 
-    /// Explicit rates from preprocessing (cap_individual_and_sum)
-    //std::array<Scalar, 3> explicitRates{};
+
+
 
     /// Phase fractions for groups (used in target distribution)
     std::array<Scalar, 3> fractions{};

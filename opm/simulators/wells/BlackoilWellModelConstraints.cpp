@@ -458,6 +458,11 @@ updateProductionGroupControl(const Group& group,
 {
     bool changed = false;
     const Group::ProductionCMode currentControl = group_state.production_control(group.name());
+    // Call checkGroupProductionConstraints before the oscillation early-return:
+    // it issues MPI_Allreduce via sumProductionRateForControlMode_() and must
+    // be reached symmetrically by all ranks to avoid collective call mismatch.
+    const auto& changed_this = this->checkGroupProductionConstraints(group);
+    const auto controls = group.productionControls(wellModel_.summaryState());
     if (auto groupPos = switched_prod.find(group.name()); groupPos != switched_prod.end()) {
         auto& ctrls = groupPos->second;
         const int number_of_switches = std::ranges::count(ctrls, currentControl);
@@ -477,9 +482,6 @@ updateProductionGroupControl(const Group& group,
             return false;
         }
     }
-
-    const auto& changed_this = this->checkGroupProductionConstraints(group);
-    const auto controls = group.productionControls(wellModel_.summaryState());
 
     if (changed_this.first != Group::ProductionCMode::NONE) {
         std::optional<std::string> worst_offending_well = std::nullopt;

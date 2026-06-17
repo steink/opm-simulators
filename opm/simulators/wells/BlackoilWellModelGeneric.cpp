@@ -720,6 +720,12 @@ checkGroupHigherConstraints(const Group& group,
 
     if (!isField && group.isProductionGroup()) {
         const Group::ProductionCMode currentControl = this->groupState().production_control(group.name());
+        // Obtain rates before the oscillation check: getGroupRatesAvailableForHigherLevelControl()
+        // issues MPI allreduce calls that must be reached symmetrically by all ranks.
+        std::vector<Scalar> rates_available =
+            this->groupStateHelper().getGroupRatesAvailableForHigherLevelControl(group, /*is_injector=*/false);
+        std::vector<Scalar> resv_coeff(this->numPhases(), 0.0);
+        calcResvCoeff(fipnum, pvtreg, this->groupState().production_rates(group.name()), resv_coeff);
         if (auto groupPos = switched_prod_groups_.find(group.name()); groupPos != switched_prod_groups_.end()) {
             auto& ctrls = groupPos->second;
             const int number_of_switches = std::ranges::count(ctrls, currentControl);
@@ -739,13 +745,6 @@ checkGroupHigherConstraints(const Group& group,
                 return false;
             }
         }
-        // Obtain rates for group.
-        // checkGroupConstraintsProd considers 'available' rates (e.g., group rates minus reduction rates).
-        // So when checking constraints, current groups rate must also be subtracted it's reduction rate
-        std::vector<Scalar> rates_available =
-            this->groupStateHelper().getGroupRatesAvailableForHigherLevelControl(group, /*is_injector=*/false);
-        std::vector<Scalar> resv_coeff(this->numPhases(), 0.0);
-        calcResvCoeff(fipnum, pvtreg, this->groupState().production_rates(group.name()), resv_coeff);
         // Check higher up only if under individual (not FLD) control.
         if (currentControl != Group::ProductionCMode::FLD && group.productionGroupControlAvailable()) {
             const Group& parentGroup = schedule().getGroup(group.parent(), reportStepIdx);
@@ -1333,6 +1332,51 @@ updateAndCommunicateGroupData(const int reportStepIdx,
     group_state_helper.updateWellRates(fieldGroup, this->nupcolWellState(), this->wellState());
     this->wellState().communicateGroupRates(comm_);
     this->groupState().communicate_rates(comm_);
+
+    // communicate_rates() does not include group production/injection control modes.
+    // In parallel, actionOnBrokenConstraints() may set different controls on each
+    // rank because the starting currentControl differs (production_control is a
+    // local state that diverges when the balancer or constraint checks set it
+    // differently).  Broadcast rank 0's values so all ranks agree before the next
+    // Newton iteration.
+    if (comm_.size() > 1) {
+        const std::vector<std::string>& allGroupNames = schedule().groupNames(reportStepIdx);
+        const int n = static_cast<int>(allGroupNames.size());
+
+        // --- Production controls ---
+        std::vector<int> prod_ctrl(n, static_cast<int>(Group::ProductionCMode::NONE));
+        for (int i = 0; i < n; ++i) {
+            if (this->groupState().has_production_control(allGroupNames[i])) {
+                prod_ctrl[i] = static_cast<int>(
+                    this->groupState().production_control(allGroupNames[i]));
+            }
+        }
+        comm_.broadcast(prod_ctrl.data(), n, /*root=*/0);
+        for (int i = 0; i < n; ++i) {
+            const auto cmode = static_cast<Group::ProductionCMode>(prod_ctrl[i]);
+            if (cmode != Group::ProductionCMode::NONE) {
+                this->groupState().production_control(allGroupNames[i], cmode);
+            }
+        }
+
+        // --- Injection controls (one pass per phase) ---
+        for (const Phase phase : {Phase::OIL, Phase::GAS, Phase::WATER}) {
+            std::vector<int> inj_ctrl(n, static_cast<int>(Group::InjectionCMode::NONE));
+            for (int i = 0; i < n; ++i) {
+                if (this->groupState().has_injection_control(allGroupNames[i], phase)) {
+                    inj_ctrl[i] = static_cast<int>(
+                        this->groupState().injection_control(allGroupNames[i], phase));
+                }
+            }
+            comm_.broadcast(inj_ctrl.data(), n, /*root=*/0);
+            for (int i = 0; i < n; ++i) {
+                const auto cmode = static_cast<Group::InjectionCMode>(inj_ctrl[i]);
+                if (cmode != Group::InjectionCMode::NONE) {
+                    this->groupState().injection_control(allGroupNames[i], phase, cmode);
+                }
+            }
+        }
+    }
 
     if (iter_ctx_.isFirstGlobalIteration()) {
         group_state_helper.updatePreviousGroupProductionRates(fieldGroup);
