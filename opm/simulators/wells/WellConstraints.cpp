@@ -392,7 +392,12 @@ getProductionControlModeScale(const std::vector<Scalar>& pos_surface_rates,
         default:
             break;
     }
-    return std::abs(current_rate) > Scalar(0) ? std::abs(target_rate / current_rate) : Scalar(-1);
+    // If zero target, scale is always zero
+    if (target_rate == Scalar(0)) return Scalar(0);
+
+    return std::abs(current_rate) > Scalar(0) 
+        ? std::abs(target_rate / current_rate) 
+        : std::numeric_limits<Scalar>::max();
 }
 
 template<typename Scalar, typename IndexTraits>
@@ -439,17 +444,18 @@ estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>
     // bhp_at_thp_limit must be provided (from a converged IPR) for the pressure-constraint term.
     const auto& surf = ws.surface_rates;
     const auto tot_rates = std::accumulate(surf.begin(), surf.end(), Scalar(0));
-    if (std::abs(tot_rates) == Scalar(0)) {
-        deferred_logger.debug("estimateStrictestProductionControl: current surface rates for well " +
-                              ws.name + " are zero. Cannot determine most strict control.");
-        return {Well::ProducerCMode::CMODE_UNDEFINED, Scalar(1)};
-    }
+    
+    //if (std::abs(tot_rates) == Scalar(0)) {
+    //    deferred_logger.debug("estimateStrictestProductionControl: current surface rates for well " +
+    //                          ws.name + " are zero. Cannot determine most strict control.");
+    //    return {Well::ProducerCMode::CMODE_UNDEFINED, Scalar(1)};
+    //}
 
     Well::ProducerCMode most_strict_control = Well::ProducerCMode::CMODE_UNDEFINED;
     Scalar most_strict_scale = std::numeric_limits<Scalar>::max();
 
     // Pressure constraint: requires a converged IPR
-    if (bhp_at_thp_limit.has_value()) {
+    if (bhp_at_thp_limit.has_value() && std::abs(tot_rates) > Scalar(0)) {
         most_strict_control = (*bhp_at_thp_limit > controls.bhp_limit)
                               ? Well::ProducerCMode::THP
                               : Well::ProducerCMode::BHP;
@@ -504,12 +510,17 @@ estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTra
                                           const bool check_group_constraints,
                                           DeferredLogger& deferred_logger) const
 {
-    const auto& surf = ws.surface_rates;
+    auto surf = ws.surface_rates;
     const auto tot_rates = std::accumulate(surf.begin(), surf.end(), Scalar(0));
     if (std::abs(tot_rates) == Scalar(0)) {
-        deferred_logger.debug("estimateStrictestProductionRateControl: current surface rates for well " +
-                              ws.name + " are zero. Cannot determine most strict control.");
+        // we likely have a zero rate-constraint, use previous rates to determine the most strict control
+        surf = ws.prev_surface_rates;
+        const auto tot_prev_rates = std::accumulate(surf.begin(), surf.end(), Scalar(0));
+        if (std::abs(tot_prev_rates) == Scalar(0)) {
+            deferred_logger.debug("estimateStrictestProductionRateControl: current and previous surface rates for well " +
+                                ws.name + " are zero. Cannot determine most strict control.");
         return {Well::ProducerCMode::CMODE_UNDEFINED, Scalar(1)};
+        }
     }
 
     // Build positive-valued rate vectors (producers have negative surface_rates / reservoir_rates)
@@ -517,7 +528,8 @@ estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTra
     std::vector<Scalar> pos_surf(np), pos_resv(np);
     for (int p = 0; p < np; ++p) {
         pos_surf[p] = -surf[p];
-        pos_resv[p] = -ws.reservoir_rates[p];
+        // 
+        pos_resv[p] = -ws.reservoir_rates[p];  
     }
 
     auto [most_strict_control, most_strict_scale] =
@@ -562,7 +574,7 @@ estimateStrictestProductionRateConstraintFromRates(
     const auto tot_rate = std::accumulate(
         pos_surface_rates.begin(), pos_surface_rates.end(), Scalar(0));
     if (tot_rate <= Scalar(0)) {
-        deferred_logger.debug("estimateStrictestProductionRateConstraintFromRates: rates for well " +
+        deferred_logger.debug("estimateStrictestProductionRateConstraintFromRates: potentials for well " +
                               well_.name() + " are zero or negative.");
         return {Well::ProducerCMode::CMODE_UNDEFINED, Scalar(1)};
     }

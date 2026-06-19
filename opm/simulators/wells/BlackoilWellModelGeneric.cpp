@@ -1639,7 +1639,8 @@ updateWellPotentials(const int reportStepIdx,
                            (report_step_starts_ && events.hasEvent(well->name(), effective_events_mask));
         const bool needPotentialsForGuideRates = well->underPredictionMode() && (!onlyAfterEvent || event);
         const bool needPotentialsForOutput = !onlyAfterEvent && (needed_for_summary || write_restart_file);
-        const bool compute_potential = needPotentialsForOutput || needPotentialsForGuideRates;
+        const bool needPotentialsForBalancer = !onlyAfterEvent && param_.enable_group_tree_balancer_;
+        const bool compute_potential = needPotentialsForOutput || needPotentialsForGuideRates || needPotentialsForBalancer;
         if (compute_potential)
         {
             this->computePotentials(widx, well_state_copy, exc_msg, exc_type);

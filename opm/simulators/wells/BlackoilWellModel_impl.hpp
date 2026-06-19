@@ -1334,7 +1334,7 @@ namespace Opm {
                                        "updateWellControlsAndNetworkIteration() failed: ",
                                        this->terminal_output_, grid().comm());
 
-        if (param_.enable_group_tree_balancer_) {
+        if (param_.enable_group_tree_balancer_ && well_group_control_changed) {
             const auto& iterCtx = simulator_.problem().iterationContext();
             const int nupcol = this->schedule()[reportStepIdx].nupcol();
             if (iterCtx.withinNupcol(nupcol)) {

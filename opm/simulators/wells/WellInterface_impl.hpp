@@ -120,24 +120,30 @@ namespace Opm
         const auto controls = this->wellEcl().productionControls(summary_state);
 
         std::optional<Scalar> bhp_at_thp_limit;
-        if (controls.hasControl(Well::ProducerCMode::BHP) && controls.bhp_limit > Scalar(0)) {
-            bhp_at_thp_limit = controls.bhp_limit;
-        }
 
-        WellBhpThpCalculator<Scalar, IndexTraits> calc(*this);
-        if (calc.wellHasTHPConstraints(summary_state)) {
-            const auto stable_bhp = calc.estimateStableBhp(well_state,
-                                                           this->wellEcl(),
-                                                           ws.surface_rates,
-                                                           this->getRefDensity(),
-                                                           summary_state);
-
-            if (!stable_bhp.has_value()) {
-                return std::nullopt;
+        // Can't trust ipr in the zero-rate case (the well is likely under zero-rate constraint), 
+        // so ignore pressure-constraints in this case.
+        const auto tot_rates = std::accumulate(ws.surface_rates.begin(), ws.surface_rates.end(), Scalar(0));
+        if (std::abs(tot_rates) > Scalar(0)) {
+            if (controls.hasControl(Well::ProducerCMode::BHP)) {
+                bhp_at_thp_limit = controls.bhp_limit;
             }
 
-            if (!bhp_at_thp_limit.has_value() || *stable_bhp > *bhp_at_thp_limit) {
-                bhp_at_thp_limit = stable_bhp;
+            WellBhpThpCalculator<Scalar, IndexTraits> calc(*this);
+            if (calc.wellHasTHPConstraints(summary_state)) {
+                const auto stable_bhp = calc.estimateStableBhp(well_state,
+                                                            this->wellEcl(),
+                                                            ws.surface_rates,
+                                                            this->getRefDensity(),
+                                                            summary_state);
+
+                if (!stable_bhp.has_value()) {
+                    return std::nullopt;
+                }
+
+                if (!bhp_at_thp_limit.has_value() || *stable_bhp > *bhp_at_thp_limit) {
+                    bhp_at_thp_limit = stable_bhp;
+                }
             }
         }
 
@@ -155,6 +161,7 @@ namespace Opm
             return std::nullopt;
         }
 
+        /*
         const auto& pu = this->phaseUsage();
         auto phaseRate = [&ws, &pu](const int phase) -> Scalar {
             if (!pu.phaseIsActive(phase)) {
@@ -162,40 +169,40 @@ namespace Opm
             }
             return -ws.surface_rates[pu.canonicalToActivePhaseIdx(phase)];
         };
+        */
 
-        Scalar current_mode_rate = Scalar(0);
+        Scalar strictest_limit = Scalar(0);
         switch (strictest_mode) {
             case Well::ProducerCMode::ORAT:
-                current_mode_rate = phaseRate(IndexTraits::oilPhaseIdx);
+                strictest_limit = controls.oil_rate;
                 break;
             case Well::ProducerCMode::WRAT:
-                current_mode_rate = phaseRate(IndexTraits::waterPhaseIdx);
+                strictest_limit = controls.water_rate;
                 break;
             case Well::ProducerCMode::GRAT:
-                current_mode_rate = phaseRate(IndexTraits::gasPhaseIdx);
+                strictest_limit = controls.gas_rate;
                 break;
             case Well::ProducerCMode::LRAT:
-                current_mode_rate = phaseRate(IndexTraits::oilPhaseIdx)
-                                  + phaseRate(IndexTraits::waterPhaseIdx);
+                strictest_limit = controls.liquid_rate;
                 break;
             case Well::ProducerCMode::RESV:
-                current_mode_rate = std::accumulate(ws.reservoir_rates.begin(),
-                                                    ws.reservoir_rates.end(),
-                                                    Scalar(0),
-                                                    [](Scalar sum, Scalar r) { return sum + (-r); });
+                strictest_limit = controls.resv_rate;
                 break;
             case Well::ProducerCMode::BHP:
             case Well::ProducerCMode::THP:
-                current_mode_rate = std::accumulate(ws.surface_rates.begin(),
+            {
+                const auto current_mode_rate = std::accumulate(ws.surface_rates.begin(),
                                                     ws.surface_rates.end(),
                                                     Scalar(0),
                                                     [](Scalar sum, Scalar r) { return sum + (-r); });
+                strictest_limit = strictest_scale * current_mode_rate;
                 break;
+            }
             default:
                 return std::nullopt;
         }
 
-        const Scalar strictest_limit = strictest_scale * current_mode_rate;
+        // const Scalar strictest_limit = strictest_scale * current_mode_rate;
         return std::make_pair(strictest_mode, strictest_limit);
     }
 

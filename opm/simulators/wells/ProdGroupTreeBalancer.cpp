@@ -597,22 +597,22 @@ void populateGroupNode(ProdGroupTreeNode<Scalar>& node,
         const auto& action = controls.group_limit_action; 
         const bool actionAllIsRate = (action.allRates == Opm::Group::ExceedAction::RATE);
         // Populate individual limits from schedule controls
-        if (group.has_control(Group::ProductionCMode::ORAT) && controls.oil_target > Scalar(0)) {
+        if (group.has_control(Group::ProductionCMode::ORAT)) {
             if (actionAllIsRate || action.oil == Opm::Group::ExceedAction::RATE) {
                 node.Limits[Well::ProducerCMode::ORAT] = controls.oil_target;
             }
         }
-        if (group.has_control(Group::ProductionCMode::WRAT) && controls.water_target > Scalar(0)) {
+        if (group.has_control(Group::ProductionCMode::WRAT)) {
             if (actionAllIsRate || action.water == Opm::Group::ExceedAction::RATE) {
                 node.Limits[Well::ProducerCMode::WRAT] = controls.water_target;
             }
         }
-        if (group.has_control(Group::ProductionCMode::GRAT) && controls.gas_target > Scalar(0)) {
+        if (group.has_control(Group::ProductionCMode::GRAT)) {
             if (actionAllIsRate || action.gas == Opm::Group::ExceedAction::RATE) {
                 node.Limits[Well::ProducerCMode::GRAT] = controls.gas_target;
             }
         }
-        if (group.has_control(Group::ProductionCMode::LRAT) && controls.liquid_target > Scalar(0)) {
+        if (group.has_control(Group::ProductionCMode::LRAT)) {
             // Skip degenerate LRAT == ORAT case (no water production): same guard as
             // GroupStateHelper::checkGroupProductionConstraints.
             if ((actionAllIsRate || action.liquid == Opm::Group::ExceedAction::RATE)
@@ -672,15 +672,24 @@ Tree<Scalar> buildTree(const BlackoilWellModelGeneric<Scalar, IndexTraits>& well
 
     Tree<Scalar> tree;
 
-    // A well node is valid if it is a producer and has non-zero rates.
-    // Uses currentWellRates() (available on all ranks) rather than local ws.surface_rates.
+    // Build a name → interface map once so validWellNode is O(1) per call
+    // instead of O(container size).  Wells absent from the map are SHUT (not
+    // in the container) and are treated as invalid.
+    std::unordered_map<std::string,
+                       const WellInterfaceGeneric<Scalar, IndexTraits>*> wellIfaceMap;
+    for (const auto* w : wellModel.genericWells()) {
+        wellIfaceMap.emplace(w->name(), w);
+    }
+
+    // A well node is valid if it is a producer and not runtime-stopped.
+    // Queries wellIsStopped() on the interface (volatile Newton-step status,
+    // not the persistent ws.status) so wells stopped by operability checks or
+    // prepareWellsForBalancing*() are correctly excluded without side-effects.
     auto validWellNode = [&](const std::string& wname) -> bool {
-        if (!schedule.getWell(wname, reportStep).isProducer()) return false;
-        if (!wellState.hasWellRates(wname)) return false;
-        for (const auto& r : wellState.currentWellRates(wname)) {
-            if (std::abs(r) != Scalar(0)) return true;
-        }
-        return false;
+        const auto& well_ecl = schedule.getWell(wname, reportStep);
+        if (!well_ecl.isProducer()) return false;
+        const auto it = wellIfaceMap.find(wname);
+        return it != wellIfaceMap.end() && !it->second->wellIsStopped();
     };
 
     // Use a stack-based traversal starting from FIELD
@@ -691,7 +700,7 @@ Tree<Scalar> buildTree(const BlackoilWellModelGeneric<Scalar, IndexTraits>& well
 
         if (schedule.hasWell(name, reportStep)) {
             // Well node: visible to all ranks via currentWellRates().
-            if (wellState.hasWellRates(name) && validWellNode(name)) {
+            if (validWellNode(name)) {
                 auto& node = tree[name];
                 populateWellNode(node, name, schedule, wellState, groupState,
                                  guideRate, summaryState, reportStep,
@@ -1932,16 +1941,22 @@ bool runBalancingAlgorithm(const BlackoilWellModelGeneric<Scalar, IndexTraits>& 
         //OpmLog::info(fmt::format("runBalancingAlgorithm: processing topnode {}", nodeName));
         if (tree.count(nodeName) == 0) continue;
         auto& node = tree.at(nodeName);
+        if (node.isSatellite) continue; // Skip satellite groups
 
         // Determine mode and target
+        // A top node is either individual or NONE (in which case it has a preferredMode)
+        // A well top-node is always individual
         Well::ProducerCMode mode;
-        if (node.modeCategory == ProdNodeModeCategory::Individual && node.mode != Well::ProducerCMode::NONE) {
+        if (node.modeCategory == ProdNodeModeCategory::Individual || node.type == ProdNodeType::Well) {
             mode = node.mode;
         } else {
             // Convert preferredMode (Group::ProductionCMode) to Well::ProducerCMode
             mode = groupModeToWellMode(node.preferredMode);
         }
-
+        if (mode == Well::ProducerCMode::CMODE_UNDEFINED || mode == Well::ProducerCMode::NONE) {
+            OpmLog::warning(fmt::format("runBalancingAlgorithm: top node '{}' has undefined mode, defaulting to ORAT", nodeName));
+        }
+        //assert(node.Limits.count(mode) > 0);
         // Validate mode
         /*
         if (mode == Well::ProducerCMode::CMODE_UNDEFINED ||
@@ -1954,6 +1969,9 @@ bool runBalancingAlgorithm(const BlackoilWellModelGeneric<Scalar, IndexTraits>& 
         Scalar qm = std::numeric_limits<Scalar>::max();
         if (node.Limits.count(mode) > 0) {
             qm = node.Limits.at(mode);
+        } else {
+            OpmLog::warning(fmt::format("runBalancingAlgorithm: top node '{}' has no limit, using infinity",
+                                     nodeName));
         }
 
         // Balance this subtree
