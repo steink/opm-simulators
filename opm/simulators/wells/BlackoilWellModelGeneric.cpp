@@ -1432,6 +1432,10 @@ updateAndCommunicateGroupData(const int reportStepIdx,
                             efficiencyFactor,
                             resv_coeff,
                             cmode_orig);
+                        // Set flag directly to true if group_target->target_value <= 0 to avoid "zero_rate_target" issues
+                        if (group_target_fallback->target_value > 0.0 && group_target->target_value <= 1e-12) { 
+                            ws.use_group_target_fallback = true;
+                        }
                     }
                 }
             } else {

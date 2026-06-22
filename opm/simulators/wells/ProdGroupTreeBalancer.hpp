@@ -153,7 +153,8 @@ updateTransparentGroups(Tree<Scalar>& tree,
                         Scalar nextRatio,
                         Scalar qm,
                         Well::ProducerCMode mode,
-                        Scalar tol);
+                        Scalar tol,
+                        DeferredLogger& logger);
 
 /// Increment parent rate_sums from node up to origin.
 /// Corresponds to Matlab increment_parent_rate_sums().
@@ -195,7 +196,8 @@ void distributeFallbackRates(Tree<Scalar>& tree,
                              const std::vector<std::string>& c,
                              const GuideRate& guideRate,
                              Well::ProducerCMode mode,
-                             Scalar tol);
+                             Scalar tol,
+                             DeferredLogger& logger);
 
 /// Recursively balance the group tree rooted at nodeName with target mode and rate.
 /// This is the main balancing function that corresponds to Matlab balance_group_tree().
@@ -211,7 +213,8 @@ void balanceGroupTree(Tree<Scalar>& tree,
                       const GuideRate& guideRate,
                       Well::ProducerCMode targetMode,
                       Scalar targetRate,
-                      Scalar tol);
+                      Scalar tol,
+                      DeferredLogger& logger);
 
 /// Recursively cap individual rates at their limits, propagate sums upward,
 /// and categorize nodes.  Corresponds to Matlab cap_individual_and_sum().
@@ -257,7 +260,8 @@ void setTargets(Tree<Scalar>& tree, const std::string& topName);
 template<class Scalar, typename IndexTraits>
 bool runBalancingAlgorithm(const BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
                            Tree<Scalar>& tree,
-                           Scalar tol);
+                           Scalar tol,
+                           DeferredLogger& logger);
 
 // ---------------------------------------------------------------------------
 // Validation
@@ -291,9 +295,11 @@ bool checkTreeValidity(const Tree<Scalar>& tree,
 ///
 /// \param[in]    tree        The balanced production group tree
 /// \param[inout] wellModel   Well model (writes to its internal wellState and groupState)
+/// \param[inout] logger      Deferred logger (debug messages on production_cmode changes)
 template<class Scalar, typename IndexTraits>
 void applyTreeToState(const Tree<Scalar>& tree,
-                      BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel);
+                      BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
+                      DeferredLogger& logger);
 
 // ---------------------------------------------------------------------------
 // Orchestrator
