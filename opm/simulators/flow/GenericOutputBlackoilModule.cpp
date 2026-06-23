@@ -636,17 +636,18 @@ doAllocBuffers(const unsigned bufferSize,
         this->summaryConfig_.hasKeyword("FPR") ||
         this->summaryConfig_.hasKeyword("FPRP");
 
-    const auto needPoreVolume = needAvgPress    ||
-        this->summaryConfig_.hasKeyword("FHPV") ||
-        this->summaryConfig_.match("RHPV*");
+    const auto needPoreVolume = needAvgPress     ||
+        this->summaryConfig_.hasKeyword("FRPV")  ||
+        this->summaryConfig_.match("RRPV*") ||
+        this->summaryConfig_.hasKeyword("FHPV")  ||
+        this->summaryConfig_.match("RHPV*") ;
 
     if (needPoreVolume) {
         this->fipC_.add(Inplace::Phase::PoreVolume);
-        this->dynamicPoreVolume_.resize(bufferSize, 0.0);
+        this->fipC_.add(Inplace::Phase::DynamicPoreVolume);
         this->hydrocarbonPoreVolume_.resize(bufferSize, 0.0);
     }
     else {
-        this->dynamicPoreVolume_.clear();
         this->hydrocarbonPoreVolume_.clear();
     }
 
@@ -1038,9 +1039,6 @@ makeRegionSum(Inplace& inplace,
     update_inplace(Inplace::Phase::PressureHydroCarbonPV,
                    this->pressureTimesHydrocarbonVolume_);
 
-    update_inplace(Inplace::Phase::DynamicPoreVolume,
-                   this->dynamicPoreVolume_);
-
     for (const auto& phase : Inplace::phases()) {
         update_inplace(phase, this->fipC_.get(phase));
     }
@@ -1164,6 +1162,51 @@ setupBlockData(std::function<bool(int)> isCartIdxOnThisRank)
                                      std::forward_as_tuple(node.keyword(),
                                                            node.number()),
                                      std::forward_as_tuple(0.0));
+        }
+    }
+}
+
+template<class FluidSystem>
+void GenericOutputBlackoilModule<FluidSystem>::
+setupLgrBlockData(const std::map<std::string, int>& lgrNameToLevel,
+                  const std::function<bool(int, int)>& isLgrCellOnThisRank)
+{
+    // Allocate one lgrBlockData_ slot per LB* summary node.  The level
+    // component of the key is the same value data::Connection carries as
+    // lgr_grid for LC* connection vectors -- lgrNameToLevel maps the summary
+    // node's LGR name to that level id (0 = GLOBAL, 1..N = LGRs).  It is the
+    // CpGrid name->level map (getLgrNameToLevel), populated on every rank --
+    // the parallel-safe replacement for EclipseGrid::get_lgr_cell_index, which
+    // is root-only on a ParallelEclipseState.  The level-local linearised
+    // Cartesian cell index is recovered from node.number() - 1 (SummaryConfig::
+    // keywordLB stored NUMS = index + 1 via GridDims::getGlobalIndex at parse).
+    //
+    // Allocate a slot only for an LGR cell this rank owns, so lgrBlockData_ is
+    // per-rank disjoint before setupLgrExecMap captures pointers into it -- the
+    // direct LGR analogue of setupBlockData's isCartIdxOnThisRank filter.  The
+    // caller builds isLgrCellOnThisRank from the same InteriorEntity leaf walk
+    // and level-local Cartesian index (levelCartesianIndexMapper) the fill walk
+    // uses, which coincides with the node.number()-1 'local' below; the global
+    // isCartIdxOnThisRank does not apply to LGR cells.
+    for (const auto& node : summaryConfig_) {
+        if (node.category() != SummaryConfigNode::Category::Block) {
+            continue;
+        }
+        if (! node.lgr_name().has_value()) {
+            continue;
+        }
+
+        const auto level_it = lgrNameToLevel.find(*node.lgr_name());
+        if (level_it == lgrNameToLevel.end()) {
+            // LGR not present on this grid (e.g. a non-CpGrid build passes an
+            // empty map) -- nothing to allocate for it.
+            continue;
+        }
+        const int level = level_it->second;
+        const int local = node.number() - 1;
+
+        if (isLgrCellOnThisRank(level, local)) {
+            this->lgrBlockData_[std::make_tuple(node.keyword(), level, local)] = 0.0;
         }
     }
 }
