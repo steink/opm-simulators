@@ -623,24 +623,13 @@ Tree<Scalar> buildTree(const BlackoilWellModelGeneric<Scalar, IndexTraits>& well
 
     Tree<Scalar> tree;
 
-    // Build a name → interface map once so validWellNode is O(1) per call
-    // instead of O(container size).  Wells absent from the map are SHUT (not
-    // in the container) and are treated as invalid.
-    std::unordered_map<std::string,
-                       const WellInterfaceGeneric<Scalar, IndexTraits>*> wellIfaceMap;
-    for (const auto* w : wellModel.genericWells()) {
-        wellIfaceMap.emplace(w->name(), w);
-    }
-
-    // A well node is valid if it is a producer and not runtime-stopped.
-    // Queries wellIsStopped() on the interface (volatile Newton-step status,
-    // not the persistent ws.status) so wells stopped by operability checks or
-    // prepareWellsForBalancing*() are correctly excluded without side-effects.
+    // A well is valid for the tree iff it appears in the limits map — which is
+    // globally consistent on all ranks after gatherWellLimits_().  This covers:
+    //   • non-local wells: limits is from comm.sum() so every rank has the same data
+    //   • stopped wells: prepareWellsForBalancing_*() never adds them to limits
+    //   • injectors: filtered out before building localLimits
     auto validWellNode = [&](const std::string& wname) -> bool {
-        const auto& well_ecl = schedule.getWell(wname, reportStep);
-        if (!well_ecl.isProducer()) return false;
-        const auto it = wellIfaceMap.find(wname);
-        return it != wellIfaceMap.end() && !it->second->wellIsStopped();
+        return limits.count(wname) > 0;
     };
 
     // Use a stack-based traversal starting from FIELD
@@ -714,15 +703,20 @@ Tree<Scalar> buildTree(const BlackoilWellModelGeneric<Scalar, IndexTraits>& well
         if (node.isSatellite) return; 
 
         node.hasLimitedAncestor = parentSeesLimits;
-        if (!node.availableForGroupControl) {
+        if (!node.availableForGroupControl || !parentSeesLimits) {
             // Not available for group control (no inheritance from above), should
             // have non-defaulted preferredMode
             const auto& preferredMode = node.preferredMode;
             if(preferredMode == Group::ProductionCMode::FLD ||
                preferredMode == Group::ProductionCMode::NONE) {
-                //OpmLog::warning(fmt::format("Group {} is not available for group control but has preferredMode {}. "
-                //                            "This may indicate a problem in the schedule or an unsupported case for the balancer.",
-                //                            nodeName, preferredMode == Group::ProductionCMode::FLD ? "FLD" : "NONE"));
+                // We can have a well set to group-control, but there exists no limit on group
+                // revert to individual with mode from limit
+                if (!node.Limits.empty()) {
+                    // Set mode to the strictest limit mode
+                    node.mode = node.Limits.begin()->first;
+                } else {
+                    // could report inconstency
+                }
             }
             node.hasLimitedAncestor = false;
         } else {
@@ -1156,6 +1150,7 @@ computeRatiosForSorting(const Tree<Scalar>& tree, const std::vector<std::string>
             const Scalar effectiveLimit = child.efficiencyFactor * limit;
 
             if (mode == Well::ProducerCMode::BHP) {
+                // todo: no need for special case here; can use rateForMode() and linearTermForMode() for BHP too.
                 current = child.rateSums[kOil] + child.rateSums[kWater] + child.rateSums[kGas];
                 slope = child.guideRateSums[kOil] + child.guideRateSums[kWater] + child.guideRateSums[kGas];
             } else {
@@ -1373,15 +1368,18 @@ void balanceGroupTree(Tree<Scalar>& tree,
     if (node.isSatellite) return;
 
     // Check recursion depth to prevent stack overflow
+    // todo: verify that this can be removed
     if (node.balancingCount > 100) {
         logger.warning("ProdGroupTreeBalancer",
             fmt::format("balanceGroupTree: {} exceeded recursion limit", nodeName));
         node.isBalanced = false;
         return;
     }
-    // These limits are not expected to be hit 
-    const int maxResortingCount = 10;
-    const int maxTopSwitchCount = 2;
+    // These limits are not expected to be hit. In theory, the switch limit could
+    // be reached, e.g., orat -> wrat -> grat -> orat, but very unlikely (requires
+    // phase guiderate ratios sufficiently far from actual phase rate ratios.
+    const int maxResortingCount = 5;
+    const int maxTopSwitchCount = 3;
 
     Well::ProducerCMode mode = targetMode;
     Scalar qm = targetRate;
@@ -1429,8 +1427,10 @@ void balanceGroupTree(Tree<Scalar>& tree,
         bool balanced = false;
         int resortingCount = 0;
         int topSwitchCount = 0;
+        int iterationCount = 0;
 
         while (!balanced && resortingCount <= maxResortingCount && topSwitchCount <= maxTopSwitchCount) {
+            ++iterationCount;
             auto [c, c_fixed, c_trans] = getLocalTreeDescendants(tree, nodeName);
 
             updateGuideRatesForMode(tree, c, mode, guideRate);
@@ -1460,6 +1460,7 @@ void balanceGroupTree(Tree<Scalar>& tree,
                 auto& ck = tree.at(ckName);
 
                 if (ck.useFallback) {
+                    // skip and flag for later fallback distribution
                     anyChildrenNeedFallback = true;
                     continue;
                 }
@@ -1504,6 +1505,9 @@ void balanceGroupTree(Tree<Scalar>& tree,
                     const auto& ckBalanced = tree.at(ckName);
                     anyGroupChildren = anyGroupChildren || (ckBalanced.modeCategory == ProdNodeModeCategory::Group);
                     if (ckBalanced.modeCategory != ProdNodeModeCategory::Group && anyGroupChildren) {
+                        // todo: in special cases with zero rates, the categorization may be ambiguous,
+                        // so here we might trigger a re-sort even if it's not neccesasary. In such cases
+                        // we will hit the maxResortingCount limit before exiting the loop.
                         needsResorting = true;
                     }
 
@@ -1586,6 +1590,7 @@ void balanceGroupTree(Tree<Scalar>& tree,
                 node.rates[phase] = -node.rateSums[phase];
             }
         }
+        node.lastIterationCount = iterationCount;
     }
 
     // Categorize the node based on whether it is at a limit or consuming its guide-rate share.
@@ -1874,10 +1879,10 @@ bool runBalancingAlgorithm(const BlackoilWellModelGeneric<Scalar, IndexTraits>& 
         */
 
         // Get limit for mode
-        Scalar qm;
+        Scalar qm = 0.0;
         if (node.Limits.count(mode) > 0) {
             qm = node.Limits.at(mode);
-        } else {
+        } else if (wellModel.comm().rank() == 0) {
             logger.warning("ProdGroupTreeBalancer",
                 fmt::format("runBalancingAlgorithm: top node '{}' has no limit for given mode, returning", nodeName));
             return false;
@@ -1890,9 +1895,13 @@ bool runBalancingAlgorithm(const BlackoilWellModelGeneric<Scalar, IndexTraits>& 
         setTargets(tree, nodeName);
 
         // Report completion of this top node's balancing
-        if(tree.at(nodeName).type == ProdNodeType::Group) {
+        if (tree.at(nodeName).type == ProdNodeType::Group && wellModel.comm().rank() == 0) {
+            const auto& n = tree.at(nodeName);
             logger.debug("ProdGroupTreeBalancer",
-                fmt::format("Completed balancing for top node '{}'", nodeName));
+                fmt::format("Balancer: Completed for top node '{}': balanced={}, iterations={}",
+                            nodeName,
+                            n.isBalanced ? "yes" : "no",
+                            n.lastIterationCount));
         }
     }
 
@@ -2047,7 +2056,7 @@ void applyTreeToState(const Tree<Scalar>& tree,
                     ? groupState.production_control(name)
                     : Group::ProductionCMode::NONE;
             Group::ProductionCMode newGroupCMode = Group::ProductionCMode::NONE;
-            if (node.modeCategory == ProdNodeModeCategory::Group) {
+            if (node.modeCategory == ProdNodeModeCategory::Group && node.hasLimitedAncestor) {
                 newGroupCMode = Group::ProductionCMode::FLD;
             } else if (node.modeCategory == ProdNodeModeCategory::Individual) {
                 switch (node.mode) {
@@ -2060,7 +2069,7 @@ void applyTreeToState(const Tree<Scalar>& tree,
                 }
             }
             groupState.production_control(name, newGroupCMode);
-            if (newGroupCMode != oldGroupCMode) {
+            if (newGroupCMode != oldGroupCMode && wellModel.comm().rank() == 0) {
                 logger.debug("ProdGroupTreeBalancer",
                     fmt::format("Balancer: Group '{}': production_control changed from {} to {}",
                                 name,
@@ -2113,10 +2122,12 @@ bool runGroupTreeBalancer(BlackoilWellModelGeneric<Scalar, IndexTraits>& wellMod
     //    fmt::format("Group tree balancer completed in {}ms. "
     //                "Convergence: {}, Validity: {}",
     //                elapsed, converged ? "OK" : "FAILED", valid ? "OK" : "FAILED"));
-    logger.debug("ProdGroupTreeBalancer",
-        fmt::format("Group tree balancer completed. "
-                    "Convergence: {}, Validity: {}",
-                    converged ? "OK" : "FAILED", valid ? "OK" : "FAILED"));
+    if (wellModel.comm().rank() == 0) {
+        logger.debug("ProdGroupTreeBalancer",
+            fmt::format("Balancer: Group tree balancer completed. "
+                        "Convergence: {}, Validity: {}",
+                        converged ? "OK" : "FAILED", valid ? "OK" : "FAILED"));
+    }
 
     return valid;
 }

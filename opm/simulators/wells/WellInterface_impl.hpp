@@ -288,7 +288,9 @@ namespace Opm
 
         // No rate limit is binding: the pressure constraint (BHP/THP, already
         // reflected in well_potentials) is the effective limit.
-        const auto mode = controls.hasControl(Well::ProducerCMode::THP)
+        // todo: here we just guess that thp is the most restrictive as we have 
+        // no record of which one was used to compute the potentials.
+        const auto mode = this->wellHasTHPConstraints(summary_state)
                           ? Well::ProducerCMode::THP : Well::ProducerCMode::BHP;
         return std::make_pair(mode, total_potential);
     }

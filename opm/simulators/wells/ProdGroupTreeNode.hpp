@@ -177,8 +177,11 @@ struct ProdGroupTreeNode {
     /// Whether this subtree is balanced
     bool isBalanced{false};
 
-    /// Iteration counter for this node
+    /// Iteration counter for this node (cumulative across all calls to balanceGroupTree)
     int balancingCount{0};
+
+    /// Number of while-loop iterations in the most recent call to balanceGroupTree on this node
+    int lastIterationCount{0};
 
 
 
