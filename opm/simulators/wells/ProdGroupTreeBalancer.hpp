@@ -72,7 +72,6 @@ Tree<Scalar> buildTree(const BlackoilWellModelGeneric<Scalar, IndexTraits>& well
 
 /// Compute a post-order (subtree top-nodes first, FIELD last) ordering of
 /// "subtree roots" — the top-level nodes whose subtrees still need balancing.
-/// This corresponds to Matlab get_sub_tree_ordering().
 ///
 /// \param[in]  tree      The production group tree
 /// \param[in]  rootName  Starting node (typically "FIELD")
@@ -82,7 +81,6 @@ std::vector<std::string> getSubTreeOrdering(const Tree<Scalar>& tree,
                                             const std::string& rootName);
 
 /// Get local tree descendants categorized by availability for group control.
-/// Corresponds to Matlab getLocalTreeDescendants().
 ///
 /// \param[in]  tree      The production group tree
 /// \param[in]  nodeName  Root node
@@ -95,7 +93,6 @@ std::tuple<std::vector<std::string>, std::vector<std::string>, std::vector<std::
 getLocalTreeDescendants(const Tree<Scalar>& tree, const std::string& nodeName);
 
 /// Reset rate_sums and guide_rate_sums for nodes from c up to origin.
-/// Corresponds to Matlab reset_rates_and_guide_rate_sums().
 ///
 /// \param[in,out]  tree    The production group tree
 /// \param[in]      c       Nodes with guide rates
@@ -112,7 +109,6 @@ void resetRatesAndGuideRateSums(Tree<Scalar>& tree,
                                 Well::ProducerCMode mode);
 
 /// Compute limit-to-guide ratios for sorting children.
-/// Corresponds to Matlab get_ratios_for_sorting().
 ///
 /// \param[in]  tree  The production group tree
 /// \param[in]  c     List of child node names
@@ -122,7 +118,6 @@ std::vector<Scalar>
 computeRatiosForSorting(const Tree<Scalar>& tree, const std::vector<std::string>& c);
 
 /// Check if there is a free path from node to node_control (all transparent).
-/// Corresponds to Matlab hasFreePath().
 ///
 /// \param[in]  tree          The production group tree
 /// \param[in]  nodeName      Starting node
@@ -134,7 +129,6 @@ bool hasFreePath(const Tree<Scalar>& tree,
                  const std::string& nodeControl);
 
 /// Update transparent groups that reach their limits before the next child.
-/// Corresponds to Matlab update_transparent_groups().
 ///
 /// \param[in,out]  tree        The production group tree
 /// \param[in]      nodeName    Origin node
@@ -157,7 +151,6 @@ updateTransparentGroups(Tree<Scalar>& tree,
                         DeferredLogger& logger);
 
 /// Increment parent rate_sums from node up to origin.
-/// Corresponds to Matlab increment_parent_rate_sums().
 ///
 /// \param[in,out]  tree      The production group tree
 /// \param[in]      nodeName  Starting node
@@ -170,7 +163,6 @@ void incrementParentRateSums(Tree<Scalar>& tree,
                              const std::optional<std::array<Scalar, 3>>& rates = std::nullopt);
 
 /// Decrement parent guide_rate_sums from node up to origin.
-/// Corresponds to Matlab decrement_parent_guide_rate_sums().
 ///
 /// \param[in,out]  tree            The production group tree
 /// \param[in]      nodeName        Starting node
@@ -183,7 +175,6 @@ void decrementParentGuideRateSums(Tree<Scalar>& tree,
                                    const std::array<Scalar, 3>& guideRateSums);
 
 /// Distribute rates to fallback children (tiny fractions in non-preferred mode).
-/// Corresponds to Matlab distribute_fallback_rates().
 ///
 /// \param[in,out]  tree      The production group tree
 /// \param[in]      nodeName  Node distributing rates
@@ -200,7 +191,6 @@ void distributeFallbackRates(Tree<Scalar>& tree,
                              DeferredLogger& logger);
 
 /// Recursively balance the group tree rooted at nodeName with target mode and rate.
-/// This is the main balancing function that corresponds to Matlab balance_group_tree().
 ///
 /// \param[in,out]  tree        The production group tree
 /// \param[in]      nodeName    Root of the subtree to balance
@@ -216,33 +206,7 @@ void balanceGroupTree(Tree<Scalar>& tree,
                       Scalar tol,
                       DeferredLogger& logger);
 
-/// Recursively cap individual rates at their limits, propagate sums upward,
-/// and categorize nodes.  Corresponds to Matlab cap_individual_and_sum().
-///
-/// \param[in,out]  tree      The production group tree
-/// \param[in]      nodeName  Root of subtree
-/// \param[in]      tol       Tolerance for limit comparisons
-/// \return         true if any category switched
-template<class Scalar>
-bool capIndividualAndSum(Tree<Scalar>& tree, const std::string& nodeName, Scalar tol);
-
-/// Update node category based on rates and limits.
-/// Corresponds to Matlab updateCategory().
-///
-/// \param[in,out]  tree                           The production group tree
-/// \param[in]      nodeName                       Node to update
-/// \param[in]      anyGroupControlledChildren     Whether node has any GRUP children
-/// \param[in]      targetMode                     Target control mode (or CMODE_UNDEFINED)
-/// \param[in]      tol                           Tolerance
-template<class Scalar>
-void updateCategory(Tree<Scalar>& tree,
-                   const std::string& nodeName,
-                   bool anyGroupControlledChildren,
-                   Well::ProducerCMode targetMode,
-                   Scalar tol);
-
 /// Assign final group targets recursively from topName downward.
-/// Corresponds to Matlab set_targets().
 ///
 /// \param[in,out]  tree      The production group tree
 /// \param[in]      topName   Root of the subtree
@@ -251,7 +215,6 @@ void setTargets(Tree<Scalar>& tree, const std::string& topName);
 
 /// Outer balancing loop for the entire tree.  Iterates over subtrees in
 /// getSubTreeOrdering() order, balancing each one.
-/// Corresponds to Matlab sortalgo2().
 ///
 /// \param[in]      wellModel Well model (provides guide-rate data)
 /// \param[in,out]  tree      The production group tree
