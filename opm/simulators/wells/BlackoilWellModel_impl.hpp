@@ -512,10 +512,9 @@ namespace Opm {
                 this->summaryState(),
                 reportStepIdx,
                 param_.group_tree_balancer_tolerance_,
-                param_.group_tree_balancer_max_iterations_,
                 balancerLimits,
                 local_deferredLogger);
-            this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ false);
+            this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
         }
 
         try {
@@ -1345,10 +1344,9 @@ namespace Opm {
                     this->summaryState(),
                     reportStepIdx,
                     param_.group_tree_balancer_tolerance_,
-                    param_.group_tree_balancer_max_iterations_,
                     balancerLimits,
                     local_deferredLogger);
-                this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ false);
+                this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
             }
         }
 
@@ -2298,8 +2296,7 @@ namespace Opm {
                     this->wellState(), this->summaryState(), deferred_logger);
 
             if (!result.has_value()) {
-                // Well can't operate at the start of this step: stop it.
-                well->stopWell();
+                // Well can't operate at the start of this step: don't include.
                 for (int p = 0; p < this->numPhases(); ++p)
                     ws.surface_rates[p] = Scalar(0);
                 continue;
@@ -2328,9 +2325,13 @@ namespace Opm {
         for (auto& well : well_container_) {
             const auto widx = well->indexOfWell();
             auto& ws = this->wellState().well(widx);
-            if (!well->wellEcl().isProducer() || ws.status != WellStatus::OPEN)
+            if (!well->wellEcl().isProducer() || ws.status != WellStatus::OPEN || well->wellIsStopped())
                 continue;
-
+            // If well has zero rates, but still open, we have a problematic well. One could
+            // include it using potentials as a proxy, but for now, we leave it out of the balancing.
+            const auto sumRates = std::accumulate(ws.surface_rates.begin(), ws.surface_rates.end(), Scalar(0));
+            if (sumRates == Scalar(0)) continue;
+            
             // After a local Newton solve, production_cmode reflects the tightest
             // binding constraint the solver converged to.  For individually-controlled
             // rate/pressure modes we can skip the IPR computation:

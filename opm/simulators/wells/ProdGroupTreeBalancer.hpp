@@ -110,12 +110,14 @@ void resetRatesAndGuideRateSums(Tree<Scalar>& tree,
 
 /// Compute limit-to-guide ratios for sorting children.
 ///
-/// \param[in]  tree  The production group tree
-/// \param[in]  c     List of child node names
+/// \param[in]  tree    The production group tree
+/// \param[in]  c       List of child node names
+/// \param[in]  origin  The balancing-origin node name
 /// \return     Ratios for each child
 template<class Scalar>
 std::vector<Scalar>
-computeRatiosForSorting(const Tree<Scalar>& tree, const std::vector<std::string>& c);
+computeRatiosForSorting(const Tree<Scalar>& tree, const std::vector<std::string>& c,
+                        const std::string& origin);
 
 /// Check if there is a free path from node to node_control (all transparent).
 ///
@@ -248,6 +250,22 @@ bool checkTreeValidity(const Tree<Scalar>& tree,
                        DeferredLogger& logger);
 
 // ---------------------------------------------------------------------------
+// Debug output
+// ---------------------------------------------------------------------------
+
+/// Write a human-readable snapshot of the tree to the DBG log.
+/// For each group: two lines — (1) name, type, and mode/control info,
+/// (2) direct children names with mode-category letters
+/// (I=Individual, G=Group, T=Transparent, N=None).
+/// For each well: only line 1.
+/// Intended for debugging; can be disabled/commented out in general use.
+///
+/// \param[in]  tree    The production group tree
+/// \param[in]  logger  Deferred logger (output goes to DBG file)
+template<class Scalar>
+void logTree(const Tree<Scalar>& tree, DeferredLogger& logger);
+
+// ---------------------------------------------------------------------------
 // State write-back
 // ---------------------------------------------------------------------------
 
@@ -275,7 +293,6 @@ void applyTreeToState(const Tree<Scalar>& tree,
 /// \param[in]    summaryState  Summary state
 /// \param[in]    reportStep    Current report step index
 /// \param[in]    tol           Convergence tolerance (default: 1e-4)
-/// \param[in]    maxIter       Maximum iterations per subtree (default: 100)
 /// \param[in]    limits        Globally gathered well limits (from prepareWellsForBalancing_*)
 /// \param[in]    logger        Deferred logger
 /// \return       true if the result passed checkTreeValidity
@@ -284,7 +301,6 @@ bool runGroupTreeBalancer(BlackoilWellModelGeneric<Scalar, IndexTraits>& wellMod
                           const SummaryState& summaryState,
                           int reportStep,
                           Scalar tol,
-                          [[maybe_unused]] int maxIter,
                           const std::unordered_map<std::string, std::pair<int, Scalar>>& limits,
                           DeferredLogger& logger);
 

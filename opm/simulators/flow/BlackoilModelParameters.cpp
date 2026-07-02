@@ -126,7 +126,6 @@ BlackoilModelParameters<Scalar>::BlackoilModelParameters()
     group_control_fraction_tolerance_ = Parameters::Get<Parameters::GroupControlFractionTolerance<Scalar>>();
     enable_group_tree_balancer_ = Parameters::Get<Parameters::EnableGroupTreeBalancer>();
     group_tree_balancer_tolerance_ = Parameters::Get<Parameters::GroupTreeBalancerTolerance<Scalar>>();
-    group_tree_balancer_max_iterations_ = Parameters::Get<Parameters::GroupTreeBalancerMaxIterations>();
 }
 
 template<class Scalar>
@@ -332,8 +331,6 @@ void BlackoilModelParameters<Scalar>::registerParameters()
          "well/group control update loop)");
     Parameters::Register<Parameters::GroupTreeBalancerTolerance<Scalar>>
         ("Relative convergence tolerance for the production group-tree balancer");
-    Parameters::Register<Parameters::GroupTreeBalancerMaxIterations>
-        ("Maximum number of iterations per subtree in the production group-tree balancer");
 
     // if openMP is available, use two threads per mpi rank by default
 #if _OPENMP

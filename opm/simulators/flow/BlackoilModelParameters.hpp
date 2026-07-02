@@ -108,8 +108,7 @@ struct MatrixAddWellContributions { static constexpr bool value = false; };
 
 struct EnableGroupTreeBalancer { static constexpr bool value = false; };
 template<class Scalar>
-struct GroupTreeBalancerTolerance { static constexpr Scalar value = 1e-4; };
-struct GroupTreeBalancerMaxIterations { static constexpr int value = 100; };
+struct GroupTreeBalancerTolerance { static constexpr Scalar value = 1e-5; };
 
 struct UseMultisegmentWell { static constexpr bool value = true; };
 
@@ -424,8 +423,6 @@ public:
     /// Relative tolerance for the group-tree balancer convergence check
     Scalar group_tree_balancer_tolerance_;
 
-    /// Maximum iterations per subtree for the group-tree balancer
-    int group_tree_balancer_max_iterations_;
 
     /// Construct from user parameters or defaults.
     BlackoilModelParameters();
