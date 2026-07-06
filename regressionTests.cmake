@@ -21,20 +21,14 @@ add_test_compareECLFiles(
     spe1
 )
 
-add_test_compareECLFiles(
-  CASENAME
-    1dcompositional
-  FILENAME
-    1D_COMP
-  SIMULATOR
-    flowexp_comp
-  ABS_TOL
-    ${abs_tol}
-  REL_TOL
-    ${rel_tol}
-  DIR
-    compositional
-)
+add_test_compareECLFiles(CASENAME 1dcompositional
+                         FILENAME 1D_COMP
+                         SIMULATOR flowexp_comp
+                         DEV_SIMULATOR flowexp_comp3_2p
+                         REFERENCE_SIMULATOR flowexp_comp
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR compositional)
 
 add_test_compareECLFiles(
   CASENAME
@@ -128,6 +122,7 @@ add_test_compareECLFiles(
 set(_spe1_tests_energy
   SPE1CASE2_THERMAL
   SPE1CASE2_THERMAL_WATVISC
+  SPE1CASE2_MSW_THERMAL
 )
 
 add_multiple_tests(
