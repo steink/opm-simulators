@@ -640,9 +640,12 @@ std::vector<std::string> getSubTreeOrdering(const Tree<Scalar>& tree,
     std::vector<std::string> stack;
     stack.push_back(rootName);
 
+    // Safety limit against malformed trees (e.g. cycles); large enough for any
+    // realistic FIELD hierarchy.
+    constexpr int kMaxIterations = 10000;
     int iterCount = 0;
     while (!stack.empty()) {
-        if (++iterCount > 10000) {
+        if (++iterCount > kMaxIterations) {
             break;
         }
         const std::string name = stack.back();
@@ -704,7 +707,9 @@ bool hasFreePath(const Tree<Scalar>& tree,
     if (node.parent.empty() || tree.count(node.parent) == 0) return false;
 
     const auto& parent = tree.at(node.parent);
-    // TODO: is the parent.visited-logic needed?
+    // !parent.visited: once a transparent group has been balanced by updateTransparentGroups
+    // (which sets visited=true via categorizeBalancedNode), paths through it are no longer
+    // free — preventing subsequent c-children from routing through an already-committed node.
     const bool isFreeStep = (parent.modeCategory == ProdNodeModeCategory::Transparent) && !parent.visited;
 
     return isFreeStep && hasFreePath(tree, node.parent, originName);
@@ -1093,10 +1098,10 @@ updateTransparentGroups(Tree<Scalar>& tree,
         // incrementParentRateSums); multiply by accEff to convert to origin frame
         // before adding to the guide-rate-proportional budget share.
         const Scalar accEff = accumulatedEfficiency(tree, ckName, nodeName);
-        const Scalar qkParent = gsum > Scalar(0) ? (gk / gsum) * qmRemain : Scalar(0) 
-                + accEff * projectOnMode(rateSumsOrig, mode, ck.resvCoeff);
-        //const Scalar qkParent = (gk / (gsum + Scalar(1e-20))) * qmRemain
-        //        + accEff * projectOnMode(rateSumsOrig, mode, ck.resvCoeff);
+        // qkParent = guide-rate-proportional share of remaining budget
+        //           + existing allocation already accumulated in rateSumsOrig.
+        const Scalar qkParent = (gsum > Scalar(0) ? (gk / gsum) * qmRemain : Scalar(0))
+                              + accEff * projectOnMode(rateSumsOrig, mode, ck.resvCoeff);
         const Scalar qk = qkParent / accEff;
 
         // Recursive balance
@@ -1138,11 +1143,12 @@ void distributeFallbackRates(Tree<Scalar>& tree,
     const int modeIdx = canonicalRateIndexForMode(mode);
     const Well::ProducerCMode modePreferredAsWell = groupModeToWellMode(modePreferred);
 
-    // Collect fallback children and compute ratio from group-controlled children
+    // Collect fallback children and compute the preferred-mode rate/guide ratio
+    // from already-balanced GRUP children.
     std::vector<std::string> cFallback;
     std::vector<Scalar> cFallbackGuideRates;
-    Scalar rateSums = Scalar(0);
-    Scalar guiderateSums = Scalar(0);
+    Scalar grupRateSum = Scalar(0);
+    Scalar grupGuideRateSum = Scalar(0);
 
     for (const auto& childName : c) {
         if (tree.count(childName) == 0) continue;
@@ -1153,15 +1159,15 @@ void distributeFallbackRates(Tree<Scalar>& tree,
             cFallback.push_back(childName);
             cFallbackGuideRates.push_back(preferredGuideRate);
         } else if (child.modeCategory == ProdNodeModeCategory::Group) {
-            rateSums -= projectOnMode(child.rates, modePreferredAsWell, child.resvCoeff);
-            guiderateSums += preferredGuideRate;
+            grupRateSum -= projectOnMode(child.rates, modePreferredAsWell, child.resvCoeff);
+            grupGuideRateSum += preferredGuideRate;
         }
     }
 
     if (cFallback.empty()) return;
 
-    const bool anyGroupWells = (rateSums > Scalar(0));
-    const Scalar ratio = (guiderateSums > Scalar(0)) ? (rateSums / guiderateSums) : Scalar(1);
+    const bool anyGroupWells = (grupRateSum > Scalar(0));
+    const Scalar ratio = (grupGuideRateSum > Scalar(0)) ? (grupRateSum / grupGuideRateSum) : Scalar(1);
 
     for (size_t i = 0; i < cFallback.size(); ++i) {
         const auto& ckName = cFallback[i];
@@ -1330,15 +1336,12 @@ runSingleDistributionPass(Tree<Scalar>& tree,
 
             if (!c_trans_update.empty()) {
                 bool anyTransparent = false;
-                bool anyIndividual = false;
                 for (const auto& ctkName : c_trans_update) {
                     if (tree.count(ctkName) > 0 && hasFreePath(tree, ctkName, nodeName)) {
                         const auto& ctk = tree.at(ctkName);
                         anyTransparent = anyTransparent || (ctk.modeCategory == ProdNodeModeCategory::Transparent);
-                        anyIndividual = anyIndividual || (ctk.modeCategory == ProdNodeModeCategory::Individual);
                     }
                 }
-                result.needsResorting = result.anyGroupChildren && anyIndividual;
                 result.anyGroupChildren = result.anyGroupChildren || anyTransparent;
 
                 if (!hasFreePath(tree, ckName, nodeName)) continue;
@@ -1353,7 +1356,6 @@ runSingleDistributionPass(Tree<Scalar>& tree,
         // to convert to ck's native frame before recursing.
         const Scalar accEff = accumulatedEfficiency(tree, ckName, nodeName);
         const Scalar qkParent = gsum > Scalar(0) ? (gk / gsum) * qmRemain : Scalar(0);
-        //const Scalar qkParent = (gk / (gsum + Scalar(1e-20))) * qmRemain;
         const Scalar qk = qkParent / accEff;
 
         const auto guideRateSumsOrig = ck.guideRateSums;
@@ -1474,7 +1476,7 @@ checkAndSwitchMode(ProdGroupTreeNode<Scalar>& node,
 ///   Individual  — at one of its own rate limits (within tol);
 ///   Group       — consuming its guide-rate share of the parent target;
 ///   None        — a group with no group-controlled children;
-///   Transparent — no guide rate (edge case only).
+///   Transparent — no guide rate/no active individual limit.
 /// If none of the above applies the node has group-controlled children yet is
 /// not at a limit and not on target; a warning is logged and the node (and its
 /// Group children) are reset to Individual / CMODE_UNDEFINED.
@@ -1517,14 +1519,15 @@ void categorizeBalancedNode(Tree<Scalar>& tree,
     } else if (node.type == ProdNodeType::Group && !anyGroupChildren) {
         node.modeCategory = ProdNodeModeCategory::None;
     } else if (!node.hasGuideRate) {
-        // Not intended usage, but include for completeness
+        // Not intended usage (calling balanceGroupTree for node without a guide rate should
+        // imply active individual limit), but include for completeness
         node.modeCategory = ProdNodeModeCategory::Transparent;
     } else {
         // Problematic case: node has group controlled children, but is not at a limit and is not 
         // consuming its guide-rate share. If this occurs set modeCategory to None and reset any 
         // group-controlled children to individual to avoid subsequent issues with undefined group-control.
         logger.warning("ProdGroupTreeBalancer",
-            fmt::format("balanceGroupTree: {} has group-controlled children but is not at a limit and is not consuming its guide-rate share.", nodeName));
+            fmt::format("categorizeBalancedNode: {} has group-controlled children but is not at a limit and is not consuming its guide-rate share.", nodeName));
         node.modeCategory = ProdNodeModeCategory::None;
         node.mode = Well::ProducerCMode::CMODE_UNDEFINED;
         for (const auto& childName : node.children) {
@@ -1578,7 +1581,7 @@ void balanceGroupTree(Tree<Scalar>& tree,
         int topSwitchCount = 0;
         int iterationCount = 0;
 
-        // Main distribution: typically a single iteration is sufficient
+        // Main distribution: typically a single pass is sufficient
         while (!balanced && resortingCount <= maxResortingCount && topSwitchCount <= maxTopSwitchCount) {
             ++iterationCount;
             auto [c, c_fixed, c_trans] = getLocalTreeDescendants(tree, nodeName);
@@ -1701,32 +1704,27 @@ void setTargets(Tree<Scalar>& tree, const std::string& topName)
         ? top.groupTarget.groupName : topName;
 
     // -----------------------------------------------------------------------
-    // First pass: compute aggregates for target allocation.
+    // First pass: compute aggregates needed for guideRateRatio and the
+    // Individual-node hypothetical GRUP target.
     //
     // Active mode:
-    //   guideSum      - total active-mode guide rates (0 for useFallback children)
-    //   guideSumGrup  - active-mode guide rates of GRUP non-fallback children
-    //   targetSum     - top rate in active mode minus each non-GRUP child's
-    //                   parent-frame contribution; represents the budget available
-    //                   to distribute among GRUP children.
+    //   guideSum     - total active-mode guide rates (0 for useFallback children)
+    //   guideSumGrup - active-mode guide rates of GRUP non-fallback children
+    //   targetSum    - top rate minus each non-GRUP child's parent-frame
+    //                  contribution = budget available to GRUP children.
+    //                  Used to compute the hypothetical GRUP target for
+    //                  Individual children (limit used to check mode switch).
     //
     // Preferred mode (only when !modeIsPref):
-    //   guideSumFallback      - total preferred-mode guide rates (all children)
-    //   guideSumGrupFallback  - preferred-mode guide rates of GRUP non-fallback children
-    //   targetSumFallback     - top rate in preferred mode minus each fixed child's
-    //                           parent-frame contribution (Individual non-fallback and
-    //                           all useFallback children); budget for GRUP non-fallback
-    //                           children's preferred-mode targets.
+    //   guideSumFallback - total preferred-mode guide rates (all children);
+    //                      needed only for guideRateRatio.
     // -----------------------------------------------------------------------
     Scalar guideSum     = Scalar(0);
     Scalar guideSumGrup = Scalar(0);
     Scalar targetSum    = -projectOnMode(top.rates, mode, top.resvCoeff);
 
-    Scalar guideSumFallback     = Scalar(0);
-    Scalar guideSumGrupFallback = Scalar(0);
+    Scalar guideSumFallback = Scalar(0);
     const Well::ProducerCMode modePreferredAsWell = groupModeToWellMode(modePreferred);
-    Scalar targetSumFallback    = !modeIsPref
-        ? -projectOnMode(top.rates, modePreferredAsWell, top.resvCoeff) : Scalar(0);
 
     for (const auto& cName : cList) {
         if (tree.count(cName) == 0) continue;
@@ -1739,20 +1737,13 @@ void setTargets(Tree<Scalar>& tree, const std::string& topName)
         if (isGrup) {
             guideSumGrup += gr;
         } else if (!isFallback) {
-            // Individual child: its rate is already fixed; remove its parent-frame
-            // contribution from targetSum so GRUP children share only the remainder.
+            // Individual child: remove its parent-frame contribution so GRUP
+            // children share only the remaining budget.
             targetSum += c.efficiencyFactor * projectOnMode(c.rates, mode, c.resvCoeff);
         }
 
         if (!modeIsPref) {
-            const Scalar grFb = c.groupTargetFallback.guideRate;
-            guideSumFallback += grFb;
-            if (isGrup && !c.useFallback) {
-                guideSumGrupFallback += grFb;
-            } else {
-                // Non-GRUP or useFallback child: already fixed in preferred mode.
-                targetSumFallback += c.efficiencyFactor * projectOnMode(c.rates, modePreferredAsWell, c.resvCoeff);
-            }
+            guideSumFallback += c.groupTargetFallback.guideRate;
         }
     }
 
@@ -1777,19 +1768,16 @@ void setTargets(Tree<Scalar>& tree, const std::string& topName)
         }
 
         if (isFallback) {
-            // Controlled in preferred mode via distributeFallbackRates; active-mode
-            // target is undefined.
+            // Controlled in preferred mode via distributeFallbackRates; there is no
+            // meaningful active-mode target for this node.
             c.groupTarget.value = std::numeric_limits<Scalar>::quiet_NaN();
         } else if (isGrup) {
-            // Allocate in parent frame, then convert to child native frame.
-            const Scalar alloc = (guideSumGrup > Scalar(0))
-                ? (gr / guideSumGrup) * targetSum : Scalar(0);
-            c.groupTarget.value = (c.efficiencyFactor > Scalar(0))
-                ? alloc / c.efficiencyFactor : Scalar(0);
+            // GRUP child: actual balanced rate IS the allocated target.
+            c.groupTarget.value = -projectOnMode(c.rates, mode, c.resvCoeff);
         } else {
-            // Individual child: show the hypothetical GRUP target.
-            // Restore this child's parent-frame contribution before distributing,
-            // then convert to native frame.
+            // Individual child: compute the hypothetical GRUP target — i.e. what
+            // this child would receive if it were group-controlled.  This value is
+            // used downstream to check whether the well should switch to GRUP mode.
             const Scalar totalGuide  = guideSumGrup + gr;
             const Scalar totalTarget = targetSum
                 - c.efficiencyFactor * projectOnMode(c.rates, mode, c.resvCoeff);
@@ -1799,33 +1787,16 @@ void setTargets(Tree<Scalar>& tree, const std::string& topName)
                 ? alloc / c.efficiencyFactor : Scalar(0);
         }
 
-        // Preferred-mode fallback target (only when active mode differs from preferred)
+        // Preferred-mode fallback target (only when active mode differs from preferred).
+        // Use the actual balanced rate in preferred mode — the fractions have already
+        // been applied by distributeFallbackRates / balanceGroupTree.
         if (!modeIsPref) {
             const Scalar grFb = c.groupTargetFallback.guideRate;
             c.groupTargetFallback.groupName      = groupName;
             c.groupTargetFallback.ctrlMode       = modePreferred;
+            c.groupTargetFallback.value          = -projectOnMode(c.rates, modePreferredAsWell, c.resvCoeff);
             c.groupTargetFallback.guideRateRatio = (guideSumFallback > Scalar(0))
                 ? grFb / guideSumFallback : Scalar(0);
-
-            if (!c.useFallback) {
-                // groupTargetFallback.value for useFallback children was already set in
-                // distributeFallbackRates. Compute it here for non-fallback children.
-                if (isGrup) {
-                    const Scalar alloc = (guideSumGrupFallback > Scalar(0))
-                        ? (grFb / guideSumGrupFallback) * targetSumFallback : Scalar(0);
-                    c.groupTargetFallback.value = (c.efficiencyFactor > Scalar(0))
-                        ? alloc / c.efficiencyFactor : Scalar(0);
-                } else {
-                    // Individual: hypothetical GRUP target in preferred mode
-                    const Scalar totalGuide  = guideSumGrupFallback + grFb;
-                    const Scalar totalTarget = targetSumFallback
-                        - c.efficiencyFactor * projectOnMode(c.rates, modePreferredAsWell, c.resvCoeff);
-                    const Scalar alloc = (totalGuide > Scalar(0))
-                        ? (grFb / totalGuide) * totalTarget : Scalar(0);
-                    c.groupTargetFallback.value = (c.efficiencyFactor > Scalar(0))
-                        ? alloc / c.efficiencyFactor : Scalar(0);
-                }
-            }
         }
 
         setTargets(tree, cName);
@@ -1881,7 +1852,8 @@ bool runBalancingAlgorithm(const BlackoilWellModelGeneric<Scalar, IndexTraits>& 
         // Balance this subtree
         balanceGroupTree(tree, nodeName, wellModel.guideRate(), mode, qm, tol, logger);
 
-        // Set targets (skipped, done by getWellGroupTargetProducer)
+        // setTargets is intentionally not called here; group target values
+        // (groupName, value, guideRateRatio) are populated by getWellGroupTargetProducer.
         //setTargets(tree, nodeName);
 
         // Report completion of this top node's balancing
@@ -2065,7 +2037,7 @@ void logTree(const Tree<Scalar>& tree, DeferredLogger& logger)
         const Scalar qo = s_to_day * (-node.rates[kOil]);
         const Scalar qw = s_to_day * (-node.rates[kWater]);
         const Scalar qg = s_to_day * (-node.rates[kGas]);
-        if (qo + qw + qg <= 0.0 && node.type == ProdNodeType::Group) continue;
+        if (qo + qw + qg <= Scalar(0) && node.type == ProdNodeType::Group) continue;
         // Line 1: name, type tag, mode category, control info, and phase rates.
         std::string ctrlInfo;
         switch (node.modeCategory) {
