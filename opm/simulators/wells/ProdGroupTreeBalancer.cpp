@@ -1,5 +1,5 @@
 /*
-  Copyright 2025 Equinor ASA
+  Copyright 2026 SINTEF Digital
 
   This file is part of the Open Porous Media project (OPM).
 
@@ -48,7 +48,6 @@
 #include <limits>
 #include <numeric>
 #include <optional>
-#include <stdexcept>
 #include <unordered_map>
 
 namespace Opm::ProdGroupTreeBalancer {
@@ -477,6 +476,81 @@ void populateGroupNode(ProdGroupTreeNode<Scalar>& node,
     }
 }
 
+/// Top-down pass over the tree: propagate the effective group control mode,
+/// assign guide rates, resolve preferred control modes, and mark nodes that
+/// have a limited ancestor.  Recurses depth-first from \p nodeName.
+///
+/// \param[in,out] tree                   The production group tree.
+/// \param[in]     guideRate              Guide-rate data.
+/// \param[in]     nodeName               Node to process.
+/// \param[in]     inheritedMode          Control mode inherited from the parent.
+/// \param[in]     inheritedPreferredMode Preferred mode inherited from the parent.
+/// \param[in]     parentSeesLimits       True if any ancestor carries a rate limit.
+template<class Scalar>
+void propagateGuideRatesAndMode(Tree<Scalar>& tree,
+                                const GuideRate& guideRate,
+                                const std::string& nodeName,
+                                Well::ProducerCMode inheritedMode,
+                                Group::ProductionCMode inheritedPreferredMode,
+                                bool parentSeesLimits)
+{
+    if (tree.count(nodeName) == 0) return;
+    auto& node = tree.at(nodeName);
+    if (node.isSatellite) return;
+
+    node.hasLimitedAncestor = parentSeesLimits;
+    if (!node.availableForGroupControl || !node.hasLimitedAncestor) {
+        // Not available for group control: no inheritance from above.
+        // If preferred mode is FLD/NONE and limits exist, revert to individual.
+        if (node.preferredMode == Group::ProductionCMode::FLD ||
+            node.preferredMode == Group::ProductionCMode::NONE) {
+            if (!node.Limits.empty()) {
+                node.mode = node.Limits.begin()->first;
+            }
+        }
+    } else {
+        // Available for group control: inherit preferred mode if unset.
+        if (node.preferredMode == Group::ProductionCMode::FLD ||
+            node.preferredMode == Group::ProductionCMode::NONE) {
+            node.preferredMode = inheritedPreferredMode;
+        }
+        if (node.modeCategory != ProdNodeModeCategory::Individual) {
+            node.mode = inheritedMode;
+        }
+    }
+
+    // Assign guide rates using the resolved control mode.
+    if (node.hasGuideRate) {
+        const bool validMode = (node.mode != Well::ProducerCMode::CMODE_UNDEFINED) &&
+                               (node.mode != Well::ProducerCMode::NONE);
+        const auto groupMode = validMode ? wellModeToGroupMode(node.mode) : node.preferredMode;
+        node.groupTarget.ctrlMode  = groupMode;
+        node.groupTarget.guideRate = getGuideRateForMode(nodeName, node.initialRates, groupMode, guideRate);
+
+        // Also fill groupTargetFallback using the preferred mode.
+        node.groupTargetFallback.ctrlMode  = node.preferredMode;
+        node.groupTargetFallback.guideRate = getGuideRateForMode(
+            nodeName, node.initialRates, node.preferredMode, guideRate);
+
+        // If the preferred-phase guide rate is zero the node cannot participate
+        // in guide-rate balancing (would make the problem infeasible); exclude it.
+        if (node.groupTargetFallback.guideRate <= Scalar(0)) {
+            node.availableForGroupControl = false;
+            node.modeCategory = ProdNodeModeCategory::Individual;
+            if (!node.Limits.empty()) {
+                node.mode = node.Limits.begin()->first;
+            }
+        }
+    }
+
+    // Recurse into children.
+    for (const auto& childName : node.children) {
+        propagateGuideRatesAndMode(tree, guideRate, childName,
+                                   node.mode, node.preferredMode,
+                                   node.hasLimitedAncestor || !node.Limits.empty());
+    }
+}
+
 } // anonymous namespace
 
 // ===========================================================================
@@ -542,69 +616,10 @@ Tree<Scalar> buildTree(const BlackoilWellModelGeneric<Scalar, IndexTraits>& well
     
     // Top-down pass: propagate effective group control modes, compute guide rates,
     // propagate preferred control, and detect transparent groups.
-    std::function<void(const std::string&, Well::ProducerCMode, Group::ProductionCMode, bool)>
-    propagateGuideRatesAndMode = [&](const std::string& nodeName,
-                                    Well::ProducerCMode inheritedMode,
-                                    Group::ProductionCMode inheritedpreferredMode,
-                                    const bool parentSeesLimits)
-    {
-        if (tree.count(nodeName) == 0) return;
-        auto& node = tree.at(nodeName);
-        if (node.isSatellite) return; 
-
-        node.hasLimitedAncestor = parentSeesLimits;
-        if (!node.availableForGroupControl || !node.hasLimitedAncestor) {
-            // Not available for group control (no inheritance from above)
-            const auto& preferredMode = node.preferredMode;
-            if(preferredMode == Group::ProductionCMode::FLD ||
-               preferredMode == Group::ProductionCMode::NONE) {
-                // We can have a well set to group-control, but there exists no limit on group
-                // revert to individual with mode from limit
-                if (!node.Limits.empty()) {
-                    // Set mode to the strictest limit mode
-                    node.mode = node.Limits.begin()->first;
-                }
-            }
-        } else {
-            // If mode is given as FLD/NONE, we set its preferredMode to the inherited preferred control
-            if(node.preferredMode == Group::ProductionCMode::FLD ||
-               node.preferredMode == Group::ProductionCMode::NONE) {
-                node.preferredMode = inheritedpreferredMode;
-            }
-            if (!(node.modeCategory == ProdNodeModeCategory::Individual)) {
-                // Inherit control mode from parent if not individually controlled
-                node.mode = inheritedMode;
-            }
-        }
-        // Set guide rate for this node with current mode
-        if (node.hasGuideRate) {
-            const bool validMode = (!(node.mode == Well::ProducerCMode::CMODE_UNDEFINED)) &&
-                                   (!(node.mode == Well::ProducerCMode::NONE));
-            const auto groupMode = validMode ? wellModeToGroupMode(node.mode) : node.preferredMode;
-            node.groupTarget.ctrlMode = groupMode;
-            node.groupTarget.guideRate = getGuideRateForMode(nodeName, node.initialRates, groupMode, guideRate);
-            // also fill groupTargetFallback with the preferredMode guide rate
-            const auto groupModeFallback = node.preferredMode;
-            node.groupTargetFallback.ctrlMode = groupModeFallback;
-            node.groupTargetFallback.guideRate = getGuideRateForMode(nodeName, node.initialRates, groupModeFallback, guideRate);
-            // If the guide rate is zero for the preferred phase, for some reason, the node cannot take part in the balancing since 
-            // it might lead to an infeasible balancing problem. We will just leave it untouched as is. 
-            if (node.groupTargetFallback.guideRate <= Scalar(0)) {
-                node.availableForGroupControl = false;
-                node.modeCategory = ProdNodeModeCategory::Individual;
-                if (!node.Limits.empty()) {
-                    // Set mode to existing limit mode (strictest limit)
-                    node.mode = node.Limits.begin()->first;
-                }
-            }
-        }
-        // Propagate effective control mode to children
-        for (const auto& childName : node.children) {
-            propagateGuideRatesAndMode(childName, node.mode, node.preferredMode, node.hasLimitedAncestor || !node.Limits.empty());
-        }
-    };
-    propagateGuideRatesAndMode("FIELD", Well::ProducerCMode::CMODE_UNDEFINED, 
-        Group::ProductionCMode::NONE, /* parentSeesLimits */ false);
+    propagateGuideRatesAndMode(tree, guideRate, "FIELD",
+                               Well::ProducerCMode::CMODE_UNDEFINED,
+                               Group::ProductionCMode::NONE,
+                               /* parentSeesLimits */ false);
     return tree;
 }
 
@@ -1184,248 +1199,308 @@ void distributeFallbackRates(Tree<Scalar>& tree,
 
 // ---------------------------------------------------------------------------
 
+/// Tighten the balancing mode and target to the most violated active limit when
+/// scaling current rates to \p targetRate.  If no limit is violated the inputs
+/// are returned unchanged.
+///
+/// \param[in] node        Tree node being balanced.
+/// \param[in] mode        Initial control mode.
+/// \param[in] targetRate  Initial target rate.
+/// \param[in] tol         Convergence tolerance.
+/// \return    Effective {mode, target} after limit tightening.
 template<class Scalar>
-void balanceGroupTree(Tree<Scalar>& tree,
-                      const std::string& nodeName,
-                      const GuideRate& guideRate,
-                      Well::ProducerCMode targetMode,
-                      Scalar targetRate,
-                      Scalar tol,
-                      DeferredLogger& logger)
+std::pair<Well::ProducerCMode, Scalar>
+tightenModeAndTarget(const ProdGroupTreeNode<Scalar>& node,
+                     Well::ProducerCMode mode,
+                     Scalar targetRate,
+                     Scalar tol)
+{
+    const auto& rates = node.rates;
+    const Scalar rateForModeVal = -projectOnMode(rates, mode, node.resvCoeff);
+    if (rateForModeVal <= Scalar(0)) {
+        return {mode, targetRate};
+    }
+
+    // Scale rates to target and find the most violated limit.
+    std::array<Scalar, 3> scaledRates;
+    for (int cmp = 0; cmp < 3; ++cmp) {
+        scaledRates[cmp] = rates[cmp] * (targetRate / rateForModeVal);
+    }
+
+    Scalar maxViolation = Scalar(0);
+    Well::ProducerCMode violatingMode = mode;
+    for (const auto& [limitMode, limit] : node.Limits) {
+        const Scalar violation = -projectOnMode(scaledRates, limitMode, node.resvCoeff) / limit;
+        if (violation > maxViolation) {
+            maxViolation = violation;
+            violatingMode = limitMode;
+        }
+    }
+
+    if (maxViolation > Scalar(1) - tol) {
+        const Scalar newTarget = -projectOnMode(scaledRates, violatingMode, node.resvCoeff) / maxViolation;
+        return {violatingMode, newTarget};
+    }
+
+    return {mode, targetRate};
+}
+
+// ---------------------------------------------------------------------------
+
+/// Scale a well node's rates proportionally to meet \p targetRate in \p mode.
+template<class Scalar>
+void balanceWellNode(ProdGroupTreeNode<Scalar>& node,
+                     Well::ProducerCMode mode,
+                     Scalar targetRate)
+{
+    const Scalar currentRate = -projectOnMode(node.rates, mode, node.resvCoeff);
+    if (currentRate > Scalar(0)) {
+        const Scalar scale = targetRate / currentRate;
+        for (int cmp = 0; cmp < 3; ++cmp) {
+            node.rates[cmp] *= scale;
+        }
+    }
+    node.isBalanced = true;
+}
+
+// ---------------------------------------------------------------------------
+
+/// Status flags returned by runSingleDistributionPass.
+template<class Scalar>
+struct DistributionPassResult {
+    bool needsResorting          = false;
+    bool anyGroupChildren        = false;
+    bool anyChildrenNeedFallback = false;
+};
+
+/// Execute one iteration of the guide-rate distribution loop for a group node.
+/// Distributes rates to all sorted children, handles transparent groups, and
+/// propagates residual rateSums back into transparent-group rates.
+///
+/// \param[in,out] tree           The production group tree.
+/// \param[in]     nodeName       Origin (balancing root) node.
+/// \param[in]     guideRate      Guide-rate data.
+/// \param[in]     c              Children available for group control (with guide rates).
+/// \param[in,out] c_trans        Transparent children; modified as nodes are balanced.
+/// \param[in]     sortedIndices  Indices into \p c sorted by limit-to-guide ratio.
+/// \param[in]     ratios         Limit-to-guide ratios for each element of \p c.
+/// \param[in]     mode           Active control mode.
+/// \param[in]     qm             Total target rate for the origin node.
+/// \param[in]     tol            Convergence tolerance.
+/// \param[in,out] logger         Deferred logger.
+/// \return  Status flags: needsResorting, anyGroupChildren, anyChildrenNeedFallback.
+template<class Scalar>
+DistributionPassResult<Scalar>
+runSingleDistributionPass(Tree<Scalar>& tree,
+                          const std::string& nodeName,
+                          const GuideRate& guideRate,
+                          const std::vector<std::string>& c,
+                          std::vector<std::string>& c_trans,
+                          const std::vector<size_t>& sortedIndices,
+                          const std::vector<Scalar>& ratios,
+                          Well::ProducerCMode mode,
+                          Scalar qm,
+                          Scalar tol,
+                          DeferredLogger& logger)
+{
+    DistributionPassResult<Scalar> result{};
+    auto& node = tree.at(nodeName);
+
+    for (size_t k = 0; k < sortedIndices.size(); ++k) {
+        const size_t idx = sortedIndices[k];
+        const auto& ckName = c[idx];
+
+        if (tree.count(ckName) == 0) continue;
+        auto& ck = tree.at(ckName);
+
+        if (ck.useFallback) {
+            // skip and flag for later fallback distribution
+            result.anyChildrenNeedFallback = true;
+            continue;
+        }
+
+        // Skip if path to origin was blocked by transparent node -> active limit
+        if (!hasFreePath(tree, ckName, nodeName)) continue;
+
+        // Check and update transparent groups before processing this child
+        if (!c_trans.empty() && !result.anyGroupChildren) {
+            auto c_trans_update = updateTransparentGroups(tree, nodeName, c_trans,
+                                                          guideRate,
+                                                          ratios[idx], qm, mode, tol, logger);
+
+            if (!c_trans_update.empty()) {
+                bool anyTransparent = false;
+                bool anyIndividual = false;
+                for (const auto& ctkName : c_trans_update) {
+                    if (tree.count(ctkName) > 0 && hasFreePath(tree, ctkName, nodeName)) {
+                        const auto& ctk = tree.at(ctkName);
+                        anyTransparent = anyTransparent || (ctk.modeCategory == ProdNodeModeCategory::Transparent);
+                        anyIndividual = anyIndividual || (ctk.modeCategory == ProdNodeModeCategory::Individual);
+                    }
+                }
+                result.needsResorting = result.anyGroupChildren && anyIndividual;
+                result.anyGroupChildren = result.anyGroupChildren || anyTransparent;
+
+                if (!hasFreePath(tree, ckName, nodeName)) continue;
+            }
+        }
+
+        const Scalar gsum = projectOnMode(node.guideRateSums, mode, node.resvCoeff);
+        const Scalar gk = projectOnMode(ck.guideRateSums, mode, ck.resvCoeff);
+        const Scalar qmRemain = qm - projectOnMode(node.rateSums, mode, node.resvCoeff);
+        // qkParent is in origin frame; divide by accumulated efficiency
+        // (product of all eff factors from ck up to nodeName, inclusive)
+        // to convert to ck's native frame before recursing.
+        const Scalar accEff = accumulatedEfficiency(tree, ckName, nodeName);
+        const Scalar qkParent = gsum > Scalar(0) ? (gk / gsum) * qmRemain : Scalar(0);
+        //const Scalar qkParent = (gk / (gsum + Scalar(1e-20))) * qmRemain;
+        const Scalar qk = qkParent / accEff;
+
+        const auto guideRateSumsOrig = ck.guideRateSums;
+
+        balanceGroupTree(tree, ckName, guideRate, mode, qk, tol, logger);
+
+        if (tree.count(ckName) > 0 && qk > Scalar(0)) {
+            const auto& ckBalanced = tree.at(ckName);
+            result.anyGroupChildren = result.anyGroupChildren ||
+                (ckBalanced.modeCategory == ProdNodeModeCategory::Group);
+            if (ckBalanced.modeCategory != ProdNodeModeCategory::Group && result.anyGroupChildren) {
+                // todo: in special cases with zero rates, the categorization may be ambiguous,
+                // so here we might trigger a re-sort even if it's not neccesasary. In such cases
+                // we will hit the maxResortingCount limit before exiting the loop.
+                result.needsResorting = true;
+            }
+
+            // Update parent sums (all nodes in c have hasGuideRate == true by construction)
+            decrementParentGuideRateSums(tree, ckName, nodeName, guideRateSumsOrig);
+            incrementParentRateSums(tree, ckName, nodeName);
+        }
+    }
+
+    // Propagate rateSums back into rates for remaining transparent groups.
+    for (const auto& ctName : c_trans) {
+        if (tree.count(ctName) > 0) {
+            auto& ct = tree.at(ctName);
+            for (int phase = 0; phase < 3; ++phase) {
+                ct.rates[phase] = -ct.rateSums[phase];
+            }
+            for (const auto& [limitMode, limit] : ct.Limits) {
+                if (-projectOnMode(ct.rates, limitMode, ct.resvCoeff) > limit * (Scalar(1) + tol)) {
+                    result.needsResorting = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+
+/// Result type for checkAndSwitchMode.
+template<class Scalar>
+struct ModeSwitchResult {
+    bool limitViolated    = false;
+    Well::ProducerCMode newMode;
+    Scalar newTarget      = Scalar(0);
+    int newTopSwitchCount = 0;
+};
+
+/// Check whether a stricter limit than the current mode is violated after one
+/// distribution pass; switch mode and target if so.  Also updates the node's
+/// groupTarget control mode and guide rate on a switch.
+///
+/// \param[in,out] node               Origin node (groupTarget fields may be updated).
+/// \param[in]     nodeName           Node name (for guide-rate lookup).
+/// \param[in]     currentMode        Active control mode.
+/// \param[in]     targetMode         Original target mode passed to balanceGroupTree.
+/// \param[in]     targetRate         Original target rate passed to balanceGroupTree.
+/// \param[in]     guideRate          Guide-rate data.
+/// \param[in]     topSwitchCount     Current mode-switch iteration count.
+/// \param[in]     maxTopSwitchCount  Maximum allowed mode switches.
+/// \param[in]     tol                Convergence tolerance.
+/// \return  {limitViolated, newMode, newTarget, updatedTopSwitchCount}.
+template<class Scalar>
+ModeSwitchResult<Scalar>
+checkAndSwitchMode(ProdGroupTreeNode<Scalar>& node,
+                   const std::string& nodeName,
+                   Well::ProducerCMode currentMode,
+                   Well::ProducerCMode targetMode,
+                   Scalar targetRate,
+                   const GuideRate& guideRate,
+                   int topSwitchCount,
+                   int maxTopSwitchCount,
+                   Scalar tol)
+{
+    ModeSwitchResult<Scalar> result{false, currentMode, Scalar(0), topSwitchCount};
+
+    if (topSwitchCount >= maxTopSwitchCount) {
+        return result;
+    }
+
+    const auto& rateSums = node.rateSums;
+    Scalar maxViolation = Scalar(0);
+    Well::ProducerCMode newMode = currentMode;
+
+    for (const auto& [limitMode, limit] : node.Limits) {
+        const Scalar effectiveLimit = (limitMode == targetMode)
+            ? std::min(limit, targetRate) : limit;
+        const Scalar violation = projectOnMode(rateSums, limitMode, node.resvCoeff) / effectiveLimit;
+        if (violation > maxViolation) {
+            maxViolation = violation;
+            newMode = limitMode;
+        }
+    }
+
+    if (maxViolation > Scalar(1) - tol && currentMode != newMode) {
+        // if we are switching back to the original target mode, we do one final switch and then stop
+        result.newTopSwitchCount = (newMode == targetMode) ? maxTopSwitchCount : topSwitchCount + 1;
+        result.limitViolated = true;
+        result.newMode = newMode;
+        result.newTarget = projectOnMode(rateSums, newMode, node.resvCoeff) / maxViolation;
+        const auto groupMode = wellModeToGroupMode(newMode);
+        node.groupTarget.ctrlMode = groupMode;
+        node.groupTarget.guideRate = getGuideRateForMode(nodeName, node.initialRates, groupMode, guideRate);
+    }
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+
+/// Assign the final modeCategory (and mode) to a node after its rates have been
+/// set by balanceGroupTree.  A node is:
+///   Individual  — at one of its own rate limits (within tol);
+///   Group       — consuming its guide-rate share of the parent target;
+///   None        — a group with no group-controlled children;
+///   Transparent — no guide rate (edge case only).
+/// If none of the above applies the node has group-controlled children yet is
+/// not at a limit and not on target; a warning is logged and the node (and its
+/// Group children) are reset to Individual / CMODE_UNDEFINED.
+///
+/// \param[in,out] tree              The production group tree.
+/// \param[in]     nodeName          Node to categorize.
+/// \param[in]     mode              Final balancing mode.
+/// \param[in]     qm               Final balancing target rate.
+/// \param[in]     anyGroupChildren  True if any child ended up Group-controlled.
+/// \param[in]     tol              Convergence tolerance.
+/// \param[in,out] logger            Deferred logger.
+template<class Scalar>
+void categorizeBalancedNode(Tree<Scalar>& tree,
+                            const std::string& nodeName,
+                            Well::ProducerCMode mode,
+                            Scalar qm,
+                            bool anyGroupChildren,
+                            Scalar tol,
+                            DeferredLogger& logger)
 {
     if (tree.count(nodeName) == 0) return;
     auto& node = tree.at(nodeName);
-    if (node.isSatellite) return;
 
-    // These limits are not expected to be hit. In theory, the switch limit could
-    // be reached, e.g., orat -> wrat -> grat -> orat, but very unlikely (requires
-    // phase guiderate ratios sufficiently far from actual phase rate ratios.
-    const int maxResortingCount = 5;
-    const int maxTopSwitchCount = 3;
-
-    Well::ProducerCMode mode = targetMode;
-    Scalar qm = targetRate;
-
-    // Tighten mode/target to the most violated active limit when scaling to target.
-    const auto rates = node.rates;
-    const Scalar rateForModeVal = -projectOnMode(rates, mode, node.resvCoeff);
-    if (rateForModeVal > Scalar(0)) {
-        // scale rates to target
-        std::array<Scalar, 3> scaledRates;
-        for (int cmp = 0; cmp < 3; ++cmp) {
-            scaledRates[cmp] = rates[cmp] * (qm / rateForModeVal);
-        }
-        // check individual limits against scaled rates and find most violated
-        Scalar maxViolation = Scalar(0);
-        Well::ProducerCMode violatingMode = mode;
-        for (const auto& [limitMode, limit] : node.Limits) {
-            const Scalar violation = -projectOnMode(scaledRates, limitMode, node.resvCoeff) / limit;
-            if (violation > maxViolation) {
-                maxViolation = violation;
-                violatingMode = limitMode;
-            }
-        }
-        // If the most violated limit is active at the current target, switch to it
-        if (maxViolation > Scalar(1) - tol) {
-            mode = violatingMode;
-            qm = -projectOnMode(scaledRates, mode, node.resvCoeff) / maxViolation;
-        }
-    }
-
-    node.balancingCount++;
-    bool anyGroupChildren = false;
-
-    if (node.type == ProdNodeType::Well) {
-        // Scale rates proportionally to target.
-        const Scalar currentRate = -projectOnMode(rates, mode, node.resvCoeff);
-        if (currentRate > Scalar(0)) {
-            for (int cmp = 0; cmp < 3; ++cmp) {
-                node.rates[cmp] = rates[cmp] * (qm / currentRate);
-            }
-        }
-        node.isBalanced = true;
-    } else {
-        // Group node: recursive balancing
-        bool balanced = false;
-        int resortingCount = 0;
-        int topSwitchCount = 0;
-        int iterationCount = 0;
-
-        // Main distribution: typically a single iteration is sufficient
-        while (!balanced && resortingCount <= maxResortingCount && topSwitchCount <= maxTopSwitchCount) {
-            ++iterationCount;
-            auto [c, c_fixed, c_trans] = getLocalTreeDescendants(tree, nodeName);
-
-            updateGuideRatesForMode(tree, c, mode, guideRate);
-            resetRatesAndGuideRateSums(tree, c, c_fixed, c_trans, nodeName, mode);
-
-            // Add in fixed children to parent sums (e.g., satellites)
-            for (const auto& cfName : c_fixed) {
-                incrementParentRateSums(tree, cfName, nodeName);
-            }
-
-            const auto ratios = computeRatiosForSorting(tree, c, nodeName);
-
-            std::vector<size_t> sortedIndices(c.size());
-            std::iota(sortedIndices.begin(), sortedIndices.end(), 0);
-            std::sort(sortedIndices.begin(), sortedIndices.end(),
-                     [&ratios](size_t i1, size_t i2) { return ratios[i1] < ratios[i2]; });
-
-            bool needsResorting = false;
-            anyGroupChildren = false;
-            bool anyChildrenNeedFallback = false;
-
-            // Distribute rates to children in sorted order
-            for (size_t k = 0; k < sortedIndices.size(); ++k) {
-                const size_t idx = sortedIndices[k];
-                const auto& ckName = c[idx];
-
-                if (tree.count(ckName) == 0) continue;
-                auto& ck = tree.at(ckName);
-
-                if (ck.useFallback) {
-                    // skip and flag for later fallback distribution
-                    anyChildrenNeedFallback = true;
-                    continue;
-                }
-
-                // Skip if path to origin was blocked by transparent node -> active limit
-                if (!hasFreePath(tree, ckName, nodeName)) continue;
-
-                // Check and update transparent groups
-                if (!c_trans.empty() && !anyGroupChildren) {
-                    auto c_trans_update = updateTransparentGroups(tree, nodeName, c_trans,
-                                                                  guideRate,
-                                                                  ratios[idx], qm, mode, tol, logger);
-
-                    if (!c_trans_update.empty()) {
-                        bool anyTransparent = false;
-                        bool anyIndividual = false;
-                        for (const auto& ctkName : c_trans_update) {
-                            if (tree.count(ctkName) > 0 && hasFreePath(tree, ctkName, nodeName)) {
-                                const auto& ctk = tree.at(ctkName);
-                                anyTransparent = anyTransparent || (ctk.modeCategory == ProdNodeModeCategory::Transparent);
-                                anyIndividual = anyIndividual || (ctk.modeCategory == ProdNodeModeCategory::Individual);
-                            }
-                        }
-                        needsResorting = anyGroupChildren && anyIndividual;
-                        anyGroupChildren = anyGroupChildren || anyTransparent;
-
-                        if (!hasFreePath(tree, ckName, nodeName)) continue;
-                    }
-                }
-
-                const Scalar gsum = projectOnMode(node.guideRateSums, mode, node.resvCoeff);
-                const Scalar gk = projectOnMode(ck.guideRateSums, mode, ck.resvCoeff);
-                const Scalar qmRemain = qm - projectOnMode(node.rateSums, mode, node.resvCoeff);
-                // qkParent is in origin frame; divide by accumulated efficiency
-                // (product of all eff factors from ck up to nodeName, inclusive)
-                // to convert to ck's native frame before recursing.
-                const Scalar accEff = accumulatedEfficiency(tree, ckName, nodeName);
-                const Scalar qkParent = gsum > Scalar(0) ? (gk / gsum) * qmRemain : Scalar(0);
-                //const Scalar qkParent = (gk / (gsum + Scalar(1e-20))) * qmRemain;
-                const Scalar qk = qkParent / accEff;
-
-                const auto guideRateSumsOrig = ck.guideRateSums;
-
-                balanceGroupTree(tree, ckName, guideRate, mode, qk, tol, logger);
-
-                if (tree.count(ckName) > 0 && qk > Scalar(0)) {
-                    const auto& ckBalanced = tree.at(ckName);
-                    anyGroupChildren = anyGroupChildren || (ckBalanced.modeCategory == ProdNodeModeCategory::Group);
-                    if (ckBalanced.modeCategory != ProdNodeModeCategory::Group && anyGroupChildren) {
-                        // todo: in special cases with zero rates, the categorization may be ambiguous,
-                        // so here we might trigger a re-sort even if it's not neccesasary. In such cases
-                        // we will hit the maxResortingCount limit before exiting the loop.
-                        needsResorting = true;
-                    }
-
-                    // Update parent sums
-                    if (ckBalanced.hasGuideRate) {
-                        decrementParentGuideRateSums(tree, ckName, nodeName, guideRateSumsOrig);
-                        incrementParentRateSums(tree, ckName, nodeName);
-                    }
-                }
-            }
-
-            // Propagate rateSums back into rates for remaining transparent groups.
-            for (const auto& ctName : c_trans) {
-                if (tree.count(ctName) > 0) {
-                    auto& ct = tree.at(ctName);
-                    for (int phase = 0; phase < 3; ++phase) {
-                        ct.rates[phase] = -ct.rateSums[phase];
-                    }
-                    for (const auto& [limitMode, limit] : ct.Limits) {
-                        if (-projectOnMode(ct.rates, limitMode, ct.resvCoeff) > limit * (Scalar(1) + tol)) {
-                            needsResorting = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (needsResorting && resortingCount < maxResortingCount) {
-                resortingCount++;
-                continue;
-            }
-
-            resortingCount = 0;
-
-            if (anyChildrenNeedFallback) {
-                distributeFallbackRates(tree, nodeName, c, guideRate, mode, tol, logger);
-
-                // Propagate fallback rates into transparent groups.
-                for (const auto& ctName : c_trans) {
-                    if (tree.count(ctName) > 0) {
-                        auto& ct = tree.at(ctName);
-                        for (int phase = 0; phase < 3; ++phase) {
-                            ct.rates[phase] = -ct.rateSums[phase];
-                        }
-                    }
-                }
-            }
-
-            // Check if a stricter limit was reached; switch mode if so and re-distribute.
-            bool limitViolated = false;
-            if (topSwitchCount < maxTopSwitchCount) {
-                const auto& rateSums = node.rateSums;
-
-                Scalar maxViolation = Scalar(0);
-                Well::ProducerCMode newMode = mode;
-                for (const auto& [limitMode, limit] : node.Limits) {
-                    const Scalar effectiveLimit = (limitMode == targetMode)
-                        ? std::min(limit, targetRate) : limit;
-                    const Scalar violation = projectOnMode(rateSums, limitMode, node.resvCoeff) / effectiveLimit;
-                    if (violation > maxViolation) {
-                        maxViolation = violation;
-                        newMode = limitMode;
-                    }
-                }
-
-                if (maxViolation > Scalar(1) - tol && mode != newMode) {
-                    // if we are switching back to the original target mode, we do one final switch and then stop
-                    topSwitchCount = (newMode == targetMode) ? maxTopSwitchCount : topSwitchCount + 1;
-                    limitViolated = true;
-                    mode = newMode;
-                    qm = projectOnMode(rateSums, mode, node.resvCoeff) / maxViolation;
-                    const auto groupMode = wellModeToGroupMode(mode);
-                    node.groupTarget.ctrlMode = groupMode; // ????
-                    node.groupTarget.guideRate = getGuideRateForMode(nodeName, node.initialRates, groupMode, guideRate);
-                }
-            }
-
-            balanced = !limitViolated;
-            node.isBalanced = balanced;
-            for (int phase = 0; phase < 3; ++phase) {
-                node.rates[phase] = -node.rateSums[phase];
-            }
-        }
-        node.lastIterationCount = iterationCount;
-    }
-
-    // Categorize the node based on whether it is at a limit or consuming its guide-rate share.
     node.mode = mode;
     node.visited = true;
+
     bool atLimit = false;
     for (const auto& [limitMode, limit] : node.Limits) {
         if (std::abs(-projectOnMode(node.rates, limitMode, node.resvCoeff) - limit) <= tol * limit) {
@@ -1434,6 +1509,7 @@ void balanceGroupTree(Tree<Scalar>& tree,
         }
     }
     const bool atTarget = std::abs(-projectOnMode(node.rates, mode, node.resvCoeff) - qm) <= tol * qm;
+
     if (atLimit) {
         node.modeCategory = ProdNodeModeCategory::Individual;
     } else if (node.hasGuideRate && atTarget) {
@@ -1465,6 +1541,110 @@ void balanceGroupTree(Tree<Scalar>& tree,
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+
+template<class Scalar>
+void balanceGroupTree(Tree<Scalar>& tree,
+                      const std::string& nodeName,
+                      const GuideRate& guideRate,
+                      Well::ProducerCMode targetMode,
+                      Scalar targetRate,
+                      Scalar tol,
+                      DeferredLogger& logger)
+{
+    if (tree.count(nodeName) == 0) return;
+    auto& node = tree.at(nodeName);
+    if (node.isSatellite) return;
+
+    // These limits are not expected to be hit. In theory, the switch limit could
+    // be reached, e.g., orat -> wrat -> grat -> orat, but very unlikely (requires
+    // phase guiderate ratios sufficiently far from actual phase rate ratios.
+    const int maxResortingCount = 5;
+    const int maxTopSwitchCount = 3;
+
+    auto [mode, qm] = tightenModeAndTarget(node, targetMode, targetRate, tol);
+
+    node.balancingCount++;
+    bool anyGroupChildren = false;
+
+    if (node.type == ProdNodeType::Well) {
+        balanceWellNode(node, mode, qm);
+    } else {
+        // Group node: recursive balancing
+        bool balanced = false;
+        int resortingCount = 0;
+        int topSwitchCount = 0;
+        int iterationCount = 0;
+
+        // Main distribution: typically a single iteration is sufficient
+        while (!balanced && resortingCount <= maxResortingCount && topSwitchCount <= maxTopSwitchCount) {
+            ++iterationCount;
+            auto [c, c_fixed, c_trans] = getLocalTreeDescendants(tree, nodeName);
+
+            updateGuideRatesForMode(tree, c, mode, guideRate);
+            resetRatesAndGuideRateSums(tree, c, c_fixed, c_trans, nodeName, mode);
+
+            // Add in fixed children to parent sums (e.g., satellites)
+            for (const auto& cfName : c_fixed) {
+                incrementParentRateSums(tree, cfName, nodeName);
+            }
+
+            const auto ratios = computeRatiosForSorting(tree, c, nodeName);
+
+            std::vector<size_t> sortedIndices(c.size());
+            std::iota(sortedIndices.begin(), sortedIndices.end(), 0);
+            std::sort(sortedIndices.begin(), sortedIndices.end(),
+                     [&ratios](size_t i1, size_t i2) { return ratios[i1] < ratios[i2]; });
+
+            auto passResult = runSingleDistributionPass(
+                tree, nodeName, guideRate, c, c_trans,
+                sortedIndices, ratios, mode, qm, tol, logger);
+
+            anyGroupChildren = passResult.anyGroupChildren;
+
+            if (passResult.needsResorting && resortingCount < maxResortingCount) {
+                resortingCount++;
+                continue;
+            }
+
+            resortingCount = 0;
+
+            if (passResult.anyChildrenNeedFallback) {
+                distributeFallbackRates(tree, nodeName, c, guideRate, mode, tol, logger);
+
+                // Propagate fallback rates into transparent groups.
+                for (const auto& ctName : c_trans) {
+                    if (tree.count(ctName) > 0) {
+                        auto& ct = tree.at(ctName);
+                        for (int phase = 0; phase < 3; ++phase) {
+                            ct.rates[phase] = -ct.rateSums[phase];
+                        }
+                    }
+                }
+            }
+
+            auto switchResult = checkAndSwitchMode(
+                node, nodeName, mode, targetMode, targetRate,
+                guideRate, topSwitchCount, maxTopSwitchCount, tol);
+
+            if (switchResult.limitViolated) {
+                mode           = switchResult.newMode;
+                qm             = switchResult.newTarget;
+                topSwitchCount = switchResult.newTopSwitchCount;
+            }
+
+            balanced = !switchResult.limitViolated;
+            node.isBalanced = balanced;
+            for (int phase = 0; phase < 3; ++phase) {
+                node.rates[phase] = -node.rateSums[phase];
+            }
+        }
+        node.lastIterationCount = iterationCount;
+    }
+
+    categorizeBalancedNode(tree, nodeName, mode, qm, anyGroupChildren, tol, logger);
 }
 
 // ---------------------------------------------------------------------------
@@ -2029,13 +2209,13 @@ void applyTreeToState(const Tree<Scalar>& tree,
             if (node.modeCategory == ProdNodeModeCategory::Group && node.hasLimitedAncestor) {
                 newGroupCMode = Group::ProductionCMode::FLD;
             } else if (node.modeCategory == ProdNodeModeCategory::Individual) {
-                switch (node.mode) {
-                case Well::ProducerCMode::ORAT: newGroupCMode = Group::ProductionCMode::ORAT; break;
-                case Well::ProducerCMode::WRAT: newGroupCMode = Group::ProductionCMode::WRAT; break;
-                case Well::ProducerCMode::GRAT: newGroupCMode = Group::ProductionCMode::GRAT; break;
-                case Well::ProducerCMode::LRAT: newGroupCMode = Group::ProductionCMode::LRAT; break;
-                case Well::ProducerCMode::RESV: newGroupCMode = Group::ProductionCMode::RESV; break;
-                default: break;
+                    switch (node.mode) {
+                    case Well::ProducerCMode::ORAT: newGroupCMode = Group::ProductionCMode::ORAT; break;
+                    case Well::ProducerCMode::WRAT: newGroupCMode = Group::ProductionCMode::WRAT; break;
+                    case Well::ProducerCMode::GRAT: newGroupCMode = Group::ProductionCMode::GRAT; break;
+                    case Well::ProducerCMode::LRAT: newGroupCMode = Group::ProductionCMode::LRAT; break;
+                    case Well::ProducerCMode::RESV: newGroupCMode = Group::ProductionCMode::RESV; break;
+                    default: break;
                 }
             }
             groupState.production_control(name, newGroupCMode);
