@@ -424,7 +424,6 @@ template<typename Scalar, typename IndexTraits>
 std::pair<Well::ProducerCMode, Scalar>
 WellConstraints<Scalar, IndexTraits>::
 estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
-                                      const SummaryState& summaryState,
                                       const RateConvFunc& calcReservoirVoidageRates,
                                       const Well::ProductionControls& controls,
                                       const bool check_group_constraints,
@@ -467,7 +466,7 @@ estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>
 
     // Rate constraints
     const auto [most_strict_rate_control, most_strict_rate_scale] =
-        estimateStrictestProductionRateConstraint(ws, summaryState, calcReservoirVoidageRates,
+        estimateStrictestProductionRateConstraint(ws, calcReservoirVoidageRates,
                                                   controls, check_group_constraints, deferred_logger);
     if (most_strict_rate_control != Well::ProducerCMode::CMODE_UNDEFINED &&
         most_strict_rate_scale < most_strict_scale) {
@@ -497,7 +496,6 @@ template<typename Scalar, typename IndexTraits>
 std::pair<Well::ProducerCMode, Scalar>
 WellConstraints<Scalar, IndexTraits>::
 estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
-                                          const SummaryState& summaryState,
                                           const RateConvFunc& calcReservoirVoidageRates,
                                           const Well::ProductionControls& controls,
                                           const bool check_group_constraints,

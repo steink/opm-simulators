@@ -179,7 +179,6 @@ template<typename FluidSystem>
 std::pair<Well::ProducerCMode, typename FluidSystem::Scalar>
 WellInterfaceFluidSystem<FluidSystem>::
 estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
-                                      const SummaryState& summaryState,
                                       const Well::ProductionControls& controls,
                                       const bool check_group_constraints,
                                       DeferredLogger& deferred_logger,
@@ -194,7 +193,7 @@ estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>
                                                         surface_rates, voidage_rates);
     };
     return WellConstraints(*this).
-            estimateStrictestProductionConstraint(ws, summaryState, rRates, controls, check_group_constraints, deferred_logger, bhp_at_thp_limit);
+            estimateStrictestProductionConstraint(ws, rRates, controls, check_group_constraints, deferred_logger, bhp_at_thp_limit);
 }
 template<typename FluidSystem>
 std::pair<Well::ProducerCMode, typename FluidSystem::Scalar>
@@ -221,7 +220,6 @@ template<typename FluidSystem>
 std::pair<Well::ProducerCMode, typename FluidSystem::Scalar>
 WellInterfaceFluidSystem<FluidSystem>::
 estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
-                                          const SummaryState& summaryState,
                                           const Well::ProductionControls& controls,
                                           const bool check_group_constraints,
                                           DeferredLogger& deferred_logger) const
@@ -235,7 +233,7 @@ estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTra
                                                         surface_rates, voidage_rates);
     };
     return WellConstraints(*this).
-            estimateStrictestProductionRateConstraint(ws, summaryState, rRates, controls, check_group_constraints, deferred_logger);
+            estimateStrictestProductionRateConstraint(ws, rRates, controls, check_group_constraints, deferred_logger);
 }
 
 template<typename FluidSystem>

@@ -146,7 +146,6 @@ namespace Opm
 
         const auto [strictest_mode, strictest_scale] =
             this->estimateStrictestProductionConstraint(ws,
-                                                        summary_state,
                                                         controls,
                                                         /*check_group_constraints=*/false,
                                                         deferred_logger,

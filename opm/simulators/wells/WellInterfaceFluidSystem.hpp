@@ -93,7 +93,6 @@ protected:
 
     std::pair<Well::ProducerCMode, typename FluidSystem::Scalar>
     estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
-                                      const SummaryState& summaryState,
                                       const Well::ProductionControls& controls,
                                       const bool check_group_constraints,
                                       DeferredLogger& deferred_logger,
@@ -101,7 +100,6 @@ protected:
 
     std::pair<Well::ProducerCMode, typename FluidSystem::Scalar>
     estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
-                                              const SummaryState& summaryState,
                                               const Well::ProductionControls& controls,
                                               const bool check_group_constraints,
                                               DeferredLogger& deferred_logger) const;

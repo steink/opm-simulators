@@ -65,7 +65,6 @@ public:
 
     std::pair<Well::ProducerCMode, Scalar>
     estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
-                                          const SummaryState& summaryState,
                                           const RateConvFunc& calcReservoirVoidageRates,
                                           const Well::ProductionControls& controls,
                                           const bool include_group_constraints,
@@ -74,7 +73,6 @@ public:
 
     std::pair<Well::ProducerCMode, Scalar>
     estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
-                                              const SummaryState& summaryState,
                                               const RateConvFunc& calcReservoirVoidageRates,
                                               const Well::ProductionControls& controls,
                                               const bool check_group_constraints,
