@@ -479,15 +479,17 @@ protected:
 
         const Scalar dt = simulator_.timeStepSize();
         const auto& ws = simulator_.problem().wellModel().wellState().well(well.name());
+        const auto well_eff = well.wellEfficiencyFactor(); // Needed to convert ws.phase_mixing_rates to effective rates
         for (std::size_t i = 0; i < ws.perf_data.size(); ++i) {
             const auto I = ws.perf_data.cell_index[i];
-            const Scalar rate = well.volumetricSurfaceRateForConnection(I, tr.phaseIdx_);
+            const Scalar rate = well.volumetricSurfaceRateForConnection(I, tr.phaseIdx_); // Includes (accumulated) well efficiency factor
             Scalar rate_s;
+
             if (tr.phaseIdx_ == FluidSystem::oilPhaseIdx && FluidSystem::enableVaporizedOil()) {
-                rate_s = ws.perf_data.phase_mixing_rates[i][ws.vaporized_oil];
+                rate_s = ws.perf_data.phase_mixing_rates[i][ws.vaporized_oil] * well_eff;
             }
             else if (tr.phaseIdx_ == FluidSystem::gasPhaseIdx && FluidSystem::enableDissolvedGas()) {
-                rate_s = ws.perf_data.phase_mixing_rates[i][ws.dissolved_gas];
+                rate_s = ws.perf_data.phase_mixing_rates[i][ws.dissolved_gas] * well_eff;
             }
             else {
                 rate_s = 0.0;
@@ -814,6 +816,32 @@ protected:
         }
     }
 
+    void convertEffectiveRatesToRawRates() {
+        const auto& wellPtrs = simulator_.problem().wellModel().localNonshutWells();
+        for (const auto& wellPtr : wellPtrs) {
+            const auto& eclWell = wellPtr->wellEcl();
+            const auto well_seq_index = eclWell.seqIndex();
+            const auto inv_well_eff_factor = 1.0 / std::max(Scalar{1.0e-10}, wellPtr->wellEfficiencyFactor());
+
+            std::ranges::for_each(this->wellTracerRate_[well_seq_index], [&](WellTracerRate<Scalar>& wtr) {
+                wtr.rate *= inv_well_eff_factor;
+            });
+            std::ranges::for_each(this->wellFreeTracerRate_[well_seq_index], [&](WellTracerRate<Scalar>& wtr) {
+                wtr.rate *= inv_well_eff_factor;
+            });
+            std::ranges::for_each(this->wellSolTracerRate_[well_seq_index], [&](WellTracerRate<Scalar>& wtr) {
+                wtr.rate *= inv_well_eff_factor;
+            });
+            if (eclWell.isMultiSegment()) {
+                std::ranges::for_each(this->mSwTracerRate_[well_seq_index], [&](MSWellTracerRate<Scalar>& wtr) {
+                    std::ranges::for_each(wtr.rate, [&](auto& item) {
+                        item.second *= inv_well_eff_factor;
+                    });
+                });
+            }
+        }
+    }
+
     void buildAquiferTracerConnections_(DeferredLogger& deferredLogger)
     {
         aquifer_tracer_cells_.clear();
@@ -980,17 +1008,17 @@ protected:
                 auto& freeTracerRate = this->wellFreeTracerRate_[eclWell.seqIndex()];
                 auto& solTracerRate = this->wellSolTracerRate_[eclWell.seqIndex()];
                 auto* mswTracerRate = eclWell.isMultiSegment() ? &this->mSwTracerRate_[eclWell.seqIndex()] : nullptr;
-
+                const auto well_eff = wellPtr->wellEfficiencyFactor(); // Needed to convert ws.phase_mixing_rates to effective rates
                 for (std::size_t i = 0; i < ws.perf_data.size(); ++i) {
                     const auto I = ws.perf_data.cell_index[i];
-                    const Scalar rate = wellPtr->volumetricSurfaceRateForConnection(I, tr.phaseIdx_);
+                    const Scalar rate = wellPtr->volumetricSurfaceRateForConnection(I, tr.phaseIdx_); // Includes (accumulated) well efficiency factor
 
                     Scalar rate_s;
                     if (tr.phaseIdx_ == FluidSystem::oilPhaseIdx && FluidSystem::enableVaporizedOil()) {
-                        rate_s = ws.perf_data.phase_mixing_rates[i][ws.vaporized_oil];
+                        rate_s = ws.perf_data.phase_mixing_rates[i][ws.vaporized_oil]*well_eff;
                     }
                     else if (tr.phaseIdx_ == FluidSystem::gasPhaseIdx && FluidSystem::enableDissolvedGas()) {
-                        rate_s = ws.perf_data.phase_mixing_rates[i][ws.dissolved_gas];
+                        rate_s = ws.perf_data.phase_mixing_rates[i][ws.dissolved_gas]*well_eff;
                     }
                     else {
                         rate_s = 0.0;
@@ -1029,6 +1057,7 @@ protected:
                 }
             }
         }
+        convertEffectiveRatesToRawRates();
     }
 
     Simulator& simulator_;
