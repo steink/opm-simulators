@@ -671,8 +671,19 @@ std::vector<std::string> getSubTreeOrdering(const Tree<Scalar>& tree,
 }
 
 // ---------------------------------------------------------------------------
-// Helper functions for sorting-based algorithm
+// Sorting-based algorithm helpers
 // ---------------------------------------------------------------------------
+
+// Forward declaration: balanceGroupTree is defined later but called by
+// updateTransparentGroups and distributeFallbackRates below.
+template<class Scalar>
+void balanceGroupTree(Tree<Scalar>& tree,
+                      const std::string& nodeName,
+                      const GuideRate& guideRate,
+                      Well::ProducerCMode targetMode,
+                      Scalar targetRate,
+                      Scalar tol,
+                      DeferredLogger& logger);
 
 /// Compute the product of efficiency factors from \p fromName (inclusive) up to
 /// \p toAncestorName (exclusive).  Mirrors GroupStateHelper::accumulateGroupEfficiencyFactor:
@@ -719,7 +730,7 @@ template<class Scalar>
 void incrementParentRateSums(Tree<Scalar>& tree,
                              const std::string& nodeName,
                              const std::string& originName,
-                             const std::optional<std::array<Scalar, 3>>& rates)
+                             const std::optional<std::array<Scalar, 3>>& rates = std::nullopt)
 {
     // Increment rate_sums from node up to origin
     if (tree.count(nodeName) == 0) return;
@@ -975,10 +986,10 @@ computeRatiosForSorting(const Tree<Scalar>& tree, const std::vector<std::string>
     // and we find the smallest non-negative alpha that activates any limit.
     // All quantities (rateSums, guideRateSums, effectiveLimit) are expressed in
     // the origin's frame using the accumulated efficiency factor.
-    const int nc = c.size();
+    const size_t nc = c.size();
     std::vector<Scalar> ratios(nc, std::numeric_limits<Scalar>::infinity());
 
-    for (int k = 0; k < nc; ++k) {
+    for (size_t k = 0; k < nc; ++k) {
         const auto& childName = c[k];
         if (tree.count(childName) == 0) continue;
         const auto& child = tree.at(childName);
@@ -1051,15 +1062,17 @@ updateTransparentGroups(Tree<Scalar>& tree,
 
         // Find minimum ratio
         Scalar ratioMin = std::numeric_limits<Scalar>::max();
-        int minIdx = -1;
+        size_t minIdx = 0;
+        bool foundMin = false;
         for (size_t i = 0; i < ratios.size(); ++i) {
             if (ratios[i] < ratioMin) {
                 ratioMin = ratios[i];
                 minIdx = i;
+                foundMin = true;
             }
         }
 
-        if (minIdx < 0 || ratioMin >= nextRatio) {
+        if (!foundMin || ratioMin >= nextRatio) {
             foundLessThanNext = false;
             break;
         }
@@ -1077,12 +1090,12 @@ updateTransparentGroups(Tree<Scalar>& tree,
 
         const auto& ckName = c_trans[minIdx];
         if (!hasFreePath(tree, ckName, nodeName)) {
-            c_trans.erase(c_trans.begin() + minIdx);
+            c_trans.erase(c_trans.begin() + static_cast<int>(minIdx));
             continue;
         }
 
         if (tree.count(ckName) == 0) {
-            c_trans.erase(c_trans.begin() + minIdx);
+            c_trans.erase(c_trans.begin() + static_cast<int>(minIdx));
             continue;
         }
 
@@ -1119,7 +1132,7 @@ updateTransparentGroups(Tree<Scalar>& tree,
         decrementParentGuideRateSums(tree, ckName, nodeName, guideRateSumsOrig);
 
         // Remove from c_trans
-        c_trans.erase(c_trans.begin() + minIdx);
+        c_trans.erase(c_trans.begin() + static_cast<std::ptrdiff_t>(minIdx));
     }
 
     return c_trans_update;
@@ -1204,6 +1217,9 @@ void distributeFallbackRates(Tree<Scalar>& tree,
 }
 
 // ---------------------------------------------------------------------------
+// Private algorithm sub-helpers (not in the header; only called from balanceGroupTree)
+// ---------------------------------------------------------------------------
+namespace {
 
 /// Tighten the balancing mode and target to the most violated active limit when
 /// scaling current rates to \p targetRate.  If no limit is violated the inputs
@@ -1335,6 +1351,8 @@ runSingleDistributionPass(Tree<Scalar>& tree,
                                                           ratios[idx], qm, mode, tol, logger);
 
             if (!c_trans_update.empty()) {
+                /* 
+                // THIS BLOCK IS NOT NEEDED - KEEP UNTIL WE ARE SURE
                 bool anyTransparent = false;
                 for (const auto& ctkName : c_trans_update) {
                     if (tree.count(ctkName) > 0 && hasFreePath(tree, ctkName, nodeName)) {
@@ -1343,7 +1361,7 @@ runSingleDistributionPass(Tree<Scalar>& tree,
                     }
                 }
                 result.anyGroupChildren = result.anyGroupChildren || anyTransparent;
-
+                */
                 if (!hasFreePath(tree, ckName, nodeName)) continue;
             }
         }
@@ -1545,6 +1563,8 @@ void categorizeBalancedNode(Tree<Scalar>& tree,
         }
     }
 }
+
+} // anonymous namespace
 
 // ---------------------------------------------------------------------------
 
@@ -2256,66 +2276,8 @@ bool runGroupTreeBalancer(BlackoilWellModelGeneric<Scalar, IndexTraits>& wellMod
 // Explicit instantiations
 // ===========================================================================
 
-template Tree<double> buildTree<double, BlackOilDefaultFluidSystemIndices>(
-    const BlackoilWellModelGeneric<double, BlackOilDefaultFluidSystemIndices>&,
-    const SummaryState&, int,
-    const std::unordered_map<std::string, std::pair<int, double>>&);
-
-template std::vector<std::string>
-getSubTreeOrdering<double>(const Tree<double>&, const std::string&);
-
-// New algorithm helper functions
-template bool hasFreePath<double>(const Tree<double>&, const std::string&, const std::string&);
-
-template void incrementParentRateSums<double>(Tree<double>&, const std::string&, const std::string&,
-    const std::optional<std::array<double, 3>>&);
-
-template void decrementParentGuideRateSums<double>(Tree<double>&, const std::string&, const std::string&, const std::array<double, 3>&);
-
-template std::tuple<std::vector<std::string>, std::vector<std::string>, std::vector<std::string>>
-getLocalTreeDescendants<double>(const Tree<double>&, const std::string&);
-
-template <class Scalar> void updateGuideRatesForMode(Tree<Scalar>& tree,
-                                                     const std::vector<std::string>& c,
-                                                     Well::ProducerCMode mode,
-                                                     const GuideRate& guideRate);
-
-template void resetRatesAndGuideRateSums<double>(Tree<double>&,
-                                                 const std::vector<std::string>&,
-                                                 const std::vector<std::string>&,
-                                                 const std::vector<std::string>&,
-                                                 const std::string&,
-                                                 Well::ProducerCMode);
-
-template std::vector<double>
-computeRatiosForSorting<double>(const Tree<double>&, const std::vector<std::string>&, const std::string&);
-
-template std::vector<std::string>
-updateTransparentGroups<double>(Tree<double>&, const std::string&, std::vector<std::string>&,
-    const GuideRate&, double, double, Well::ProducerCMode, double, DeferredLogger&);
-
-template void distributeFallbackRates<double>(Tree<double>&, const std::string&,
-    const std::vector<std::string>&, const GuideRate&, Well::ProducerCMode, double, DeferredLogger&);
-
-template void balanceGroupTree<double>(Tree<double>&, const std::string&,
-    const GuideRate&, Well::ProducerCMode, double, double, DeferredLogger&);
-
-template void setTargets<double>(Tree<double>&, const std::string&);
-
-template bool runBalancingAlgorithm<double, BlackOilDefaultFluidSystemIndices>(
-    const BlackoilWellModelGeneric<double, BlackOilDefaultFluidSystemIndices>&,
-    Tree<double>&,
-    double,
-    DeferredLogger&);
-
-template bool checkTreeValidity<double>(const Tree<double>&, const std::string&, double, DeferredLogger&);
-
-template void logTree<double>(const Tree<double>&, DeferredLogger&);
-
-template void applyTreeToState<double, BlackOilDefaultFluidSystemIndices>(
-    const Tree<double>&,
-    BlackoilWellModelGeneric<double, BlackOilDefaultFluidSystemIndices>&,
-    DeferredLogger&);
+// Only the top-level entry point requires an explicit instantiation; all
+// internal helper functions are implicitly instantiated as part of it.
 
 template bool runGroupTreeBalancer<double, BlackOilDefaultFluidSystemIndices>(
     BlackoilWellModelGeneric<double, BlackOilDefaultFluidSystemIndices>&,
@@ -2324,59 +2286,6 @@ template bool runGroupTreeBalancer<double, BlackOilDefaultFluidSystemIndices>(
     DeferredLogger&);
 
 #ifdef FLOW_INSTANTIATE_FLOAT
-
-template Tree<float> buildTree<float, BlackOilDefaultFluidSystemIndices>(
-    const BlackoilWellModelGeneric<float, BlackOilDefaultFluidSystemIndices>&,
-    const SummaryState&, int,
-    const std::unordered_map<std::string, std::pair<int, float>>&);
-
-template std::vector<std::string>
-getSubTreeOrdering<float>(const Tree<float>&, const std::string&);
-
-// New algorithm helper functions
-template bool hasFreePath<float>(const Tree<float>&, const std::string&, const std::string&);
-
-template void incrementParentRateSums<float>(Tree<float>&, const std::string&, const std::string&,
-    const std::optional<std::array<float, 3>>&);
-
-template void decrementParentGuideRateSums<float>(Tree<float>&, const std::string&, const std::string&, const std::array<float, 3>&);
-
-template std::tuple<std::vector<std::string>, std::vector<std::string>, std::vector<std::string>>
-getLocalTreeDescendants<float>(const Tree<float>&, const std::string&);
-
-template void resetRatesAndGuideRateSums<float>(Tree<float>&,
-    const std::vector<std::string>&,
-    const std::vector<std::string>&, const std::vector<std::string>&, const std::string&, Well::ProducerCMode);
-
-template std::vector<float>
-computeRatiosForSorting<float>(const Tree<float>&, const std::vector<std::string>&, const std::string&);
-
-template std::vector<std::string>
-updateTransparentGroups<float>(Tree<float>&, const std::string&, std::vector<std::string>&,
-    const GuideRate&, float, float, Well::ProducerCMode, float, DeferredLogger&);
-
-template void distributeFallbackRates<float>(Tree<float>&, const std::string&,
-    const std::vector<std::string>&, const GuideRate&, Well::ProducerCMode, float, DeferredLogger&);
-
-template void balanceGroupTree<float>(Tree<float>&, const std::string&,
-    const GuideRate&, Well::ProducerCMode, float, float, DeferredLogger&);
-
-template void setTargets<float>(Tree<float>&, const std::string&);
-
-template bool runBalancingAlgorithm<float, BlackOilDefaultFluidSystemIndices>(
-    const BlackoilWellModelGeneric<float, BlackOilDefaultFluidSystemIndices>&,
-    Tree<float>&,
-    float,
-    DeferredLogger&);
-
-template bool checkTreeValidity<float>(const Tree<float>&, const std::string&, float, DeferredLogger&);
-
-template void logTree<float>(const Tree<float>&, DeferredLogger&);
-
-template void applyTreeToState<float, BlackOilDefaultFluidSystemIndices>(
-    const Tree<float>&,
-    BlackoilWellModelGeneric<float, BlackOilDefaultFluidSystemIndices>&,
-    DeferredLogger&);
 
 template bool runGroupTreeBalancer<float, BlackOilDefaultFluidSystemIndices>(
     BlackoilWellModelGeneric<float, BlackOilDefaultFluidSystemIndices>&,
