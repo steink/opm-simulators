@@ -135,6 +135,8 @@ BlackoilModelParameters<Scalar>::BlackoilModelParameters()
     nupcol_group_rate_tolerance_ = Parameters::Get<Parameters::NupcolGroupRateTolerance<Scalar>>();
     well_group_constraints_max_iterations_ = Parameters::Get<Parameters::WellGroupConstraintsMaxIterations>();
     group_control_fraction_tolerance_ = Parameters::Get<Parameters::GroupControlFractionTolerance<Scalar>>();
+    enable_group_tree_balancer_ = Parameters::Get<Parameters::EnableGroupTreeBalancer>();
+    group_tree_balancer_tolerance_ = Parameters::Get<Parameters::GroupTreeBalancerTolerance<Scalar>>();
 }
 
 template<class Scalar>
@@ -288,7 +290,10 @@ void BlackoilModelParameters<Scalar>::registerParameters()
     Parameters::Register<Parameters::NetworkSolver>
         ("How the injection networks are solved: fixedpoint relaxes the node pressures against "
          "the wells, newton solves pressures and rates simultaneously and falls back to the "
-         "fixed point when it does not converge");
+         "fixed point when it does not converge, group-tree solves the production network's "
+         "pressures against whatever configuration the group-tree balancer (--enable-group-tree-"
+         "balancer) most recently handed it and otherwise falls back to the fixed point "
+         "(production only; the fixed point still always runs too, so the two are comparable)");
     Parameters::Register<Parameters::NetworkAnalyticJacobian>
         ("Assemble the network Jacobian from the VFP table derivatives instead of differencing "
          "the residual (--network-solver=newton only)");
@@ -371,6 +376,12 @@ void BlackoilModelParameters<Scalar>::registerParameters()
 
     Parameters::Register<Parameters::GroupControlFractionTolerance<Scalar>>
         ("Tolerance for minimal allowed fraction for controlled phase before employing a fallback control");
+
+    Parameters::Register<Parameters::EnableGroupTreeBalancer>
+        ("Run the group-tree balancer (guide-rate-based Individual/Group control and target "
+         "distribution) after well controls change, while still within NUPCOL");
+    Parameters::Register<Parameters::GroupTreeBalancerTolerance<Scalar>>
+        ("Convergence tolerance for the group-tree balancer's own guide-rate distribution");
     // if openMP is available, use two threads per mpi rank by default
 #if _OPENMP
     Parameters::SetDefault<Parameters::ThreadsPerProcess>(2);

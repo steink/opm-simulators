@@ -139,12 +139,13 @@ update(const bool mandatory_network_balance,
         const bool refresh_group_data_between =
             has_domain(/*production=*/true) && has_domain(/*production=*/false);
         const auto& solver_mode = well_model_.param().network_solver_;
-        if (solver_mode != "fixedpoint" && solver_mode != "newton") {
+        if (solver_mode != "fixedpoint" && solver_mode != "newton" && solver_mode != "group-tree") {
             OPM_DEFLOG_THROW(std::runtime_error,
                              "Invalid value '" + solver_mode + "' for --network-solver; "
-                             "expected fixedpoint or newton", deferred_logger);
+                             "expected fixedpoint, newton or group-tree", deferred_logger);
         }
         this->useNewtonSolver(solver_mode == "newton");
+        this->useGroupTreeSolver(solver_mode == "group-tree");
         this->useAnalyticJacobian(well_model_.param().network_analytic_jacobian_);
         this->useNetworkGroupControl(well_model_.param().network_group_control_);
         this->useNetworkAutochoke(well_model_.param().network_autochoke_);

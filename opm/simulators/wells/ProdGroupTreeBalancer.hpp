@@ -22,7 +22,9 @@
 
 #include <opm/simulators/wells/ProdGroupTreeNode.hpp>
 
+#include <array>
 #include <map>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -63,12 +65,13 @@ struct FlatWellShare
 
 /// A reference from one Active node's own sum to another Active node found
 /// elsewhere in the same FlatNetworkInput (by name) -- either a well whose
-/// own limit binds (or, Part 1b, is stopped) or a nested group with its own
+/// own limit binds (or, Part 1b, is stopped, or is on the network's live THP
+/// control -- see FlatActiveNode::networkThp) or a nested group with its own
 /// separate target. Either way its own total is still physically part of
 /// this node's subtree and must count toward this node's sum, just scaled by
 /// the cumulative efficiency factor between the two, and NOT via this node's
-/// own lambda (the referenced node has its own row -- pinned, a THP row on a
-/// trial IPR, or its own group equation -- that already determines it).
+/// own lambda (the referenced node has its own row -- pinned, a live THP row,
+/// or its own group equation -- that already determines it).
 template<class Scalar>
 struct FlatChildRef
 {
@@ -84,31 +87,39 @@ struct FlatChildRef
 /// pass-through and never appears here at all: its wells are folded straight into
 /// the nearest Active ancestor's ownWells.
 ///
-/// A group's own target equation sums three kinds of contribution: ownWells
-/// (tied to this node's own lambda), thpWells (see below), and activeChildren
-/// -- every other Active node (well or nested group) found within this node's
-/// original subtree, referenced by name into the same FlatNetworkInput rather
-/// than further flattened, since each one's own total is already determined
-/// by its own separate entry. The flattening only ever collapses pass-through
+/// A group's own target equation sums two kinds of contribution: ownWells
+/// (tied to this node's own lambda -- always ProdNodeModeCategory::Group wells;
+/// GRUP and THP are mutually exclusive on a well's control mode, so a well
+/// counted here is never also a THP well) and activeChildren -- every other
+/// Active node (well or nested group) found within this node's original
+/// subtree, referenced by name into the same FlatNetworkInput rather than
+/// further flattened, since each one's own total is already determined by its
+/// own separate entry. The flattening only ever collapses pass-through
 /// layers; a genuine second binding constraint nested inside the first (of
 /// either kind) keeps its own entry.
 ///
-/// thpWells are wells this node's own guide-rate allocation would otherwise
-/// claim (ProdNodeModeCategory::Group) but that are actually on the network's
-/// THP control -- their rate is not g_w*lambda at all, it comes from their own
-/// bhp/thp/IPR row, genuinely responding to the network's pressures. They
-/// still count toward this node's sum (their production is still physically
-/// part of this node's subtree), just via a plain efficiency-scaled reference
-/// (FlatChildRef, the same shape as activeChildren, not FlatWellShare -- a THP
-/// well's own rate already comes from its own row, so unlike ownWells there is
-/// nothing here that ever needs unscaling). The balancer itself has no notion
-/// of THP control -- see extractFlatNetworkInput().
+/// A well-type entry (type == Well) has empty ownWells/activeChildren, and is
+/// exactly one of:
+///  - genuinely limit-bound (target > 0, pinned at that limit);
+///  - currently stopped (target == 0, from a zero Limits entry -- Part 1b);
+///  - on the network's live THP control (mode == THP && networkThp == true):
+///    target is not meaningful (there is nothing to pin -- its rate comes
+///    from its own bhp/thp/IPR row, genuinely responding to pressure). The
+///    balancer itself has no notion of this distinction (mode == THP alone
+///    covers both a fixed deck THP limit and a live network one); the caller
+///    supplies it via extractFlatNetworkInput()'s networkThpWells set.
+/// Which of the three applies is a fact the caller reads off target/mode/
+/// networkThp, since this function has no access to well state or IPR data
+/// to decide it itself.
 ///
-/// A well-type entry (type == Well) has empty ownWells/thpWells/activeChildren:
-/// it is either genuinely limit-bound (target > 0, pinned) or currently stopped
-/// (target == 0, from a zero Limits entry) -- which one is a fact the caller
-/// reads off target, since this function has no access to well state or IPR
-/// data to decide it itself.
+/// A satellite-group entry (type == Group, satelliteRates has a value) is a
+/// fourth, well-*like* case: a GSATPROD group has no wells of its own and no
+/// network node either (a satellite rate stands in for wells never modelled
+/// at all) -- its own subtree contributes a fixed, known rate to whichever
+/// ancestor references it, exactly like a pinned well's target does, just
+/// carried as the full three-phase rate rather than a single mode-projected
+/// scalar (a satellite's ancestor can be on any mode, not necessarily the
+/// satellite's own). ownWells/activeChildren are empty for this case too.
 template<class Scalar>
 struct FlatActiveNode
 {
@@ -116,8 +127,10 @@ struct FlatActiveNode
     ProdNodeType type{ProdNodeType::Well};
     Well::ProducerCMode mode{Well::ProducerCMode::CMODE_UNDEFINED};
     Scalar target{0};
+    bool networkThp{false};   // only meaningful when type == Well && mode == THP
+    std::array<Scalar, 3> resvCoeff{};   // [oil, water, gas]; RESV mode only, own or (if type == Well) ancestor's
+    std::optional<std::array<Scalar, 3>> satelliteRates;   // [oil, water, gas], positive = production
     std::vector<FlatWellShare<Scalar>> ownWells;
-    std::vector<FlatChildRef<Scalar>> thpWells;
     std::vector<FlatChildRef<Scalar>> activeChildren;
 };
 
@@ -133,17 +146,22 @@ using FlatNetworkInput = std::vector<FlatActiveNode<Scalar>>;
 /// ownWells' allocation weight -- is not reliably left on the tree node itself by
 /// balancing and has to be looked up the same way the balancer looks it up.
 ///
-/// \p thpControlledWells names every well the caller knows is on the network's
-/// THP control (e.g. from WellState's production_cmode) -- a fact the balancer
-/// itself has no way to know, since it was written without the network in mind
-/// and only ever distinguishes Individual from Group. Deliberately a plain name
-/// set rather than a WellState reference, so this header stays free of any
-/// network-specific type; the caller does that one lookup itself.
+/// \p networkThpWells names every Individual, mode == THP well the caller knows
+/// has a *network*-sourced (as opposed to deck-sourced) THP limit -- in the real
+/// integration, well->getDynamicThpLimit().has_value(). The balancer itself has
+/// no way to know this: it only ever populates mode == THP from the well's
+/// current strictest limit, with no notion of where that limit came from. A
+/// well named here gets FlatActiveNode::networkThp == true instead of an
+/// ordinary pin. Deliberately a plain name set rather than a WellInterface
+/// reference, so this header stays free of any well-model-specific type; the
+/// caller does that one lookup itself. Never consulted for a Group-category
+/// well: GRUP and THP are mutually exclusive on a well's control mode, so that
+/// case cannot arise.
 template<class Scalar>
 FlatNetworkInput<Scalar> extractFlatNetworkInput(const Tree<Scalar>& tree,
                                                  const std::string& rootName,
                                                  const GuideRate& guideRate,
-                                                 const std::unordered_set<std::string>& thpControlledWells = {});
+                                                 const std::unordered_set<std::string>& networkThpWells = {});
 
 /// Top-level entry point: build tree, balance it, validate, and apply.
 /// All internal functions are implementation details not exposed through this interface.
@@ -163,6 +181,45 @@ bool balanceTreeForTesting(Tree<Scalar>& tree,
                            const GuideRate& guideRate,
                            Scalar tol,
                            DeferredLogger& logger);
+
+/// The balanced tree runGroupTreeBalancer() builds internally, exposed so a
+/// caller that needs the tree itself (e.g. to flatten it via
+/// extractFlatNetworkInput() for a real network-pressure solve) can get at it
+/// without also going through runGroupTreeBalancer()'s own applyTreeToState()
+/// write-back, which is only appropriate for the no-network case.
+template<class Scalar>
+struct BalancedTree
+{
+    Tree<Scalar> tree;
+    bool success{true};   ///< runBalancingAlgorithm() converged (true if there was nothing to balance)
+    bool valid{true};     ///< checkTreeValidity() passed (true if there was nothing to balance)
+};
+
+/// buildTree() + runBalancingAlgorithm() + checkTreeValidity(), with the same
+/// rank-0 logging runGroupTreeBalancer() itself does -- everything
+/// runGroupTreeBalancer() does short of the final applyTreeToState() write-back.
+/// An empty \p limits (no active wells / no wells with positive potentials)
+/// short-circuits to an empty, trivially-valid result, same as
+/// runGroupTreeBalancer()'s own early return.
+template<class Scalar, typename IndexTraits>
+BalancedTree<Scalar> balanceGroupTree(BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
+                                      const SummaryState& summaryState,
+                                      int reportStep,
+                                      Scalar tol,
+                                      const std::unordered_map<std::string, std::pair<int, Scalar>>& limits,
+                                      DeferredLogger& logger);
+
+/// Write a balanced tree's rates/production_cmode/group targets directly
+/// into WellState/GroupState -- runGroupTreeBalancer()'s own write-back,
+/// exposed for a caller (Part 4's group-tree network path) that gets its
+/// tree from balanceGroupTree() instead: the correct mechanism whenever
+/// nothing else (a coupled network-pressure solve) is going to consume the
+/// balancer's output for this domain, per groups_and_network_clean.md's own
+/// "no network -> applyTreeToState" split.
+template<class Scalar, typename IndexTraits>
+void applyTreeToState(const Tree<Scalar>& tree,
+                      BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
+                      DeferredLogger& logger);
 
 template<class Scalar, typename IndexTraits>
 bool runGroupTreeBalancer(BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,

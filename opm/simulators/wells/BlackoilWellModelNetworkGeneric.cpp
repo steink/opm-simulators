@@ -889,6 +889,270 @@ newtonProductionNodePressures(const Network::ExtNetwork& network,
 }
 
 template<typename Scalar, typename IndexTraits>
+std::unordered_map<std::string, typename NetworkSolve::GroupTreeSystem<Scalar>::WellNetworkData>
+BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>::
+gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
+{
+    using Sys = NetworkSolve::GroupTreeSystem<Scalar>;
+    const auto& schedule = well_model_.schedule();
+    const auto& summary_state = well_model_.summaryState();
+
+    // Same reasoning as newtonProductionNodePressures(): every rank must end up
+    // with the same answer, so the static data comes from the replicated
+    // schedule and only what the well is currently doing is summed, contributed
+    // once by the rank that owns it.
+    std::map<std::string, const WellInterfaceGeneric<Scalar, IndexTraits>*> local;
+    for (const auto& well : well_model_.genericWells()) {
+        local.emplace(well->name(), well);
+    }
+
+    struct Candidate
+    {
+        std::string name;
+        int vfp_table;
+        Scalar efficiency;
+    };
+    std::vector<Candidate> candidates;
+    for (const auto& name : schedule.wellNames(reportStepIdx)) {
+        const auto& well = schedule.getWell(name, reportStepIdx);
+        if (!well.isProducer() || !well.predictionMode()) {
+            continue;
+        }
+        const auto controls = well.productionControls(summary_state);
+        candidates.push_back({name, controls.vfp_table_number,
+                              static_cast<Scalar>(well.getEfficiencyFactor(/*network=*/true))});
+    }
+
+    // Water, oil, gas positions in the well state's active-phase arrays --
+    // this class's own [oil, water, gas] convention (Sys::kOil == 0), unlike
+    // NetworkProductionSystem's [water, oil, gas] one.
+    const auto& pu = well_model_.phaseUsage();
+    std::array<int, Sys::NP> pos{};
+    pos[Sys::kOil]   = pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx);
+    pos[Sys::kWater] = pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx);
+    pos[Sys::kGas]   = pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx);
+    if (std::any_of(pos.begin(), pos.end(), [](const int p) { return p < 0; })) {
+        return {};   // needs all three phases active, same as the Newton builder
+    }
+
+    // Per candidate: present, usable ipr, three ipr_a, three ipr_b, efficiency
+    // scaling, has a network-sourced (dynamic) thp limit.
+    constexpr int kEntries = 10;
+    std::vector<Scalar> shared(candidates.size() * kEntries, Scalar{0});
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        const auto it = local.find(candidates[i].name);
+        if (it == local.end() || !it->second->parallelWellInfo().isOwner()) {
+            continue;
+        }
+        const auto& ws = well_model_.wellState()[it->second->indexOfWell()];
+        if (ws.status != WellStatus::OPEN) {
+            continue;
+        }
+        Scalar* e = &shared[i * kEntries];
+        e[0] = Scalar{1};
+        if (static_cast<int>(ws.implicit_ipr_b.size()) >= pu.numActivePhases()
+            && ws.implicit_ipr_b[pos[Sys::kOil]] > Scalar{0}) {
+            e[1] = Scalar{1};
+            for (int ph = 0; ph < Sys::NP; ++ph) {
+                // ws holds q = b*bhp - a in opm's signed rates (production
+                // negative); GroupTreeSystem wants production positive and
+                // falling with bhp -- the same line negated.
+                e[2 + ph] = ws.implicit_ipr_a[pos[ph]];
+                e[5 + ph] = -ws.implicit_ipr_b[pos[ph]];
+            }
+        }
+        e[8] = ws.efficiency_scaling_factor;
+        // Individual + THP is the only case this ever matters for (see
+        // extractFlatNetworkInput()'s own doc comment on networkThpWells);
+        // harmless to compute unconditionally for every well.
+        e[9] = it->second->getDynamicThpLimit().has_value() ? Scalar{1} : Scalar{0};
+    }
+    well_model_.comm().sum(shared.data(), shared.size());
+
+    std::unordered_map<std::string, typename Sys::WellNetworkData> result;
+    result.reserve(candidates.size());
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        const Scalar* e = &shared[i * kEntries];
+        if (e[0] <= Scalar{0} || e[1] <= Scalar{0}) {
+            continue;   // shut on every rank, or no usable inflow performance
+        }
+        typename Sys::WellNetworkData data;
+        data.efficiency = candidates[i].efficiency * e[8];
+        data.vfp_table = candidates[i].vfp_table;
+        // Unlike NetworkProductionSystem (well_vfp_dp_, the tubing table's datum
+        // vs. the well's own reference-depth hydrostatic correction),
+        // GroupTreeSystem has nowhere to apply this correction yet -- a real,
+        // if likely small, gap for the "unproblematic wells" scope, not
+        // something this gather can paper over on its own.
+        // The alq a Thp well's tubing table sees is decided elsewhere (WLIFTOPT
+        // gas lift, or a fixed deck value); left at its default (0) here, same
+        // as every "unproblematic wells" test so far -- revisit once gas lift
+        // needs to reach GroupTreeSystem's own solve.
+        for (int ph = 0; ph < Sys::NP; ++ph) {
+            data.ipr_a[ph] = e[2 + ph];
+            data.ipr_b[ph] = e[5 + ph];
+        }
+        data.network_thp = e[9] > Scalar{0};
+        result.emplace(candidates[i].name, std::move(data));
+    }
+    return result;
+}
+
+template<typename Scalar, typename IndexTraits>
+std::optional<std::map<std::string, Scalar>>
+BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>::
+groupTreeProductionNodePressures(const Network::ExtNetwork& network,
+                                 const int reportStepIdx,
+                                 const Network::Node& root,
+                                 const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree) const
+{
+    OPM_TIMEFUNCTION();
+    using Sys = NetworkSolve::GroupTreeSystem<Scalar>;
+
+    auto giveUp = [&](const std::string& why) {
+        OpmLog::debug(fmt::format("Network: solving the production network via the group-tree "
+                                  "balancer is not possible at report step {} ({}); using the "
+                                  "relaxed update.", reportStepIdx, why));
+        return std::optional<std::map<std::string, Scalar>>{};
+    };
+
+    if (!root.terminal_pressure().has_value()) {
+        return giveUp(fmt::format("the tree under {} has no terminal pressure", root.name()));
+    }
+    if (balancedTree.count(root.name()) == 0) {
+        return giveUp(fmt::format("{} is not a node in the balanced group tree", root.name()));
+    }
+
+    const auto& schedule = well_model_.schedule();
+    Sys system(*well_model_.getVFPProperties().getProd());
+    system.setTerminalPressure(*root.terminal_pressure());
+
+    // Nodes, parents before children -- same walk as
+    // newtonProductionNodePressures(), minus autochoke (GroupTreeSystem has
+    // no choke-target mechanism) and satellite-production network nodes
+    // (GroupTreeSystem has no setNodeSource() equivalent; a satellite that
+    // is not itself a network node is handled separately, as a group-tree
+    // leaf -- see this function's own doc comment).
+    std::map<std::string, int> index;
+    std::vector<std::string> order{root.name()};
+    system.addNode(NetworkSolve::Node{order.front(), -1, NetworkSolve::NoTable});
+    index[order.front()] = 0;
+    for (std::size_t at = 0; at < order.size(); ++at) {
+        for (const auto& branch : network.downtree_branches(order[at])) {
+            const auto& child = branch.downtree_node();
+            if (index.count(child)) {
+                continue;
+            }
+            index[child] = static_cast<int>(order.size());
+            order.push_back(child);
+            const auto& child_node = network.node(child);
+            if (child_node.terminal_pressure().has_value()) {
+                return giveUp(fmt::format("{} is a fixed-pressure node below the root", child));
+            }
+            if (child_node.as_choke()) {
+                return giveUp(fmt::format("{} is an autochoke node (not supported by the "
+                                          "group-tree solver)", child));
+            }
+            if (schedule.getGroup(child, reportStepIdx).hasSatelliteProduction()) {
+                return giveUp(fmt::format("{} is a satellite-production network node (not "
+                                          "supported by the group-tree solver)", child));
+            }
+            const auto& units = schedule.getUnits();
+            Scalar alq = 0.0;
+            if (branch.vfp_table().has_value()) {
+                const auto& table = well_model_.getVFPProperties().getProd()->getTable(*branch.vfp_table());
+                alq = branch.alq_value(VFPProdTable::ALQDimension(table.getALQType(), units)).value_or(0.0);
+            }
+            NetworkSolve::Node node{child, static_cast<int>(at), branch.vfp_table().value_or(NetworkSolve::NoTable)};
+            node.efficiency = child_node.efficiency();
+            system.addNode(std::move(node), alq);
+        }
+    }
+
+    // The balancer's own tree does not need to coincide with the network's:
+    // flatten it starting from this network root's own name, so a well
+    // belonging to a different root's subtree cannot leak into this one's
+    // well-data lookup below.
+    std::unordered_set<std::string> networkThpWells;
+    const auto wellNetworkData = gatherWellNetworkDataForGroupTree(reportStepIdx);
+    for (const auto& [name, data] : wellNetworkData) {
+        if (data.network_thp) {
+            networkThpWells.insert(name);
+        }
+    }
+    const auto flat = ProdGroupTreeBalancer::extractFlatNetworkInput(
+        balancedTree, root.name(), well_model_.guideRate(), networkThpWells);
+    if (flat.empty()) {
+        return giveUp(fmt::format("nothing under {} is Active in the balanced tree", root.name()));
+    }
+
+    // Resolve each well's own network node (Well::groupName(), the same
+    // convention newtonProductionNodePressures() uses) into this system's
+    // own node index, so populateFromFlatNetwork() gets WellNetworkData with
+    // a real node field rather than gatherWellNetworkDataForGroupTree()'s own
+    // placeholder 0. Every well flat references (ownWells, plus every
+    // top-level type == Well entry that is not a satellite) must resolve --
+    // populateFromFlatNetwork() looks each one up unconditionally, and a
+    // silently-excluded well would either throw there or, worse, just have
+    // its rate go missing from whatever ancestor sum needed it. One
+    // unresolvable well gives up the whole tree, the same as any other
+    // configuration this system cannot yet represent.
+    std::unordered_map<std::string, typename Sys::WellNetworkData> resolved;
+    auto resolveWell = [&](const std::string& name) -> bool {
+        if (resolved.count(name)) {
+            return true;
+        }
+        const auto it = wellNetworkData.find(name);
+        if (it == wellNetworkData.end() || !schedule.hasWell(name, reportStepIdx)) {
+            return false;
+        }
+        const auto& node_name = schedule.getWell(name, reportStepIdx).groupName();
+        const auto node_it = index.find(node_name);
+        if (node_it == index.end()) {
+            return false;
+        }
+        auto data = it->second;
+        data.node = node_it->second;
+        resolved.emplace(name, std::move(data));
+        return true;
+    };
+    for (const auto& entry : flat) {
+        for (const auto& w : entry.ownWells) {
+            if (!resolveWell(w.name)) {
+                return giveUp(fmt::format("{} has no usable network-side data", w.name));
+            }
+        }
+        if (entry.type == ProdNodeType::Well && !entry.satelliteRates.has_value()
+            && !resolveWell(entry.name)) {
+            return giveUp(fmt::format("{} has no usable network-side data", entry.name));
+        }
+    }
+
+    system.populateFromFlatNetwork(flat, resolved);
+    system.finalize();
+
+    std::vector<Scalar> guess(system.numNodes());
+    for (std::size_t n = 1; n < order.size(); ++n) {
+        const auto it = this->nodePressures(details::NetworkDomain::Production).find(order[n]);
+        guess[n - 1] = (it != this->nodePressures(details::NetworkDomain::Production).end())
+            ? it->second : *root.terminal_pressure();
+    }
+
+    const auto result = NetworkSolve::solve(system, guess, kNetworkSolveParams<Scalar>, NetworkSolve::FullStep{});
+    if (!result.converged) {
+        return giveUp(fmt::format("it did not converge in {} iterations", result.iterations - 1));
+    }
+    OpmLog::debug(fmt::format("Network: solved the production network under {} via the group-tree "
+                              "balancer at report step {} in {} iterations.",
+                              root.name(), reportStepIdx, result.iterations));
+    std::map<std::string, Scalar> pressures;
+    for (std::size_t n = 0; n < order.size(); ++n) {
+        pressures[order[n]] = result.node_pressure[n];
+    }
+    return pressures;
+}
+
+template<typename Scalar, typename IndexTraits>
 std::optional<std::array<Scalar, 4>>
 BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>::
 gasLiftTrial(const std::string& well, const Scalar alq) const
@@ -1044,6 +1308,22 @@ updatePressures(const int reportStepIdx,
                                 && network.network.get().node(name).as_choke()) {
                                 well_model_.groupState().update_well_group_thp(name, pressure);
                             }
+                        }
+                    }
+                }
+            } else if (this->group_tree_solver_ && this->balanced_group_tree_.has_value()) {
+                // Same per-root, keep-the-relaxed-answer-on-decline pattern as
+                // the Newton branch above; the balanced tree is one outer
+                // iteration old (see setBalancedGroupTree()'s own doc comment),
+                // not this one's, since the balancer runs after updatePressures()
+                // in the very iteration that produced it.
+                for (const auto& tree : network.network.get().roots()) {
+                    if (auto solved = this->groupTreeProductionNodePressures(
+                            network.network.get(), reportStepIdx, tree.get(), *this->balanced_group_tree_)) {
+                        for (const auto& [name, pressure] : *solved) {
+                            result.node_pressures[name] = pressure;
+                            result.invalid_nodes.erase(name);
+                            solved_nodes[details::domainIndex(network.domain)].insert(name);
                         }
                     }
                 }

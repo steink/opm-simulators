@@ -180,6 +180,9 @@ struct NewtonMinIterations { static constexpr int value = 2; };
 struct WellGroupConstraintsMaxIterations { static constexpr int value = 1; };
 template<class Scalar>
 struct GroupControlFractionTolerance { static constexpr Scalar value = 1e-4; };
+struct EnableGroupTreeBalancer { static constexpr bool value = false; };
+template<class Scalar>
+struct GroupTreeBalancerTolerance { static constexpr Scalar value = 1e-4; };
 template<class Scalar>
 struct LocalToleranceScalingMb { static constexpr Scalar value = 1.0; };
 
@@ -404,6 +407,12 @@ public:
 
     /// Lower tolerance for the guiderate ratio or well-fraction of active phase before switching to group fallback control
     Scalar group_control_fraction_tolerance_;
+
+    /// Run the group-tree balancer (ProdGroupTreeBalancer) after well controls change, within nupcol
+    bool enable_group_tree_balancer_;
+
+    /// Convergence tolerance for the group-tree balancer's own guide-rate distribution
+    Scalar group_tree_balancer_tolerance_;
 
     /// Nonlinear solver type: newton or nldd
     std::string nonlinear_solver_;

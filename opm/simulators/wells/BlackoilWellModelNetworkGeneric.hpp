@@ -31,8 +31,10 @@
 
 #include <opm/simulators/flow/NewtonIterationContext.hpp>
 #include <opm/simulators/wells/NetworkNodePressureUpdater.hpp>
+#include <opm/simulators/wells/NetworkGroupTreeSystem.hpp>
 #include <opm/simulators/wells/NetworkInjectionSystem.hpp>
 #include <opm/simulators/wells/NetworkProductionSystem.hpp>
+#include <opm/simulators/wells/ProdGroupTreeBalancer.hpp>
 #include <opm/simulators/utils/ParallelCommunication.hpp>
 
 #include <array>
@@ -41,6 +43,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <unordered_map>
 
 namespace Opm {
     class Schedule;
@@ -210,6 +213,30 @@ public:
     void useNewtonSolver(const bool on) { newton_solver_ = on; }
     bool usesNewtonSolver() const { return newton_solver_; }
 
+    /// Solve the production network's group-tree-driven system (ProdGroupTreeBalancer
+    /// + NetworkSolve::GroupTreeSystem) instead of relaxing the node pressures against
+    /// the wells. Off by default; --network-solver=group-tree turns it on. Layered the
+    /// same way as useNewtonSolver() -- the fixed-point answer is still always computed
+    /// first, so the two solvers can be compared -- but production-only: it has no
+    /// injection-network equivalent.
+    void useGroupTreeSolver(const bool on) { group_tree_solver_ = on; }
+    bool usesGroupTreeSolver() const { return group_tree_solver_; }
+
+    /// The group-tree balancer runs later in the outer iteration than
+    /// updatePressures() (it needs this iteration's own updateWellControls()
+    /// to have already run -- see BlackoilWellModel::updateWellControlsAndNetworkIteration()'s
+    /// own ordering comment), so groupTreeProductionNodePressures() always
+    /// works from the balanced tree the *previous* call to this function
+    /// produced, not the current one -- the same one-iteration lag every
+    /// other cross-call dependency in this outer loop already tolerates
+    /// (e.g. last_production_solve_'s own sub-iteration freezing). The
+    /// caller sets this only when usesGroupTreeSolver() and a production
+    /// network are both active for this domain; it is otherwise unused.
+    void setBalancedGroupTree(ProdGroupTreeBalancer::Tree<Scalar> tree)
+    {
+        balanced_group_tree_ = std::move(tree);
+    }
+
     /// Assemble the network Jacobian from the VFP table derivatives instead of
     /// differencing the residual.
     void useAnalyticJacobian(const bool on) { analytic_jacobian_ = on; }
@@ -339,7 +366,46 @@ protected:
                                   const int reportStepIdx,
                                   const Network::Node& root) const;
 
+    /// The per-well data NetworkSolve::GroupTreeSystem::WellNetworkData needs
+    /// (vfp table, alq, ipr_a/b, network-branch efficiency), gathered the same
+    /// MPI-safe way newtonProductionNodePressures() gathers its own well data:
+    /// replicated static facts from the schedule, dynamic facts summed once
+    /// from whichever rank owns the well, so every rank ends up with the same
+    /// answer regardless of who owns what. Keyed by well name, not node index
+    /// -- this function knows nothing about the network topology (which node
+    /// each well hangs off, or how nodes map to GroupTreeSystem indices) --
+    /// the caller resolves that itself once the topology is built. A well
+    /// left out of the returned map is either not an open producer in
+    /// prediction mode, or has no usable inflow performance yet.
+    std::unordered_map<std::string, typename NetworkSolve::GroupTreeSystem<Scalar>::WellNetworkData>
+    gatherWellNetworkDataForGroupTree(const int reportStepIdx) const;
+
+    /// Build and solve NetworkSolve::GroupTreeSystem for one production
+    /// network root, from an already-balanced group tree (built and cached
+    /// by the caller -- see ProdGroupTreeBalancer::balanceGroupTree()). Same
+    /// overall shape as newtonProductionNodePressures(): walk the network
+    /// topology, gather well data, assemble, solve. \p balancedTree is
+    /// flattened with extractFlatNetworkInput() scoped to root.name() (not
+    /// always "FIELD"), so a well belonging to a different network root's
+    /// own subtree never leaks into this one's well-data lookup. Returns
+    /// nullopt (and logs why, at debug level) on anything this system
+    /// cannot yet represent -- a choke node, or a satellite production
+    /// group that is *also* a network node (GroupTreeSystem has no
+    /// setNodeSource() equivalent for injecting a rate directly into a
+    /// node's own flow balance; a satellite that is *not* a network node at
+    /// all is already handled, as an ordinary group-tree leaf, by
+    /// ProdGroupTreeBalancer::FlatActiveNode::satelliteRates) -- the caller
+    /// then keeps the fixed-point answer for this tree, exactly like a
+    /// declined Newton solve.
+    std::optional<std::map<std::string, Scalar>>
+    groupTreeProductionNodePressures(const Network::ExtNetwork& network,
+                                     const int reportStepIdx,
+                                     const Network::Node& root,
+                                     const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree) const;
+
     bool newton_solver_ = false;
+    bool group_tree_solver_ = false;
+    std::optional<ProdGroupTreeBalancer::Tree<Scalar>> balanced_group_tree_;
     bool analytic_jacobian_ = false;
     bool network_group_control_ = false;
     bool network_autochoke_ = false;

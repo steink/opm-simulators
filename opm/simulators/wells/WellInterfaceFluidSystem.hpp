@@ -93,6 +93,22 @@ protected:
                                     const std::optional<Well::InjectionControls>& inj_controls = std::nullopt,
                                     const std::optional<Well::ProductionControls>& prod_controls = std::nullopt) const;
 
+    //! \brief Forwards to WellConstraints, injecting this well's own reservoir-voidage
+    //! conversion -- see WellConstraints::estimateStrictestProductionConstraint.
+    std::pair<Well::ProducerCMode, typename FluidSystem::Scalar>
+    estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
+                                      const Well::ProductionControls& controls,
+                                      const bool check_group_constraints,
+                                      DeferredLogger& deferred_logger,
+                                      const std::optional<Scalar> bhp_at_thp_limit) const;
+
+    //! \brief Forwards to WellConstraints::estimateStrictestProductionRateConstraint.
+    std::pair<Well::ProducerCMode, typename FluidSystem::Scalar>
+    estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
+                                              const Well::ProductionControls& controls,
+                                              const bool check_group_constraints,
+                                              DeferredLogger& deferred_logger) const;
+
     bool checkGroupConstraints(const GroupStateHelperType& groupStateHelper,
                                const Schedule& schedule,
                                const SummaryState& summaryState,

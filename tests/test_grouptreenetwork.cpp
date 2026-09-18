@@ -170,18 +170,13 @@ void logFlat(const ProdGroupTreeBalancer::FlatNetworkInput<double>& flat)
         for (const auto& w : n.ownWells) {
             wells += fmt::format(" {}(g={:.6g},eff={:.3f})", w.name, w.guideRate, w.efficiency);
         }
-        std::string thp;
-        for (const auto& w : n.thpWells) {
-            thp += fmt::format(" {}(eff={:.3f})", w.name, w.efficiency);
-        }
         std::string children;
         for (const auto& c : n.activeChildren) {
             children += fmt::format(" {}(eff={:.3f})", c.name, c.efficiency);
         }
-        BOOST_TEST_MESSAGE(fmt::format("  {:6s} target={:.1f}  ownWells:{}  thpWells:{}  activeChildren:{}",
-                                        n.name, n.target * 86400.0,
+        BOOST_TEST_MESSAGE(fmt::format("  {:6s} target={:.1f} networkThp={}  ownWells:{}  activeChildren:{}",
+                                        n.name, n.target * 86400.0, n.networkThp,
                                         wells.empty() ? " (none)" : wells,
-                                        thp.empty() ? " (none)" : thp,
                                         children.empty() ? " (none)" : children));
     }
 }
@@ -400,45 +395,215 @@ BOOST_AUTO_TEST_CASE(flat_extraction_with_a_nested_active_group)
     BOOST_CHECK_CLOSE(gp1.target * 86400.0, 1800.0, 1e-6);
 }
 
-// The balancer has no notion of THP control -- it categorized W2 as Group,
-// same as W1 -- but the caller knows (from WellState, in the real
-// integration) that W2 is actually on the network's THP control. Extraction
-// must move it from ownWells (tied to PLAT's lambda) to thpWells (still
-// counted in PLAT's sum, but via efficiency alone, since its rate answers to
-// its own bhp/thp/IPR row, not to a guide-rate share of PLAT's target).
-BOOST_AUTO_TEST_CASE(thp_controlled_well_is_not_tied_to_the_lambda)
+// A hand-built tree (bypassing the balancer, same pattern as
+// buildNestedActiveTree): PLAT (Individual, ORAT target) owns W1 (Group,
+// guide-tied) directly and references W2 -- Individual, mode == THP -- as an
+// active child, since W2's production still counts toward PLAT's own target
+// even though W2's own row determines its rate. GRUP and THP are mutually
+// exclusive on a well's control mode, so a THP well can only ever be reached
+// through activeChildren, never ownWells -- see ProdGroupTreeBalancer.hpp's
+// FlatActiveNode doc comment.
+ProdGroupTreeBalancer::Tree<double> buildTreeWithThpWell()
+{
+    const std::map<std::string, std::string> parent{{"PLAT", "FIELD"}, {"W1", "PLAT"}, {"W2", "PLAT"}};
+
+    ProdGroupTreeBalancer::Tree<double> tree;
+    {
+        ProdGroupTreeNode<double> n;
+        n.name = "FIELD";
+        n.type = ProdNodeType::Group;
+        n.children = {"PLAT"};
+        n.availableForGroupControl = true;
+        n.modeCategory = ProdNodeModeCategory::None;
+        tree.emplace(n.name, std::move(n));
+    }
+    {
+        ProdGroupTreeNode<double> n;
+        n.name = "PLAT";
+        n.type = ProdNodeType::Group;
+        n.parent = "FIELD";
+        n.children = {"W1", "W2"};
+        n.availableForGroupControl = true;
+        n.modeCategory = ProdNodeModeCategory::Individual;
+        n.mode = Well::ProducerCMode::ORAT;
+        n.preferredMode = Group::ProductionCMode::ORAT;
+        n.Limits[Well::ProducerCMode::ORAT] = 3000.0 / 86400.0;
+        n.rates = {-3000.0 / 86400.0, 0.0, 0.0};
+        n.initialRates = n.rates;
+        tree.emplace(n.name, std::move(n));
+    }
+    {
+        ProdGroupTreeNode<double> n;
+        n.name = "W1";
+        n.type = ProdNodeType::Well;
+        n.parent = "PLAT";
+        n.availableForGroupControl = true;
+        n.mode = Well::ProducerCMode::GRUP;
+        n.modeCategory = ProdNodeModeCategory::Group;
+        n.hasGuideRate = true;
+        n.rates = {-2000.0 / 86400.0, 0.0, 0.0};
+        n.initialRates = n.rates;
+        tree.emplace(n.name, std::move(n));
+    }
+    {
+        ProdGroupTreeNode<double> n;
+        n.name = "W2";
+        n.type = ProdNodeType::Well;
+        n.parent = "PLAT";
+        n.availableForGroupControl = true;
+        n.mode = Well::ProducerCMode::THP;
+        n.modeCategory = ProdNodeModeCategory::Individual;
+        n.Limits[Well::ProducerCMode::THP] = 200.0;   // bar, a placeholder magnitude
+        n.rates = {-1000.0 / 86400.0, 0.0, 0.0};
+        n.initialRates = n.rates;
+        tree.emplace(n.name, std::move(n));
+    }
+    return tree;
+}
+
+// mode == THP alone does not say whether the limit is deck- or network-
+// sourced -- extractFlatNetworkInput() needs the caller's networkThpWells set
+// to tell the two apart (see the doc comment on that parameter).
+BOOST_AUTO_TEST_CASE(deck_thp_well_is_pinned_at_its_limit)
 {
     Opm::Parser parser;
     const auto deck = parser.parseString(kEmptyDeck);
     const EclipseState es{deck};
     const Schedule schedule{deck, es};
     GuideRate guide_rate{schedule};
-    DeferredLogger logger;
-    const std::vector<std::string> wnames{"W1", "W2", "W3"};
-    const std::array<double, 3> guide{1.0, 1.0, 1.0};
-    for (std::size_t i = 0; i < wnames.size(); ++i) {
-        guide_rate.compute(wnames[i], 0, 0.0, guide[i] / 86400.0, 0.0, 0.0);
-    }
+    guide_rate.compute("W1", 0, 0.0, 1.0 / 86400.0, 0.0, 0.0);
 
-    auto tree = buildTree(/*target=*/3000.0, /*cap=*/{2000.0, 2000.0, 400.0}, guide);
-    BOOST_REQUIRE(ProdGroupTreeBalancer::balanceTreeForTesting(tree, guide_rate, 1e-8, logger));
-    BOOST_REQUIRE(tree.at("W2").modeCategory == ProdNodeModeCategory::Group);   // the balancer's own view
-
-    const std::unordered_set<std::string> thpControlled{"W2"};
-    const auto flat = ProdGroupTreeBalancer::extractFlatNetworkInput(tree, std::string("FIELD"),
-                                                                      guide_rate, thpControlled);
-    BOOST_TEST_MESSAGE("Flattened (W2 reclassified as THP-controlled):");
+    auto tree = buildTreeWithThpWell();
+    const auto flat = ProdGroupTreeBalancer::extractFlatNetworkInput(tree, std::string("FIELD"), guide_rate);
+    BOOST_TEST_MESSAGE("Flattened (W2 on deck THP):");
     logFlat(flat);
 
     BOOST_REQUIRE_EQUAL(flat.size(), 2U);
     const auto& plat = (flat[0].name == "PLAT") ? flat[0] : flat[1];
-    BOOST_CHECK_EQUAL(plat.name, "PLAT");
+    const auto& w2 = (flat[0].name == "W2") ? flat[0] : flat[1];
 
-    // W1 stays a normal ownWell; W2 moves to thpWells, a plain efficiency-scaled
-    // reference (1.0 here), not a guide-rate allocation.
     BOOST_REQUIRE_EQUAL(plat.ownWells.size(), 1U);
     BOOST_CHECK_EQUAL(plat.ownWells.front().name, "W1");
-    BOOST_REQUIRE_EQUAL(plat.thpWells.size(), 1U);
-    BOOST_CHECK_EQUAL(plat.thpWells.front().name, "W2");
-    BOOST_CHECK_CLOSE(plat.thpWells.front().efficiency, 1.0, 1e-6);
+    BOOST_REQUIRE_EQUAL(plat.activeChildren.size(), 1U);
+    BOOST_CHECK_EQUAL(plat.activeChildren.front().name, "W2");
+
+    BOOST_CHECK_EQUAL(w2.name, "W2");
+    BOOST_CHECK(w2.type == ProdNodeType::Well);
+    BOOST_CHECK(w2.mode == Well::ProducerCMode::THP);
+    BOOST_CHECK(!w2.networkThp);
+    BOOST_CHECK_CLOSE(w2.target, 200.0, 1e-6);
+}
+
+BOOST_AUTO_TEST_CASE(network_thp_well_is_flagged_instead_of_pinned)
+{
+    Opm::Parser parser;
+    const auto deck = parser.parseString(kEmptyDeck);
+    const EclipseState es{deck};
+    const Schedule schedule{deck, es};
+    GuideRate guide_rate{schedule};
+    guide_rate.compute("W1", 0, 0.0, 1.0 / 86400.0, 0.0, 0.0);
+
+    auto tree = buildTreeWithThpWell();
+    const std::unordered_set<std::string> networkThp{"W2"};
+    const auto flat = ProdGroupTreeBalancer::extractFlatNetworkInput(tree, std::string("FIELD"),
+                                                                      guide_rate, networkThp);
+    BOOST_TEST_MESSAGE("Flattened (W2 on network THP):");
+    logFlat(flat);
+
+    BOOST_REQUIRE_EQUAL(flat.size(), 2U);
+    const auto& w2 = (flat[0].name == "W2") ? flat[0] : flat[1];
+    BOOST_CHECK_EQUAL(w2.name, "W2");
+    BOOST_CHECK(w2.networkThp);
+}
+
+// A GSATPROD satellite group: no wells, no network node, just a fixed rate
+// standing in for wells never modelled. Hand-built directly with isSatellite
+// set and all three phases nonzero (not just oil), since a satellite's whole
+// point is to contribute all three regardless of whichever mode its
+// referencing ancestor happens to be on -- see FlatActiveNode's own doc
+// comment on why this can't be a single mode-projected scalar like an
+// ordinary pinned well's target.
+BOOST_AUTO_TEST_CASE(satellite_group_contributes_a_fixed_three_phase_rate)
+{
+    const std::map<std::string, std::string> parent{{"PLAT", "FIELD"}, {"W1", "PLAT"}, {"SAT", "PLAT"}};
+
+    ProdGroupTreeBalancer::Tree<double> tree;
+    {
+        ProdGroupTreeNode<double> n;
+        n.name = "FIELD";
+        n.type = ProdNodeType::Group;
+        n.children = {"PLAT"};
+        n.availableForGroupControl = true;
+        n.modeCategory = ProdNodeModeCategory::None;
+        tree.emplace(n.name, std::move(n));
+    }
+    {
+        ProdGroupTreeNode<double> n;
+        n.name = "PLAT";
+        n.type = ProdNodeType::Group;
+        n.parent = "FIELD";
+        n.children = {"W1", "SAT"};
+        n.availableForGroupControl = true;
+        n.modeCategory = ProdNodeModeCategory::Individual;
+        n.mode = Well::ProducerCMode::ORAT;
+        n.preferredMode = Group::ProductionCMode::ORAT;
+        n.Limits[Well::ProducerCMode::ORAT] = 3000.0 / 86400.0;
+        n.rates = {-3000.0 / 86400.0, 0.0, 0.0};
+        n.initialRates = n.rates;
+        tree.emplace(n.name, std::move(n));
+    }
+    {
+        ProdGroupTreeNode<double> n;
+        n.name = "W1";
+        n.type = ProdNodeType::Well;
+        n.parent = "PLAT";
+        n.availableForGroupControl = true;
+        n.mode = Well::ProducerCMode::GRUP;
+        n.modeCategory = ProdNodeModeCategory::Group;
+        n.hasGuideRate = true;
+        n.rates = {-2000.0 / 86400.0, 0.0, 0.0};
+        n.initialRates = n.rates;
+        tree.emplace(n.name, std::move(n));
+    }
+    {
+        ProdGroupTreeNode<double> n;
+        n.name = "SAT";
+        n.type = ProdNodeType::Group;
+        n.parent = "PLAT";
+        n.isSatellite = true;
+        n.availableForGroupControl = false;
+        n.modeCategory = ProdNodeModeCategory::Individual;
+        n.rates = {-1000.0 / 86400.0, -50.0 / 86400.0, -200.0 / 86400.0};   // oil, water, gas
+        n.initialRates = n.rates;
+        tree.emplace(n.name, std::move(n));
+    }
+
+    Opm::Parser parser;
+    const auto deck = parser.parseString(kEmptyDeck);
+    const EclipseState es{deck};
+    const Schedule schedule{deck, es};
+    GuideRate guide_rate{schedule};
+    guide_rate.compute("W1", 0, 0.0, 1.0 / 86400.0, 0.0, 0.0);
+
+    const auto flat = ProdGroupTreeBalancer::extractFlatNetworkInput(tree, std::string("FIELD"), guide_rate);
+    BOOST_TEST_MESSAGE("Flattened (SAT is a satellite group):");
+    logFlat(flat);
+
+    BOOST_REQUIRE_EQUAL(flat.size(), 2U);
+    const auto& plat = (flat[0].name == "PLAT") ? flat[0] : flat[1];
+    const auto& sat = (flat[0].name == "SAT") ? flat[0] : flat[1];
+
+    BOOST_REQUIRE_EQUAL(plat.ownWells.size(), 1U);
+    BOOST_CHECK_EQUAL(plat.ownWells.front().name, "W1");
+    BOOST_REQUIRE_EQUAL(plat.activeChildren.size(), 1U);
+    BOOST_CHECK_EQUAL(plat.activeChildren.front().name, "SAT");
+
+    BOOST_CHECK_EQUAL(sat.name, "SAT");
+    BOOST_CHECK(sat.type == ProdNodeType::Group);
+    BOOST_CHECK(sat.ownWells.empty());
+    BOOST_CHECK(sat.activeChildren.empty());
+    BOOST_REQUIRE(sat.satelliteRates.has_value());
+    BOOST_CHECK_CLOSE((*sat.satelliteRates)[0] * 86400.0, 1000.0, 1e-6);   // oil
+    BOOST_CHECK_CLOSE((*sat.satelliteRates)[1] * 86400.0, 50.0, 1e-6);    // water
+    BOOST_CHECK_CLOSE((*sat.satelliteRates)[2] * 86400.0, 200.0, 1e-6);   // gas
 }

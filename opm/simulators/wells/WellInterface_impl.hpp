@@ -45,8 +45,10 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstddef>
 #include <numbers>
+#include <numeric>
 #include <utility>
 
 #include <fmt/format.h>
@@ -104,8 +106,92 @@ namespace Opm
         this->changed_to_open_this_step_ = changed_to_open_this_step;
     }
 
+    template<typename TypeTag>
+    std::optional<std::pair<Well::ProducerCMode, typename WellInterface<TypeTag>::Scalar>>
+    WellInterface<TypeTag>::
+    estimateStrictestProductionLimitForBalancer(const WellStateType& well_state,
+                                                const SummaryState& summary_state,
+                                                DeferredLogger& deferred_logger) const
+    {
+        if (!this->isProducer()) {
+            return std::nullopt;
+        }
 
+        const auto& ws = well_state.well(this->index_of_well_);
+        const auto controls = this->wellEcl().productionControls(summary_state);
 
+        std::optional<Scalar> bhp_at_thp_limit;
+
+        // Can't trust ipr in the zero-rate case (the well is likely under zero-rate constraint),
+        // so ignore pressure-constraints in this case.
+        const auto tot_rates = std::accumulate(ws.surface_rates.begin(), ws.surface_rates.end(), Scalar(0));
+        if (std::abs(tot_rates) > Scalar(0)) {
+            if (controls.hasControl(Well::ProducerCMode::BHP)) {
+                bhp_at_thp_limit = controls.bhp_limit;
+            }
+
+            WellBhpThpCalculator<Scalar, IndexTraits> calc(*this);
+            if (calc.wellHasTHPConstraints(summary_state)) {
+                const auto stable_bhp = calc.estimateStableBhp(well_state,
+                                                            this->wellEcl(),
+                                                            ws.surface_rates,
+                                                            this->getRefDensity(),
+                                                            summary_state);
+                if (!stable_bhp.has_value()) {
+                    return std::nullopt;
+                }
+                if (!bhp_at_thp_limit.has_value() || *stable_bhp > *bhp_at_thp_limit) {
+                    bhp_at_thp_limit = stable_bhp;
+                }
+            }
+        }
+
+        const auto [strictest_mode, strictest_scale] =
+            this->estimateStrictestProductionConstraint(ws,
+                                                        controls,
+                                                        /*check_group_constraints=*/false,
+                                                        deferred_logger,
+                                                        bhp_at_thp_limit);
+
+        if (strictest_mode == Well::ProducerCMode::CMODE_UNDEFINED ||
+            !std::isfinite(strictest_scale) ||
+            strictest_scale <= Scalar(0)) {
+            return std::nullopt;
+        }
+
+        Scalar strictest_limit = Scalar(0);
+        switch (strictest_mode) {
+            case Well::ProducerCMode::ORAT:
+                strictest_limit = controls.oil_rate;
+                break;
+            case Well::ProducerCMode::WRAT:
+                strictest_limit = controls.water_rate;
+                break;
+            case Well::ProducerCMode::GRAT:
+                strictest_limit = controls.gas_rate;
+                break;
+            case Well::ProducerCMode::LRAT:
+                strictest_limit = controls.liquid_rate;
+                break;
+            case Well::ProducerCMode::RESV:
+                strictest_limit = controls.resv_rate;
+                break;
+            case Well::ProducerCMode::BHP:
+            case Well::ProducerCMode::THP:
+            {
+                const auto current_mode_rate = std::accumulate(ws.surface_rates.begin(),
+                                                    ws.surface_rates.end(),
+                                                    Scalar(0),
+                                                    [](Scalar sum, Scalar r) { return sum + (-r); });
+                strictest_limit = strictest_scale * current_mode_rate;
+                break;
+            }
+            default:
+                return std::nullopt;
+        }
+
+        return std::make_pair(strictest_mode, strictest_limit);
+    }
 
     template<typename TypeTag>
     typename WellInterface<TypeTag>::Scalar

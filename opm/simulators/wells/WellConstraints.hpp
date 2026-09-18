@@ -63,7 +63,46 @@ public:
                                const std::optional<Well::InjectionControls>& inj_controls = std::nullopt,
                                const std::optional<Well::ProductionControls>& prod_controls = std::nullopt) const;
 
+    //! \brief Find the strictest binding constraint (pressure or rate) for a producer,
+    //! for the group-tree balancer's own use: (control_mode, scale), where scale applied
+    //! to the well's current rates gives the constrained rates. bhp_at_thp_limit must come
+    //! from a converged IPR (a stable-bhp solve); omit it to skip the pressure term.
+    std::pair<Well::ProducerCMode, Scalar>
+    estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
+                                          const RateConvFunc& calcReservoirVoidageRates,
+                                          const Well::ProductionControls& controls,
+                                          const bool check_group_constraints,
+                                          DeferredLogger& deferred_logger,
+                                          const std::optional<Scalar> bhp_at_thp_limit) const;
+
+    //! \brief The rate-only half of estimateStrictestProductionConstraint, against the
+    //! well's own current surface/reservoir rates (falling back to the previous
+    //! timestep's if the current ones are exactly zero).
+    std::pair<Well::ProducerCMode, Scalar>
+    estimateStrictestProductionRateConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
+                                              const RateConvFunc& calcReservoirVoidageRates,
+                                              const Well::ProductionControls& controls,
+                                              const bool check_group_constraints,
+                                              DeferredLogger& deferred_logger) const;
+
 private:
+    //! \brief Core loop: find the minimum scale among ORAT/WRAT/GRAT/LRAT/RESV given
+    //! explicit positive-valued rate vectors. Callers are responsible for GRUP handling.
+    std::pair<Well::ProducerCMode, Scalar>
+    estimateStrictestRateConstraintFromRatesImpl_(const std::vector<Scalar>& pos_surface_rates,
+                                                  const std::vector<Scalar>& pos_reservoir_rates,
+                                                  const RateConvFunc& calcReservoirVoidageRates,
+                                                  const Well::ProductionControls& controls) const;
+
+    //! \brief scale = |target_rate / current_rate| for one control mode.
+    //! pos_surface_rates[p] > 0 and pos_reservoir_rates[p] > 0 for producers.
+    Scalar getProductionControlModeScale(const std::vector<Scalar>& pos_surface_rates,
+                                         const std::vector<Scalar>& pos_reservoir_rates,
+                                         const RateConvFunc& calcReservoirVoidageRates,
+                                         const Well::ProducerCMode& cmode,
+                                         const Well::ProductionControls& controls,
+                                         const std::optional<Scalar> target = std::nullopt) const;
+
     WellInjectorCMode
     activeInjectionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
                               const SummaryState& summaryState,

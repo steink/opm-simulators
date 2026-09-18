@@ -2223,24 +2223,22 @@ void applyTreeToState(const Tree<Scalar>& tree,
 // ---------------------------------------------------------------------------
 
 template<class Scalar, typename IndexTraits>
-bool runGroupTreeBalancer(BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
-                          const SummaryState& summaryState,
-                          int reportStep,
-                          Scalar tol,
-                          const std::unordered_map<std::string, std::pair<int, Scalar>>& limits,
-                          DeferredLogger& logger)
+BalancedTree<Scalar> balanceGroupTree(BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
+                                      const SummaryState& summaryState,
+                                      int reportStep,
+                                      Scalar tol,
+                                      const std::unordered_map<std::string, std::pair<int, Scalar>>& limits,
+                                      DeferredLogger& logger)
 {
     // Make early return if limits is empty, which means no wells are active/has positive potentials.
     if (limits.empty()) {
         if (wellModel.comm().rank() == 0) {
             logger.debug("ProdGroupTreeBalancer",
-                "runGroupTreeBalancer: no active wells/no wells with positive potentials, skipping balancing");
+                "balanceGroupTree: no active wells/no wells with positive potentials, skipping balancing");
         }
-        return true;
+        return {};
     }
     OPM_TIMEFUNCTION();
-
-    const auto t0 = std::chrono::steady_clock::now();
 
     auto tree = buildTree(wellModel, summaryState, reportStep, limits);
 
@@ -2265,7 +2263,27 @@ bool runGroupTreeBalancer(BlackoilWellModelGeneric<Scalar, IndexTraits>& wellMod
             "Some nodes may not satisfy their constraints.");
     }
 
-    applyTreeToState(tree, wellModel, logger);
+    return {std::move(tree), success, valid};
+}
+
+template<class Scalar, typename IndexTraits>
+bool runGroupTreeBalancer(BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
+                          const SummaryState& summaryState,
+                          int reportStep,
+                          Scalar tol,
+                          const std::unordered_map<std::string, std::pair<int, Scalar>>& limits,
+                          DeferredLogger& logger)
+{
+    if (limits.empty()) {
+        return true;   // balanceGroupTree() already logged; nothing to apply.
+    }
+    OPM_TIMEFUNCTION();
+
+    const auto t0 = std::chrono::steady_clock::now();
+
+    auto balanced = balanceGroupTree(wellModel, summaryState, reportStep, tol, limits, logger);
+
+    applyTreeToState(balanced.tree, wellModel, logger);
 
     if (wellModel.comm().rank() == 0) {
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2273,10 +2291,10 @@ bool runGroupTreeBalancer(BlackoilWellModelGeneric<Scalar, IndexTraits>& wellMod
         logger.debug("ProdGroupTreeBalancer",
             fmt::format("Group tree balancer completed in {}ms. "
                         "Convergence: {}, Validity: {}",
-                        elapsed, success ? "OK" : "FAILED", valid ? "OK" : "FAILED"));
+                        elapsed, balanced.success ? "OK" : "FAILED", balanced.valid ? "OK" : "FAILED"));
     }
 
-    return valid;
+    return balanced.valid;
 }
 
 // ---------------------------------------------------------------------------
@@ -2312,7 +2330,7 @@ namespace {
 template<class Scalar>
 void collectActiveNode(const Tree<Scalar>& tree, const std::string& name,
                        const GuideRate& guideRate,
-                       const std::unordered_set<std::string>& thpControlledWells,
+                       const std::unordered_set<std::string>& networkThpWells,
                        FlatNetworkInput<Scalar>& out)
 {
     if (tree.count(name) == 0) {
@@ -2326,11 +2344,27 @@ void collectActiveNode(const Tree<Scalar>& tree, const std::string& name,
     entry.mode = node.mode;
     const auto limit = node.Limits.find(node.mode);
     entry.target = (limit != node.Limits.end()) ? limit->second : Scalar(0);
+    entry.resvCoeff = node.resvCoeff;
 
     if (node.type == ProdNodeType::Well) {
-        // A well has no children to flatten: it is pinned on its own,
-        // genuinely limit-bound if entry.target > 0, stopped if it is
-        // exactly zero (Part 1b's fallback sets Limits[mode] = 0 for that).
+        // A well has no children to flatten. It is either pinned on its own
+        // (genuinely limit-bound if entry.target > 0, stopped if it is
+        // exactly zero -- Part 1b's fallback sets Limits[mode] = 0 for that),
+        // or, if its mode is THP and the caller says so, on the network's
+        // live THP control instead -- see FlatActiveNode's own doc comment.
+        if (node.mode == Well::ProducerCMode::THP && networkThpWells.count(name) > 0) {
+            entry.networkThp = true;
+        }
+        out.push_back(std::move(entry));
+        return;
+    }
+
+    if (node.isSatellite) {
+        // A GSATPROD group: no wells, no network node of its own, just a
+        // fixed rate (node.rates, negative = production, this file's own
+        // convention) standing in for wells never modelled at all. Flip to
+        // positive = production, matching FlatActiveNode's own convention.
+        entry.satelliteRates = {{-node.rates[kOil], -node.rates[kWater], -node.rates[kGas]}};
         out.push_back(std::move(entry));
         return;
     }
@@ -2358,26 +2392,21 @@ void collectActiveNode(const Tree<Scalar>& tree, const std::string& name,
         if (child.modeCategory == ProdNodeModeCategory::Individual) {
             const Scalar eff = accumulatedEfficiency(tree, childName, name);
             entry.activeChildren.push_back({childName, eff});
-            collectActiveNode(tree, childName, guideRate, thpControlledWells, out);
+            collectActiveNode(tree, childName, guideRate, networkThpWells, out);
             return;
         }
         if (child.type == ProdNodeType::Well) {
             // The only other category a well reaches here with is Group
-            // (tied to this Active node's lambda); anything else
+            // (tied to this Active node's own lambda); anything else
             // (categorizeBalancedNode's "problematic case" can leave one at
-            // None) has nothing meaningful to tie to and is dropped. Within
-            // Group, a well the caller says is on the network's THP control
-            // is not tied to this node's lambda at all -- its rate comes
-            // from its own bhp/thp/IPR row -- but it still counts toward
-            // this node's sum, via cumulative efficiency alone.
+            // None) has nothing meaningful to tie to and is dropped. A
+            // Group-category well is always tied to this node's lambda --
+            // GRUP and THP are mutually exclusive on a well's control mode,
+            // so it can never also need the live-THP treatment above.
             if (child.modeCategory == ProdNodeModeCategory::Group) {
                 const Scalar eff = accumulatedEfficiency(tree, childName, name);
-                if (thpControlledWells.count(childName) > 0) {
-                    entry.thpWells.push_back({childName, eff});
-                } else {
-                    const Scalar gr = getGuideRateForMode(childName, child.initialRates, ctrlMode, guideRate);
-                    entry.ownWells.push_back({childName, gr, eff});
-                }
+                const Scalar gr = getGuideRateForMode(childName, child.initialRates, ctrlMode, guideRate);
+                entry.ownWells.push_back({childName, gr, eff});
             }
             return;
         }
@@ -2397,27 +2426,24 @@ template<class Scalar>
 FlatNetworkInput<Scalar> extractFlatNetworkInput(const Tree<Scalar>& tree,
                                                  const std::string& rootName,
                                                  const GuideRate& guideRate,
-                                                 const std::unordered_set<std::string>& thpControlledWells)
+                                                 const std::unordered_set<std::string>& networkThpWells)
 {
     FlatNetworkInput<Scalar> out;
     // rootName itself may be pure pass-through (e.g. FIELD with nothing of
     // its own binding): descend until an Individual node -- well or group --
     // is found. Each one found becomes a root of the flattened output (its
     // nearest Active ancestor, if any, is above rootName and not this
-    // function's concern).
-    //
-    // A well directly at rootName's level that the caller flags as THP-
-    // controlled, with nothing above it binding, has nothing to be tied to
-    // and nothing to report here either (same as an untagged Group-category
-    // well in that position) -- it is the caller's job to have already
-    // scoped rootName to somewhere this cannot arise for wells it cares about.
+    // function's concern). A Group-category well with nothing above it
+    // binding has nothing to be tied to and nothing to report here either --
+    // it is the caller's job to have already scoped rootName to somewhere
+    // this cannot arise for wells it cares about.
     std::function<void(const std::string&)> findRoots = [&](const std::string& name) {
         if (tree.count(name) == 0) {
             return;
         }
         const auto& node = tree.at(name);
         if (node.modeCategory == ProdNodeModeCategory::Individual) {
-            collectActiveNode(tree, name, guideRate, thpControlledWells, out);
+            collectActiveNode(tree, name, guideRate, networkThpWells, out);
             return;
         }
         if (node.type == ProdNodeType::Well) {
@@ -2451,12 +2477,32 @@ template bool runGroupTreeBalancer<double, BlackOilDefaultFluidSystemIndices>(
     const std::unordered_map<std::string, std::pair<int, double>>&,
     DeferredLogger&);
 
+template BalancedTree<double> balanceGroupTree<double, BlackOilDefaultFluidSystemIndices>(
+    BlackoilWellModelGeneric<double, BlackOilDefaultFluidSystemIndices>&,
+    const SummaryState&, int, double,
+    const std::unordered_map<std::string, std::pair<int, double>>&,
+    DeferredLogger&);
+
+template void applyTreeToState<double, BlackOilDefaultFluidSystemIndices>(
+    const Tree<double>&, BlackoilWellModelGeneric<double, BlackOilDefaultFluidSystemIndices>&,
+    DeferredLogger&);
+
 #ifdef FLOW_INSTANTIATE_FLOAT
 
 template bool runGroupTreeBalancer<float, BlackOilDefaultFluidSystemIndices>(
     BlackoilWellModelGeneric<float, BlackOilDefaultFluidSystemIndices>&,
     const SummaryState&, int, float,
     const std::unordered_map<std::string, std::pair<int, float>>&,
+    DeferredLogger&);
+
+template BalancedTree<float> balanceGroupTree<float, BlackOilDefaultFluidSystemIndices>(
+    BlackoilWellModelGeneric<float, BlackOilDefaultFluidSystemIndices>&,
+    const SummaryState&, int, float,
+    const std::unordered_map<std::string, std::pair<int, float>>&,
+    DeferredLogger&);
+
+template void applyTreeToState<float, BlackOilDefaultFluidSystemIndices>(
+    const Tree<float>&, BlackoilWellModelGeneric<float, BlackOilDefaultFluidSystemIndices>&,
     DeferredLogger&);
 
 template FlatNetworkInput<float> extractFlatNetworkInput<float>(

@@ -82,6 +82,7 @@
 #include <optional>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 namespace Opm {
@@ -700,6 +701,19 @@ template<class Scalar> class WellContributions;
             void assignWellSpeciesRates_(data::Wells& wsrpt) const;
             void assignWellTracerRates_(data::Wells& wsrpt) const;
 
+            /// @brief Reduce a rank-local {well name -> (control mode, target value)} map
+            ///   to one that is globally consistent: every rank contributes its own
+            ///   entries via comm().sum() (encoded as (mode + 1, value) so zero means
+            ///   "not set"), and every rank ends up with the same result regardless of
+            ///   which one owns which well.
+            /// @param localLimits This rank's own contributions, keyed by well name.
+            /// @param allWellNames Every well name in the schedule, same order on every
+            ///   rank -- used to build the encoding buffer.
+            /// @return The globally-reduced map, identical on every rank.
+            std::unordered_map<std::string, std::pair<int, Scalar>>
+            gatherWellLimits_(const std::unordered_map<std::string, std::pair<int, Scalar>>& localLimits,
+                              const std::vector<std::string>& allWellNames) const;
+
             /// @brief True when this process takes part in a *shared* (cross-rescoup)
             ///   network this sync step: a master with at least one master-group
             ///   network leaf, or a slave connected to the master's network.
@@ -753,6 +767,20 @@ template<class Scalar> class WellContributions;
             /// @return New value for more_network_update: true to continue the
             ///   slave's outer loop, false to exit.
             bool maybeSendSlaveGroupFlowToMaster_(const int reportStepIdx);
+
+            /// @brief Build the globally-consistent {well name -> strictest individual
+            ///   limit} map the group-tree balancer (ProdGroupTreeBalancer) needs, using
+            ///   each open producer's current production_cmode where it already gives a
+            ///   direct answer (a rate mode reads its target off the deck; a pressure
+            ///   mode uses the current rate sum as its own proxy) and otherwise falling
+            ///   back to WellInterface::estimateStrictestProductionLimitForBalancer()
+            ///   (a converged-IPR estimate). Stopped, zero-rate, and IPR-estimate-failure
+            ///   wells are simply left out of the returned map.
+            /// @param deferred_logger For IPR-update failures, logged and skipped rather
+            ///   than thrown (every rank must still reach gatherWellLimits_()'s comm.sum()).
+            /// @return The globally-consistent limits map (see gatherWellLimits_()).
+            std::unordered_map<std::string, std::pair<int, Scalar>>
+            prepareWellsForBalancing_(DeferredLogger& deferred_logger);
 
             /// @brief Master-side: send the trailing-final is_final = true to
             ///   unblock the slave when the master's outer loop exited without
