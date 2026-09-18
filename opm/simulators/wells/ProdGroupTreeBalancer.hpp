@@ -44,14 +44,21 @@ namespace Opm::ProdGroupTreeBalancer {
 template<class Scalar>
 using Tree = std::map<std::string, ProdGroupTreeNode<Scalar>>;
 
-/// A well tied directly to an Active node's own lambda: q_w = weight * lambda,
-/// weight = the well's guide rate scaled by its cumulative efficiency factor
-/// up to the Active node.
+/// A well tied directly to an Active node's own lambda: the *node's* own
+/// equation sees efficiency * guideRate * lambda (efficiency-scaled, like any
+/// other contribution to its sum), but the *well's* own rate -- what its own
+/// IPR row actually has to invert to a bhp -- is guideRate * lambda alone:
+/// efficiency describes how much of the well's own production reaches the
+/// Active node, not the well's own physical rate, so it must not be baked
+/// into a single product the way it safely can be for thpWells/activeChildren
+/// (their own rate comes from somewhere else entirely -- their own bhp row,
+/// or their own separate target -- so nothing there ever needs unscaling).
 template<class Scalar>
 struct FlatWellShare
 {
     std::string name;
-    Scalar weight;
+    Scalar guideRate;
+    Scalar efficiency;
 };
 
 /// A reference from one Active node's own sum to another Active node found
@@ -91,9 +98,11 @@ struct FlatChildRef
 /// THP control -- their rate is not g_w*lambda at all, it comes from their own
 /// bhp/thp/IPR row, genuinely responding to the network's pressures. They
 /// still count toward this node's sum (their production is still physically
-/// part of this node's subtree), just via weight = cumulative efficiency alone
-/// (no guide-rate allocation applies to a rate this node doesn't get to set).
-/// The balancer itself has no notion of THP control -- see extractFlatNetworkInput().
+/// part of this node's subtree), just via a plain efficiency-scaled reference
+/// (FlatChildRef, the same shape as activeChildren, not FlatWellShare -- a THP
+/// well's own rate already comes from its own row, so unlike ownWells there is
+/// nothing here that ever needs unscaling). The balancer itself has no notion
+/// of THP control -- see extractFlatNetworkInput().
 ///
 /// A well-type entry (type == Well) has empty ownWells/thpWells/activeChildren:
 /// it is either genuinely limit-bound (target > 0, pinned) or currently stopped
@@ -108,7 +117,7 @@ struct FlatActiveNode
     Well::ProducerCMode mode{Well::ProducerCMode::CMODE_UNDEFINED};
     Scalar target{0};
     std::vector<FlatWellShare<Scalar>> ownWells;
-    std::vector<FlatWellShare<Scalar>> thpWells;
+    std::vector<FlatChildRef<Scalar>> thpWells;
     std::vector<FlatChildRef<Scalar>> activeChildren;
 };
 

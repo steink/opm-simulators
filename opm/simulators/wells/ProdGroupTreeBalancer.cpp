@@ -2376,7 +2376,7 @@ void collectActiveNode(const Tree<Scalar>& tree, const std::string& name,
                     entry.thpWells.push_back({childName, eff});
                 } else {
                     const Scalar gr = getGuideRateForMode(childName, child.initialRates, ctrlMode, guideRate);
-                    entry.ownWells.push_back({childName, gr * eff});
+                    entry.ownWells.push_back({childName, gr, eff});
                 }
             }
             return;

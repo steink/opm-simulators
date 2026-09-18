@@ -168,11 +168,11 @@ void logFlat(const ProdGroupTreeBalancer::FlatNetworkInput<double>& flat)
     for (const auto& n : flat) {
         std::string wells;
         for (const auto& w : n.ownWells) {
-            wells += fmt::format(" {}(w={:.6g})", w.name, w.weight);
+            wells += fmt::format(" {}(g={:.6g},eff={:.3f})", w.name, w.guideRate, w.efficiency);
         }
         std::string thp;
         for (const auto& w : n.thpWells) {
-            thp += fmt::format(" {}(eff={:.3f})", w.name, w.weight);
+            thp += fmt::format(" {}(eff={:.3f})", w.name, w.efficiency);
         }
         std::string children;
         for (const auto& c : n.activeChildren) {
@@ -337,11 +337,12 @@ BOOST_AUTO_TEST_CASE(flat_extraction_on_a_pass_through_tree)
     BOOST_CHECK_CLOSE(plat.target * 86400.0, 3000.0, 1e-6);
     BOOST_REQUIRE_EQUAL(plat.ownWells.size(), 2U);
     // Both W1 and W2 sit directly under GP1, one flattened hop from PLAT, so
-    // their weight is exactly their own guide rate (efficiency 1 throughout).
+    // efficiency is 1 throughout and guideRate is exactly their own guide rate.
     for (const auto& w : plat.ownWells) {
         const double expected_guide = (w.name == "W1") ? guide[0] : (w.name == "W2") ? guide[1] : -1.0;
         BOOST_CHECK(expected_guide > 0.0);
-        BOOST_CHECK_CLOSE(w.weight, expected_guide / 86400.0, 1e-6);
+        BOOST_CHECK_CLOSE(w.guideRate, expected_guide / 86400.0, 1e-6);
+        BOOST_CHECK_CLOSE(w.efficiency, 1.0, 1e-6);
     }
     BOOST_REQUIRE_EQUAL(plat.activeChildren.size(), 1U);
     BOOST_CHECK_EQUAL(plat.activeChildren.front().name, "W3");
@@ -433,11 +434,11 @@ BOOST_AUTO_TEST_CASE(thp_controlled_well_is_not_tied_to_the_lambda)
     const auto& plat = (flat[0].name == "PLAT") ? flat[0] : flat[1];
     BOOST_CHECK_EQUAL(plat.name, "PLAT");
 
-    // W1 stays a normal ownWell; W2 moves to thpWells with weight ==
-    // cumulative efficiency alone (1.0 here), not guide-rate*efficiency.
+    // W1 stays a normal ownWell; W2 moves to thpWells, a plain efficiency-scaled
+    // reference (1.0 here), not a guide-rate allocation.
     BOOST_REQUIRE_EQUAL(plat.ownWells.size(), 1U);
     BOOST_CHECK_EQUAL(plat.ownWells.front().name, "W1");
     BOOST_REQUIRE_EQUAL(plat.thpWells.size(), 1U);
     BOOST_CHECK_EQUAL(plat.thpWells.front().name, "W2");
-    BOOST_CHECK_CLOSE(plat.thpWells.front().weight, 1.0, 1e-6);
+    BOOST_CHECK_CLOSE(plat.thpWells.front().efficiency, 1.0, 1e-6);
 }
