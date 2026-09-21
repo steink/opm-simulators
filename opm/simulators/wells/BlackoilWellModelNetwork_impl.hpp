@@ -171,6 +171,14 @@ update(const bool mandatory_network_balance,
                     well->updateIPRImplicit(well_model_.simulator(),
                                             well_model_.groupStateHelper(),
                                             well_model_.wellState());
+                    // A stopped producer's own implicit_ipr above is linearised
+                    // at its current, degenerate zero-rate state -- refresh a
+                    // separate, physically-grounded trial IPR (stopped_ipr_a/b)
+                    // at the same cadence; a no-op for any well not currently
+                    // stopped. Not consumed here or by any network solve yet.
+                    well->updateStoppedWellTrialIpr(well_model_.simulator(), dt,
+                                                    well_model_.groupStateHelper(),
+                                                    well_model_.wellState());
                     // The tubing table's datum is not the well's reference
                     // depth; the well's thp evaluation corrects for it and
                     // the network system has to apply the same.

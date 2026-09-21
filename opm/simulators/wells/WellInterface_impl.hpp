@@ -880,6 +880,53 @@ namespace Opm
     }
 
     template<typename TypeTag>
+    void
+    WellInterface<TypeTag>::
+    updateStoppedWellTrialIpr(const Simulator& simulator,
+                              const double dt,
+                              const GroupStateHelperType& groupStateHelper,
+                              WellStateType& well_state)
+    {
+        auto& ws = well_state.well(this->index_of_well_);
+        std::fill(ws.stopped_ipr_a.begin(), ws.stopped_ipr_a.end(), Scalar{0});
+        std::fill(ws.stopped_ipr_b.begin(), ws.stopped_ipr_b.end(), Scalar{0});
+
+        // Only meaningful for a producer the well model has stopped (still
+        // part of the system, unlike shut) -- calculateMinimumBhpFromThp()
+        // (called via estimateOperableBhp() below) also only supports
+        // producers.
+        if (!this->isProducer() || ws.status != WellStatus::STOP) {
+            return;
+        }
+
+        // A scratch copy of both well_state and the well's own operability
+        // flag: estimateOperableBhp()/solveWellWithBhp() never touch
+        // wellStatus_ themselves, but calculateMinimumBhpFromThp()'s explicit
+        // WFR/GFR fractions need use_vfpexplicit set, exactly as
+        // solveWellWithOperabilityCheck() does around its own call to
+        // estimateOperableBhp() -- restored unconditionally below, whatever
+        // the trial's outcome.
+        WellStateType well_state_copy = well_state;
+        GroupStateHelperType groupStateHelper_copy = groupStateHelper;
+        auto well_guard = groupStateHelper_copy.pushWellState(well_state_copy);
+
+        const auto& summary_state = simulator.vanguard().summaryState();
+        const bool use_vfpexplicit = this->operability_status_.use_vfpexplicit;
+        this->operability_status_.use_vfpexplicit = true;
+        const auto bhp_target = estimateOperableBhp(
+            simulator, dt, groupStateHelper_copy, summary_state, well_state_copy
+        );
+        this->operability_status_.use_vfpexplicit = use_vfpexplicit;
+
+        if (!bhp_target.has_value()) {
+            return;   // no crossing, or the trial itself would shut again -- stays zero
+        }
+        const auto& ws_copy = well_state_copy.well(this->index_of_well_);
+        ws.stopped_ipr_a = ws_copy.implicit_ipr_a;
+        ws.stopped_ipr_b = ws_copy.implicit_ipr_b;
+    }
+
+    template<typename TypeTag>
     bool
     WellInterface<TypeTag>::
     solveWellWithBhp(const Simulator& simulator,

@@ -74,6 +74,8 @@ public:
         serializer(productivity_index);
         serializer(implicit_ipr_a);
         serializer(implicit_ipr_b);
+        serializer(stopped_ipr_a);
+        serializer(stopped_ipr_b);
         serializer(surface_rates);
         serializer(reservoir_rates);
         serializer(prev_surface_rates);
@@ -151,6 +153,14 @@ public:
     std::vector<Scalar> productivity_index;
     std::vector<Scalar> implicit_ipr_a;
     std::vector<Scalar> implicit_ipr_b;
+    // A stopped well's trial flowing IPR, from a scratch-state solve at its
+    // deck THP limit -- kept separate from implicit_ipr_a/b (computed at the
+    // well's own *current*, possibly degenerate zero-rate state) so a
+    // genuinely flowing well's real IPR is never overwritten by this path.
+    // Not yet consumed anywhere; a well without a usable implicit_ipr is
+    // simply treated as stopped for the group-tree network solve.
+    std::vector<Scalar> stopped_ipr_a;
+    std::vector<Scalar> stopped_ipr_b;
     std::vector<Scalar> surface_rates;
     std::vector<Scalar> reservoir_rates;
     std::vector<Scalar> prev_surface_rates;

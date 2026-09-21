@@ -49,6 +49,8 @@ SingleWellState(const std::string& name_,
     , productivity_index(pu.numActivePhases())
     , implicit_ipr_a(pu.numActivePhases())
     , implicit_ipr_b(pu.numActivePhases())
+    , stopped_ipr_a(pu.numActivePhases())
+    , stopped_ipr_b(pu.numActivePhases())
     , surface_rates(pu.numActivePhases())
     , reservoir_rates(pu.numActivePhases())
     , prev_surface_rates(pu.numActivePhases())
@@ -107,6 +109,8 @@ void SingleWellState<Scalar, IndexTraits>::shut()
     std::ranges::fill(this->productivity_index, 0);
     std::ranges::fill(this->implicit_ipr_a, 0);
     std::ranges::fill(this->implicit_ipr_b, 0);
+    std::ranges::fill(this->stopped_ipr_a, 0);
+    std::ranges::fill(this->stopped_ipr_b, 0);
 
     auto& connpi = this->perf_data.prod_index;
     connpi.assign(connpi.size(), 0);
@@ -401,6 +405,8 @@ bool SingleWellState<Scalar, IndexTraits>::operator==(const SingleWellState& rhs
            this->productivity_index == rhs.productivity_index &&
            this->implicit_ipr_a == rhs.implicit_ipr_a &&
            this->implicit_ipr_b == rhs.implicit_ipr_b &&
+           this->stopped_ipr_a == rhs.stopped_ipr_a &&
+           this->stopped_ipr_b == rhs.stopped_ipr_b &&
            this->surface_rates == rhs.surface_rates &&
            this->reservoir_rates == rhs.reservoir_rates &&
            this->prev_surface_rates == rhs.prev_surface_rates &&

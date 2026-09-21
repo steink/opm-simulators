@@ -380,6 +380,19 @@ public:
                                    const GroupStateHelperType& groupStateHelper,
                                    WellStateType& well_state) = 0;
 
+    /// A physically-grounded flowing IPR for a stopped producer (Well::Status::STOP,
+    /// not shut), whose real implicit_ipr_a/b -- linearised at the well's own
+    /// current, zero-rate state by updateIPRImplicit() -- is not a trustworthy
+    /// reference. Trial-solves a scratch copy of well_state at the well's own
+    /// deck THP limit (never mutating the real well_state or well object) and,
+    /// on success, stores the resulting linearisation in well_state's own
+    /// stopped_ipr_a/b; on failure (no crossing, or the trial itself would shut
+    /// again) leaves them zeroed. Not consumed by any network solve yet.
+    void updateStoppedWellTrialIpr(const Simulator& simulator,
+                                   const double dt,
+                                   const GroupStateHelperType& groupStateHelper,
+                                   WellStateType& well_state);
+
     static constexpr int numResDofs = Indices::numEq;
     static constexpr int numWellDofs = numResDofs + 1;  // NB will fail for for thermal for now
     using BMatrix = Dune::BCRSMatrix<Dune::FieldMatrix<Scalar, numWellDofs, numResDofs>>;
