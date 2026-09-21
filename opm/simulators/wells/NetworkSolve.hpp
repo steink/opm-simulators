@@ -312,8 +312,17 @@ solve(Sys& system,
         switches += controls_moved ? 1 : 0;
         const auto r = system.residual(x);
 
+        // std::max(worst, std::abs(e)) would silently keep worst's old value
+        // for a NaN e -- every comparison with NaN is false, so std::max
+        // just returns its first argument -- letting a NaN residual entry
+        // convergence-check as if it were never there. Force any non-finite
+        // entry to fail convergence outright instead.
         Scalar worst = 0.0;
         for (const auto e : r) {
+            if (!std::isfinite(e)) {
+                worst = std::numeric_limits<Scalar>::infinity();
+                break;
+            }
             worst = std::max(worst, std::abs(e));
         }
         {   // remember the active set, so a cycle can be seen in the report
@@ -356,12 +365,31 @@ solve(Sys& system,
             : [&] {
                   DenseMatrix<Scalar> fd(n);
                   for (int j = 0; j < n; ++j) {
+                      // limitStep() only clamps the *accepted* Newton step
+                      // (below), never this exploratory one -- so without
+                      // routing it through the same clamp, a column sitting
+                      // right at a hard bound (e.g. a Thp well's bhp at its
+                      // own bhp_shutin) gets forward-perturbed straight past
+                      // it, into a domain (negative rates) the residual is
+                      // not defined for. Try the forward direction first,
+                      // and fall back to backward if that one is the side
+                      // that is clamped away to (near) nothing.
+                      const Scalar h_nominal = 1e-2 * system.columnScale(j);
+                      std::vector<Scalar> unit_dx(n, Scalar{0});
+                      unit_dx[j] = h_nominal;
+                      auto limited = system.limitStep(x, unit_dx);
+                      if (std::abs(limited[j]) < Scalar{1e-6} * std::abs(h_nominal)) {
+                          unit_dx[j] = -h_nominal;
+                          limited = system.limitStep(x, unit_dx);
+                      }
+                      const Scalar h = limited[j];
                       auto shifted = x;
-                      const Scalar h = 1e-2 * system.columnScale(j);
-                      shifted[j] += h;
+                      for (int k = 0; k < n; ++k) {
+                          shifted[k] += limited[k];
+                      }
                       const auto rj = system.residual(shifted);
                       for (int i = 0; i < n; ++i) {
-                          fd(i, j) = (rj[i] - r[i]) / h;
+                          fd(i, j) = (h != Scalar{0}) ? (rj[i] - r[i]) / h : Scalar{0};
                       }
                   }
                   return fd;

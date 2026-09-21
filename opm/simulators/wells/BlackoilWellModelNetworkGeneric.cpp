@@ -945,7 +945,13 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
             continue;
         }
         const auto& ws = well_model_.wellState()[it->second->indexOfWell()];
-        if (ws.status != WellStatus::OPEN) {
+        // STOP is not SHUT: a stopped well is still part of the system (still
+        // solved, still has a row) but pinned at zero rate, whereas a shut
+        // well has no representation at all -- see the has_ipr handling below
+        // and populateFromFlatNetwork()'s use of it. Only a genuinely shut
+        // (or otherwise absent/non-owned) well is dropped from this gather
+        // entirely.
+        if (ws.status != WellStatus::OPEN && ws.status != WellStatus::STOP) {
             continue;
         }
         Scalar* e = &shared[i * kEntries];
@@ -973,10 +979,19 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
     result.reserve(candidates.size());
     for (std::size_t i = 0; i < candidates.size(); ++i) {
         const Scalar* e = &shared[i * kEntries];
-        if (e[0] <= Scalar{0} || e[1] <= Scalar{0}) {
-            continue;   // shut on every rank, or no usable inflow performance
+        if (e[0] <= Scalar{0}) {
+            continue;   // shut (or otherwise absent/not owned) on every rank --
+                        // genuinely not part of the system, unlike a stopped well.
         }
         typename Sys::WellNetworkData data;
+        // Open but no usable (linearised) inflow performance -- typically a
+        // stopped well (updateIPRImplicit() itself warns its IPR is
+        // "problematic" at zero rate) rather than a data-staleness gap, now
+        // that the IPR refresh above runs for every predicting well. Kept in
+        // the map anyway rather than dropped: populateFromFlatNetwork() reads
+        // this flag to pin such a well at zero instead of tying it to a group
+        // target or a THP row it has no real linearisation to solve.
+        data.has_ipr = e[1] > Scalar{0};
         data.efficiency = candidates[i].efficiency * e[8];
         data.vfp_table = candidates[i].vfp_table;
         // Unlike NetworkProductionSystem (well_vfp_dp_, the tubing table's datum
@@ -1035,7 +1050,13 @@ groupTreeProductionNodePressures(const Network::ExtNetwork& network,
     // leaf -- see this function's own doc comment).
     std::map<std::string, int> index;
     std::vector<std::string> order{root.name()};
-    system.addNode(NetworkSolve::Node{order.front(), -1, NetworkSolve::NoTable});
+    // Node 0 is already the terminal -- GroupTreeSystem's own nodes_ starts
+    // with a default-constructed placeholder there (see NetworkGroupTreeSystem.hpp's
+    // nodes_ member), and setTerminalPressure() above already supplies its
+    // pressure. Calling addNode() for it too, the way newtonProductionNodePressures()
+    // does for NetworkProductionSystem (whose nodes_ starts empty), would push a
+    // second entry ahead of every real node, shifting index/order's bookkeeping
+    // one slot away from where each node actually lives in nodes_.
     index[order.front()] = 0;
     for (std::size_t at = 0; at < order.size(); ++at) {
         for (const auto& branch : network.downtree_branches(order[at])) {
@@ -1094,9 +1115,22 @@ groupTreeProductionNodePressures(const Network::ExtNetwork& network,
     // top-level type == Well entry that is not a satellite) must resolve --
     // populateFromFlatNetwork() looks each one up unconditionally, and a
     // silently-excluded well would either throw there or, worse, just have
-    // its rate go missing from whatever ancestor sum needed it. One
-    // unresolvable well gives up the whole tree, the same as any other
-    // configuration this system cannot yet represent.
+    // its rate go missing from whatever ancestor sum needed it.
+    //
+    // A genuinely absent well (shut, or simply not a predicting producer --
+    // gatherWellNetworkDataForGroupTree() never puts one in wellNetworkData
+    // at all, unlike a merely stopped one, which it keeps with has_ipr ==
+    // false) does not enter the equations at all, the balancer's own
+    // ownWells/GRUPTREE-derived membership has no awareness of well status to
+    // have excluded it already. Rather than aborting the whole tree over it,
+    // it gets the same zero-rate placeholder ensureWell() already builds for
+    // a stopped well (WellNetworkData::has_ipr == false, forced here rather
+    // than left at the struct's own true default -- see there for why a
+    // stale positive target with no real ipr data must not be trusted). Node
+    // 0 (the default) also keeps it out of every node's own physical flow
+    // sum, the same as a satellite well's own "invisible" convention. Only a
+    // well that IS present but whose own group can't be placed in this
+    // system's topology is a real configuration gap worth giving up over.
     std::unordered_map<std::string, typename Sys::WellNetworkData> resolved;
     auto resolveWell = [&](const std::string& name) -> bool {
         if (resolved.count(name)) {
@@ -1104,12 +1138,15 @@ groupTreeProductionNodePressures(const Network::ExtNetwork& network,
         }
         const auto it = wellNetworkData.find(name);
         if (it == wellNetworkData.end() || !schedule.hasWell(name, reportStepIdx)) {
-            return false;
+            typename Sys::WellNetworkData placeholder;
+            placeholder.has_ipr = false;
+            resolved.emplace(name, std::move(placeholder));
+            return true;
         }
         const auto& node_name = schedule.getWell(name, reportStepIdx).groupName();
         const auto node_it = index.find(node_name);
         if (node_it == index.end()) {
-            return false;
+            return false;   // a real topology gap -- give up, same as today
         }
         auto data = it->second;
         data.node = node_it->second;

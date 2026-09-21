@@ -152,13 +152,20 @@ update(const bool mandatory_network_balance,
         this->useNetworkComplementarity(well_model_.param().network_complementarity_);
         this->useGasLiftNetworkResponse(well_model_.param().gaslift_network_response_);
         this->dumpNetworkFailuresTo(well_model_.param().network_dump_failures_);
-        if (solver_mode == "newton") {
+        if (solver_mode == "newton" || solver_mode == "group-tree") {
             // The simultaneous solve needs every well's rate response to its own
             // bhp. That is the implicit IPR, which the well solve maintains only
             // where its own control logic happens to need it -- never for
             // injectors, and for producers only on some paths. Refresh it here
             // for all of them, or a network solve arrives with a well it cannot
             // linearise and hands the whole network back to the relaxed update.
+            // gatherWellNetworkDataForGroupTree() has the identical dependency
+            // (it excludes any well whose implicit IPR isn't already usable),
+            // so group-tree needs this refresh exactly as much as newton does.
+            // The VFP datum-depth correction below is computed but unused by
+            // GroupTreeSystem (well_vfp_dp_ is only ever read from the Newton
+            // builders) -- harmless to still compute it here rather than gate
+            // it separately.
             for (const auto& well : well_model_) {
                 if (well->wellEcl().predictionMode()) {
                     well->updateIPRImplicit(well_model_.simulator(),

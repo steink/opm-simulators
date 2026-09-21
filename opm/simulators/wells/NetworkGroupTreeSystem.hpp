@@ -199,6 +199,16 @@ public:
         std::array<Scalar, NP> ipr_a{};
         std::array<Scalar, NP> ipr_b{};
 
+        // False for an open-but-not-flowing well -- most commonly one the well
+        // model has temporarily stopped (Well::Status::STOP, distinct from
+        // shut: still part of the system, still solved, just pinned at zero
+        // rate for now) -- with no usable linearised IPR to tie a group target
+        // or a THP row to. populateFromFlatNetwork() pins such a well at zero
+        // instead of building a Group/Thp row it has no real data for. A
+        // genuinely shut (or otherwise absent) well never reaches this struct
+        // at all -- see gatherWellNetworkDataForGroupTree()'s own doc comment.
+        bool has_ipr = true;
+
         // Not used by populateFromFlatNetwork() itself -- this rides along
         // because it comes from the same MPI-safe gather as everything else
         // above (well->getDynamicThpLimit().has_value()), for the caller's
@@ -287,19 +297,25 @@ public:
             }
             const auto& src = *byName.at(name);
             Well well = baseWell(name);
-            if (src.networkThp) {
+            // A well with no usable IPR right now (WellNetworkData::has_ipr) --
+            // typically stopped, not shut: still part of the system, but with
+            // nothing to tie a THP row or a positive target to -- is pinned at
+            // zero regardless of what the balancer's own mode/target say,
+            // exactly like a genuine full stop below.
+            const bool has_ipr = wellNetworkData.at(name).has_ipr;
+            if (src.networkThp && has_ipr) {
                 well.kind = WellKind::Thp;
             } else {
                 well.kind = WellKind::Pinned;
-                if (src.target > Scalar{0}) {
+                if (has_ipr && src.target > Scalar{0}) {
                     const auto weights = phaseWeights(src.mode, src.resvCoeff);
                     const Scalar bhp = bhpFromTarget(well, weights, src.target);
                     for (int p = 0; p < NP; ++p) {
                         well.fixed_q[p] = well.ipr_a[p] + well.ipr_b[p] * bhp;
                     }
                 }
-                // target <= 0: stopped (or not yet meaningful) -- well.fixed_q
-                // stays value-initialized zero, a genuine full stop.
+                // !has_ipr, or target <= 0: stopped (or not yet meaningful) --
+                // well.fixed_q stays value-initialized zero, a genuine full stop.
             }
             const int idx = addWell(std::move(well));
             wellIdx[name] = idx;
@@ -321,11 +337,26 @@ public:
 
             for (const auto& w : src.ownWells) {
                 Well well = baseWell(w.name);
-                well.kind = WellKind::Group;
-                well.active_node = idx;
-                well.guide_rate = w.guideRate;
-                const int wIdx = addWell(std::move(well));
-                activeNodes_[idx].own_wells.push_back(wIdx);
+                if (wellNetworkData.at(w.name).has_ipr) {
+                    well.kind = WellKind::Group;
+                    well.active_node = idx;
+                    well.guide_rate = w.guideRate;
+                    const int wIdx = addWell(std::move(well));
+                    activeNodes_[idx].own_wells.push_back(wIdx);
+                } else {
+                    // No usable IPR (typically stopped, not shut -- see
+                    // WellNetworkData::has_ipr): nothing to tie this node's
+                    // lambda to for this well, so it is pinned at zero and
+                    // counted as a fixed (zero) contribution instead, the same
+                    // as any other member_wells entry -- not left in own_wells,
+                    // where finalize() would otherwise wrongly see a real
+                    // lambda-tied well and keep a row with nothing to adjust
+                    // if this turns out to be the node's only "own" well.
+                    well.kind = WellKind::Pinned;
+                    const Scalar efficiency = well.efficiency;
+                    const int wIdx = addWell(std::move(well));
+                    activeNodes_[idx].member_wells.emplace_back(wIdx, efficiency);
+                }
             }
             for (const auto& child : src.activeChildren) {
                 const auto& childSrc = *byName.at(child.name);
