@@ -59,6 +59,48 @@ template<class Scalar>
 VFPEvaluation<Scalar> operator*(Scalar lhs, const VFPEvaluation<Scalar>& rhs);
 
 /**
+ * What a slope-limited lookup (VFPHelpers::interpolateWithSlopeLimit(),
+ * VFPProdProperties::bhp_with_slope_limit()) had to do to keep the tubing
+ * curve flatter than the well's own IPR.
+ *
+ * A production tubing curve is U-shaped in FLO: falling on the low-rate,
+ * liquid-loading branch, then rising once friction dominates. Where it falls
+ * faster than the well's own IPR, the two can cross more than once and the
+ * well has no stable operating point there. A slope-limited lookup replaces
+ * that stretch with the linear extrapolation of the first interval flat
+ * enough to guarantee a single crossing.
+ */
+enum class SlopeLimit
+{
+    //! Left alone: this interval is already flatter than the IPR, so the
+    //! result is exactly what the plain lookup would have given.
+    Unflattened,
+    //! Flattened, with the steep run reaching the first FLO interval -- the
+    //! ordinary U-shaped case, where the construction is continuous in FLO.
+    Bridged,
+    //! Flattened, but the steep run starts above the first interval: some
+    //! interval below this one is flat, so the curve is not U-shaped and the
+    //! flattened curve has a jump somewhere below this FLO. Still returned,
+    //! since the local value is as good as in the Bridged case, but the
+    //! caller should not trust a solve that converged here.
+    NonMonotone,
+    //! No interval up to the end of the FLO axis is flat enough; the slope is
+    //! pinned at the limit itself. The table and this well's IPR cannot be
+    //! reconciled anywhere on the axis.
+    Clamped,
+};
+
+/**
+ * A slope-limited lookup's value and derivatives, plus what it had to do.
+ */
+template<class Scalar>
+struct SlopeLimitedEvaluation
+{
+    VFPEvaluation<Scalar> evaluation{};
+    SlopeLimit limit{SlopeLimit::Unflattened};
+};
+
+/**
  * Helper struct for linear interpolation
  */
 template<class Scalar>
@@ -164,6 +206,39 @@ public:
     static detail::VFPEvaluation<Scalar> interpolate(const VFPInjTable& table,
                                                      const detail::InterpData<Scalar>& flo_i,
                                                      const detail::InterpData<Scalar>& thp_i);
+
+    /**
+     * interpolate() with the curve's own slope in FLO limited to \p max_slope
+     * -- see detail::SlopeLimit for what that means and why.
+     *
+     * \p max_slope is d(bhp)/d(FLO) of the well's own IPR, oriented along the
+     * table's own (positive, increasing) FLO axis and so negative for a
+     * producer, with whatever safety margin the caller wants already folded
+     * in: a curve exactly parallel to the IPR still admits no unique
+     * crossing, so the caller should pass a slightly *less* negative value
+     * than the bare IPR slope.
+     *
+     * Where the interval containing \p flo is already flatter than that, the
+     * result is exactly interpolate()'s, flagged Unflattened. Where it is
+     * not, the walk moves up the FLO axis to the first interval that is, and
+     * returns that interval's linear extrapolation back to \p flo -- value
+     * and all five partials from the same line, so the pair stays consistent
+     * (unlike clipping the derivative alone, which leaves the linearisation
+     * describing a different function than the value does).
+     *
+     * \p flo is the query FLO oriented along the table's own axis (positive),
+     * i.e. already sign-flipped from OPM's negative-for-production rates, and
+     * must be the same value \p flo_i was found for.
+     */
+    static detail::SlopeLimitedEvaluation<Scalar>
+    interpolateWithSlopeLimit(const VFPProdTable& table,
+                              const Scalar flo,
+                              const detail::InterpData<Scalar>& flo_i,
+                              const detail::InterpData<Scalar>& thp_i,
+                              const detail::InterpData<Scalar>& wfr_i,
+                              const detail::InterpData<Scalar>& gfr_i,
+                              const detail::InterpData<Scalar>& alq_i,
+                              const Scalar max_slope);
 
     static detail::VFPEvaluation<Scalar> bhp(const VFPProdTable& table,
                                              const Scalar aqua,

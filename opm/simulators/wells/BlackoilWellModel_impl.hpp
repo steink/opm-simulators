@@ -1311,6 +1311,77 @@ namespace Opm {
         // Note that well controls are allowed to change during updateNetwork
         // and in prepareWellsBeforeAssembling during well solves.
         bool well_group_control_changed = updateWellControls(local_deferredLogger);
+
+        // Group-tree balancer, group-tree-solver case: settle the network-side
+        // cliff-diagnosis stopping decisions (Part 3/4g) for the *current* set
+        // of well IPRs before network_.update() runs below, and before well
+        // equations get re-solved again next outer iteration (which would
+        // refresh those IPRs out from under an in-progress settling pass).
+        // Deliberately not lagged by an iteration the way the shared block
+        // further down still is for every other combination: this loop is
+        // itself the mechanism deciding whether another round is needed, so
+        // it has to solve against the tree it just built, not last
+        // iteration's -- see stopWorstGroupTreeCliffViolation()'s own doc
+        // comment. Once this settles (or gives up), control returns to the
+        // normal sequence below unchanged; the *next* full outer iteration's
+        // updateWellControls() is what actually re-solves well equations and
+        // refreshes IPRs, and if those move, this loop runs again from
+        // scratch next time round, exactly like any other configuration-
+        // change trigger for the same outer loop.
+        bool group_tree_cliff_diagnosis_ran = false;
+        const auto active_networks = details::activeNetworks(this->schedule(), reportStepIdx);
+        const bool has_production_network = std::any_of(
+            active_networks.begin(), active_networks.end(),
+            [](const auto& n) { return n.domain == details::NetworkDomain::Production; });
+        if (param_.enable_group_tree_balancer_ && well_group_control_changed
+            && has_production_network && this->network().usesGroupTreeSolver()) {
+            const auto& iterCtx = simulator_.problem().iterationContext();
+            const int nupcol = this->schedule()[reportStepIdx].nupcol();
+            if (iterCtx.withinNupcol(nupcol)) {
+                group_tree_cliff_diagnosis_ran = true;
+                // The whole anti-oscillation net for v1 (per the implementation
+                // plan): cap the number of stop-and-rebalance rounds rather than
+                // building a real cycle-breaker.
+                constexpr int kMaxCliffDiagnosisIters = 10;
+                bool stopped_something = false;
+                int diagnosis_iters = 0;
+                do {
+                    const auto balancerLimits = prepareWellsForBalancing_(local_deferredLogger);
+                    this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ false);
+                    auto balanced = ProdGroupTreeBalancer::balanceGroupTree(
+                        *this,
+                        this->summaryState(),
+                        reportStepIdx,
+                        param_.group_tree_balancer_tolerance_,
+                        balancerLimits,
+                        local_deferredLogger);
+                    this->network().setBalancedGroupTree(balanced.tree);
+
+                    stopped_something = false;
+                    for (const auto& network : active_networks) {
+                        if (network.domain != details::NetworkDomain::Production) {
+                            continue;
+                        }
+                        for (const auto& tree : network.network.get().roots()) {
+                            stopped_something |= this->network().stopWorstGroupTreeCliffViolation(
+                                network.network.get(), reportStepIdx, tree.get(),
+                                balanced.tree, local_deferredLogger);
+                        }
+                    }
+                    this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
+                    ++diagnosis_iters;
+                } while (stopped_something && diagnosis_iters < kMaxCliffDiagnosisIters);
+                if (stopped_something) {
+                    local_deferredLogger.warning(
+                        "GroupTreeCliffDiagnosisNotStable",
+                        fmt::format("Network: group-tree cliff diagnosis did not stabilize "
+                                   "within {} rounds at report step {}; proceeding with the "
+                                   "current stopping configuration.",
+                                   kMaxCliffDiagnosisIters, reportStepIdx));
+                }
+            }
+        }
+
         const auto [more_inner_network_update, network_imbalance] =
                 this->network_.update(mandatory_network_balance,
                                       local_deferredLogger,
@@ -1348,7 +1419,12 @@ namespace Opm {
         // while still within NUPCOL (the standard "how many outer iterations
         // before controls are frozen" window) -- an ordinary configuration-
         // change trigger for the same outer loop, not run every iteration.
-        if (param_.enable_group_tree_balancer_ && well_group_control_changed) {
+        // Skipped when the group-tree-solver loop above already ran: it did
+        // this exact balance-and-cache sequence itself, as many times as its
+        // own settling needed, and running it again here would just redo the
+        // last of those rounds for nothing.
+        if (param_.enable_group_tree_balancer_ && well_group_control_changed
+            && !group_tree_cliff_diagnosis_ran) {
             const auto& iterCtx = simulator_.problem().iterationContext();
             const int nupcol = this->schedule()[reportStepIdx].nupcol();
             if (iterCtx.withinNupcol(nupcol)) {
@@ -1373,10 +1449,6 @@ namespace Opm {
                 // is fixedpoint/newton instead of group-tree: nothing reads
                 // it then, and neither does applyTreeToState() run, so the
                 // two mechanisms never fight over the same wells.
-                const auto active_networks = details::activeNetworks(this->schedule(), reportStepIdx);
-                const bool has_production_network = std::any_of(
-                    active_networks.begin(), active_networks.end(),
-                    [](const auto& n) { return n.domain == details::NetworkDomain::Production; });
                 if (has_production_network) {
                     this->network().setBalancedGroupTree(balanced.tree);
                 } else {

@@ -753,3 +753,131 @@ const double reference[] = {
 };
 
 BOOST_AUTO_TEST_SUITE_END() // Integration tests//
+
+BOOST_AUTO_TEST_SUITE(SlopeLimitTests)
+
+namespace {
+
+// One thp row (20 bar) over flo = 10..50 m3/d, bhp = 30, 20, 15, 25, 40 bar:
+// a liquid-loading branch falling at -1 then -0.5 bar/(m3/d), a minimum at
+// flo = 30, then the friction-dominated rise at +1 and +1.5.
+const std::string kHumpedVfpProd = R"(
+VFPPROD
+     7     250.00      OIL        WCT         GOR         THP        GRAT      METRIC   BHP      /
+       10.0  20.0  30.0  40.0  50.0 /
+      20.00 /
+      0.000 /
+       100.0 /
+        0.0 /
+  1  1  1  1    30.0   20.0   15.0   25.0   40.0 /
+)";
+
+Opm::VFPProdProperties<double> humpedProps(const Opm::VFPProdTable& table)
+{
+    Opm::VFPProdProperties<double> props;
+    props.addTable(table);
+    return props;
+}
+
+// The table is in METRIC, so everything below is converted on the way in and
+// back out again on the way to a comparison.
+constexpr double m3d = 1.0 / 86400.0;          // 1 m3/day in SI
+constexpr double bar = 1.0e5;                  // 1 bar in SI
+
+// Production rates are negative in OPM, and this table's FLO type is OIL, so
+// only the oil rate matters for where on the flo axis a lookup lands.
+std::array<double, 3> oilRate(const double flo_m3d)
+{
+    return {0.0, -flo_m3d * m3d, 0.0};   // aqua, liquid, vapour
+}
+
+} // namespace
+
+// Off the falling branch the limit is inert: a limited lookup must return
+// precisely what bhp() itself does, not merely something close to it.
+BOOST_AUTO_TEST_CASE(FlatBranchIsUntouched)
+{
+    const auto deck = Opm::Parser{}.parseString(kHumpedVfpProd);
+    const Opm::VFPProdTable table(deck["VFPPROD"].front(), false, Opm::UnitSystem{});
+    const auto props = humpedProps(table);
+
+    // -1.5 bar/(m3/d) is steeper than every segment of this table, so nothing
+    // anywhere can trip the limit.
+    const double limit = -1.5 * bar / m3d;
+    for (const double flo : {12.0, 25.0, 35.0, 45.0}) {
+        const auto q = oilRate(flo);
+        const double plain = props.bhp(table.getTableNum(), q[0], q[1], q[2],
+                                       20.0 * bar, 0.0, 0.0, 0.0, false);
+        const auto limited = props.bhp_with_slope_limit(table.getTableNum(), q[0], q[1], q[2],
+                                                        20.0 * bar, 0.0, 0.0, 0.0, false, limit);
+        BOOST_CHECK_EQUAL(limited.evaluation.value, plain);
+        BOOST_CHECK(limited.limit == Opm::detail::SlopeLimit::Unflattened);
+    }
+}
+
+// On the falling branch the [10,20] segment (-1) is steeper than the limit
+// while [20,30] (-0.5) is not, so a query there must come back as the
+// backward extrapolation of [20,30]: bhp = 30 - 0.5*flo.
+BOOST_AUTO_TEST_CASE(SteepBranchExtrapolatesTheNextFlatInterval)
+{
+    const auto deck = Opm::Parser{}.parseString(kHumpedVfpProd);
+    const Opm::VFPProdTable table(deck["VFPPROD"].front(), false, Opm::UnitSystem{});
+    const auto props = humpedProps(table);
+
+    const double limit = -0.75 * bar / m3d;   // between -1 and -0.5
+    for (const double flo : {12.0, 15.0, 18.0}) {
+        const auto q = oilRate(flo);
+        const auto limited = props.bhp_with_slope_limit(table.getTableNum(), q[0], q[1], q[2],
+                                                        20.0 * bar, 0.0, 0.0, 0.0, false, limit);
+        BOOST_CHECK(limited.limit == Opm::detail::SlopeLimit::Bridged);
+        BOOST_CHECK_CLOSE(limited.evaluation.value, (30.0 - 0.5 * flo) * bar, 1e-8);
+        // The derivative must describe the same line the value came from.
+        BOOST_CHECK_CLOSE(limited.evaluation.dflo, -0.5 * bar / m3d, 1e-8);
+    }
+}
+
+// Continuity where the flattened stretch hands back over to the real curve:
+// the two one-sided limits at flo = 20 must agree, and agree with the table's
+// own value there (20 bar).
+BOOST_AUTO_TEST_CASE(ContinuousWhereFlatteningStops)
+{
+    const auto deck = Opm::Parser{}.parseString(kHumpedVfpProd);
+    const Opm::VFPProdTable table(deck["VFPPROD"].front(), false, Opm::UnitSystem{});
+    const auto props = humpedProps(table);
+
+    const double limit = -0.75 * bar / m3d;
+    const double eps = 1.0e-6;
+    const auto below = oilRate(20.0 - eps);
+    const auto above = oilRate(20.0 + eps);
+
+    const auto lo = props.bhp_with_slope_limit(table.getTableNum(), below[0], below[1], below[2],
+                                               20.0 * bar, 0.0, 0.0, 0.0, false, limit);
+    const auto hi = props.bhp_with_slope_limit(table.getTableNum(), above[0], above[1], above[2],
+                                               20.0 * bar, 0.0, 0.0, 0.0, false, limit);
+
+    BOOST_CHECK(lo.limit == Opm::detail::SlopeLimit::Bridged);
+    BOOST_CHECK(hi.limit == Opm::detail::SlopeLimit::Unflattened);
+    BOOST_CHECK_CLOSE(lo.evaluation.value, hi.evaluation.value, 1e-4);
+    BOOST_CHECK_CLOSE(lo.evaluation.value, 20.0 * bar, 1e-4);
+}
+
+// When nothing on the axis is flat enough the slope is pinned at the limit
+// itself, and the value still describes that same line.
+BOOST_AUTO_TEST_CASE(ClampedWhenNoIntervalIsFlatEnough)
+{
+    const auto deck = Opm::Parser{}.parseString(kHumpedVfpProd);
+    const Opm::VFPProdTable table(deck["VFPPROD"].front(), false, Opm::UnitSystem{});
+    const auto props = humpedProps(table);
+
+    // Flatter than every segment of this table, including the rising ones.
+    const double limit = 2.0 * bar / m3d;
+    const auto q = oilRate(15.0);
+    const auto limited = props.bhp_with_slope_limit(table.getTableNum(), q[0], q[1], q[2],
+                                                    20.0 * bar, 0.0, 0.0, 0.0, false, limit);
+    BOOST_CHECK(limited.limit == Opm::detail::SlopeLimit::Clamped);
+    BOOST_CHECK_CLOSE(limited.evaluation.dflo, limit, 1e-8);
+    // Anchored on its own interval's left-hand end: 30 bar at flo = 10.
+    BOOST_CHECK_CLOSE(limited.evaluation.value, (30.0 * bar) + limit * (5.0 * m3d), 1e-8);
+}
+
+BOOST_AUTO_TEST_SUITE_END() // SlopeLimitTests

@@ -95,6 +95,42 @@ bhp(const int     table_id,
 }
 
 template<class Scalar>
+detail::SlopeLimitedEvaluation<Scalar> VFPProdProperties<Scalar>::
+bhp_with_slope_limit(const int    table_id,
+                     const Scalar aqua,
+                     const Scalar liquid,
+                     const Scalar vapour,
+                     const Scalar thp_arg,
+                     const Scalar alq,
+                     const Scalar explicit_wfr,
+                     const Scalar explicit_gfr,
+                     const bool   use_expvfp,
+                     const Scalar max_slope) const
+{
+    const VFPProdTable& table = detail::getTable(m_tables, table_id);
+
+    // Same interpolation variables bhp() itself finds, kept deliberately
+    // identical so that an Unflattened result is bit for bit bhp()'s own.
+    Scalar flo = detail::getFlo(table, aqua, liquid, vapour);
+    Scalar wfr = detail::getWFR(table, aqua, liquid, vapour);
+    Scalar gfr = detail::getGFR(table, aqua, liquid, vapour);
+    if (use_expvfp || -flo < table.getFloAxis().front()) {
+        wfr = explicit_wfr;
+        gfr = explicit_gfr;
+    }
+
+    // flo is negative for producers in OPM, positive along the table's axis.
+    const auto flo_i = VFPHelpers<Scalar>::findInterpData(-flo, table.getFloAxis());
+    const auto thp_i = VFPHelpers<Scalar>::findInterpData(thp_arg, table.getTHPAxis());
+    const auto wfr_i = VFPHelpers<Scalar>::findInterpData(wfr, table.getWFRAxis());
+    const auto gfr_i = VFPHelpers<Scalar>::findInterpData(gfr, table.getGFRAxis());
+    const auto alq_i = VFPHelpers<Scalar>::findInterpData(alq, table.getALQAxis());
+
+    return VFPHelpers<Scalar>::interpolateWithSlopeLimit(table, -flo, flo_i, thp_i,
+                                                         wfr_i, gfr_i, alq_i, max_slope);
+}
+
+template<class Scalar>
 const VFPProdTable&
 VFPProdProperties<Scalar>::getTable(const int table_id) const
 {
@@ -201,6 +237,57 @@ bhp(const int       table_id,
     return bhp;
 }
 
+template<class Scalar>
+template <class EvalWell>
+EvalWell VFPProdProperties<Scalar>::
+bhp_with_slope_limit(const int       table_id,
+                     const EvalWell& aqua,
+                     const EvalWell& liquid,
+                     const EvalWell& vapour,
+                     const Scalar    thp,
+                     const Scalar    alq,
+                     const Scalar    explicit_wfr,
+                     const Scalar    explicit_gfr,
+                     const bool      use_expvfp,
+                     const Scalar    max_slope,
+                     detail::SlopeLimit* limit) const
+{
+    //Get the table
+    const VFPProdTable& table = detail::getTable(m_tables, table_id);
+    EvalWell bhp = 0.0 * aqua;
+
+    //Find interpolation variables -- identical to bhp()'s own
+    EvalWell flo = detail::getFlo(table, aqua, liquid, vapour);
+    EvalWell wfr = detail::getWFR(table, aqua, liquid, vapour);
+    EvalWell gfr = detail::getGFR(table, aqua, liquid, vapour);
+    if (use_expvfp || -flo.value() < table.getFloAxis().front()) {
+        wfr = explicit_wfr;
+        gfr = explicit_gfr;
+    }
+
+    //Value of FLO is negative in OPM for producers, but positive in VFP table
+    const auto flo_i = VFPHelpers<Scalar>::findInterpData(-flo.value(), table.getFloAxis());
+    const auto thp_i = VFPHelpers<Scalar>::findInterpData( thp, table.getTHPAxis());
+    const auto wfr_i = VFPHelpers<Scalar>::findInterpData( wfr.value(), table.getWFRAxis());
+    const auto gfr_i = VFPHelpers<Scalar>::findInterpData( gfr.value(), table.getGFRAxis());
+    const auto alq_i = VFPHelpers<Scalar>::findInterpData( alq, table.getALQAxis());
+
+    const auto limited = VFPHelpers<Scalar>::interpolateWithSlopeLimit(
+        table, -flo.value(), flo_i, thp_i, wfr_i, gfr_i, alq_i, max_slope);
+    if (limit != nullptr) {
+        *limit = limited.limit;
+    }
+    const auto& bhp_val = limited.evaluation;
+
+    // Unlike bhp(), dflo is *not* clipped at zero here: once the slope limit
+    // has been applied, dflo is the flattened curve's own slope, and dropping
+    // it would put the derivative back out of step with the value -- which is
+    // the whole point of going through this function rather than bhp().
+    bhp = (bhp_val.dwfr * wfr) + (bhp_val.dgfr * gfr) - (bhp_val.dflo * flo);
+    bhp.setValue(bhp_val.value);
+    return bhp;
+}
+
 #define INSTANTIATE(T,...)                        \
     template __VA_ARGS__                          \
     VFPProdProperties<T>::bhp(const int,          \
@@ -211,7 +298,19 @@ bhp(const int       table_id,
                               const T ,           \
                               const T ,           \
                               const T ,           \
-                              const bool) const;
+                              const bool) const;  \
+    template __VA_ARGS__                          \
+    VFPProdProperties<T>::bhp_with_slope_limit(const int,          \
+                                               const __VA_ARGS__&, \
+                                               const __VA_ARGS__&, \
+                                               const __VA_ARGS__&, \
+                                               const T ,           \
+                                               const T ,           \
+                                               const T ,           \
+                                               const T ,           \
+                                               const bool,         \
+                                               const T ,           \
+                                               detail::SlopeLimit*) const;
 
 #define INSTANTIATE_TYPE(T)                        \
     template class VFPProdProperties<T>;           \

@@ -476,7 +476,6 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_equil.cpp
   tests/test_extraconvergenceoutputthread.cpp
   tests/test_extractMatrix.cpp
-  tests/test_flattenedtubingcurve.cpp
   tests/test_flexiblesolver.cpp
   tests/test_GasSatfuncConsistencyChecks.cpp
   tests/test_gconsump.cpp
@@ -1261,7 +1260,6 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/ConnFracStatistics.hpp
   opm/simulators/wells/ConnFractureData.hpp
   opm/simulators/wells/EconomicLimitsMessage.hpp
-  opm/simulators/wells/FlattenedTubingCurve.hpp
   opm/simulators/wells/FractionCalculator.hpp
   opm/simulators/wells/GasLiftCommon.hpp
   opm/simulators/wells/GasLiftGroupInfo.hpp

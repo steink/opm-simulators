@@ -20,6 +20,8 @@
 #ifndef OPM_AUTODIFF_VFPPRODPROPERTIES_HPP_
 #define OPM_AUTODIFF_VFPPRODPROPERTIES_HPP_
 
+#include <opm/simulators/wells/VFPHelpers.hpp>
+
 #include <functional>
 #include <map>
 #include <vector>
@@ -97,6 +99,56 @@ public:
                const Scalar explicit_wfr,
                const Scalar explicit_gfr,
                const bool   use_expvfp) const;
+
+    /**
+     * bhp() with the tubing curve's own slope in FLO limited to \p max_slope,
+     * so that it can cross the well's own IPR at most once -- see
+     * detail::SlopeLimit for the shape of the problem and what each outcome
+     * means.
+     *
+     * \p max_slope is the IPR's own d(bhp)/d(FLO), oriented along the table's
+     * (positive, increasing) FLO axis and so negative for a producer, with
+     * the caller's safety margin already folded in. Everything else matches
+     * bhp() exactly, and on the friction-dominated branch -- where the curve
+     * is already flatter than the IPR, which is where a well normally sits --
+     * this *is* bhp(), bit for bit, with limit == Unflattened.
+     *
+     * Returns the value and all five partials together, since a caller that
+     * needs the flattened curve generally needs its derivatives to match it:
+     * the value and the derivative always come from one and the same line
+     * here, unlike bhp()'s own std::max(0, dflo) clip, which leaves a
+     * derivative describing a different function than the value does.
+     */
+    detail::SlopeLimitedEvaluation<Scalar>
+    bhp_with_slope_limit(const int    table_id,
+                         const Scalar aqua,
+                         const Scalar liquid,
+                         const Scalar vapour,
+                         const Scalar thp,
+                         const Scalar alq,
+                         const Scalar explicit_wfr,
+                         const Scalar explicit_gfr,
+                         const bool   use_expvfp,
+                         const Scalar max_slope) const;
+
+    /**
+     * bhp_with_slope_limit() for Evaluations -- same relationship to the
+     * Evaluation-valued bhp() as the Scalar overload above has to the Scalar
+     * one, and the same arguments. \p limit, when not null, receives what the
+     * lookup had to do.
+     */
+    template <class EvalWell>
+    EvalWell bhp_with_slope_limit(const int       table_id,
+                                  const EvalWell& aqua,
+                                  const EvalWell& liquid,
+                                  const EvalWell& vapour,
+                                  const Scalar    thp,
+                                  const Scalar    alq,
+                                  const Scalar    explicit_wfr,
+                                  const Scalar    explicit_gfr,
+                                  const bool      use_expvfp,
+                                  const Scalar    max_slope,
+                                  detail::SlopeLimit* limit = nullptr) const;
 
     /**
      * Linear interpolation of thp as a function of the input parameters

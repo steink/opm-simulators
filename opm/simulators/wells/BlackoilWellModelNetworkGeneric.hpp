@@ -46,6 +46,7 @@
 #include <unordered_map>
 
 namespace Opm {
+    class DeferredLogger;
     class Schedule;
     class UnitSystem;
     template<class Scalar, class IndexTraits> class BlackoilWellModelGeneric;
@@ -237,6 +238,28 @@ public:
         balanced_group_tree_ = std::move(tree);
     }
 
+    /// Part 3/4g's cliff diagnosis. After a converged group-tree solve against
+    /// \p balancedTree, checks every Thp well's converged FLO against its own
+    /// tilde_lambda's firstUndiscardedFlo() (GroupTreeSystem::worstCliffViolation()
+    /// does the actual comparison). If any well's converged point fell in a
+    /// discarded/bridged interval of its real tubing curve -- a region it
+    /// cannot actually operate in -- stops the single worst such well
+    /// (WellState::stopWell(), the same real "this well can't operate here"
+    /// state the reservoir well solve itself would produce, not a network-
+    /// local fiction) and returns true, so the caller knows to rebalance and
+    /// re-solve before trusting this tree's answer. Returns false if the solve
+    /// didn't converge at all (the caller's normal give-up/relaxed-update path
+    /// handles that -- this function does not retry) or if it converged with
+    /// nothing to correct. Called from outside this class's own hierarchy
+    /// (BlackoilWellModel::updateWellControlsAndNetworkIteration(), ahead of
+    /// network_.update() -- see that call site's own comment for why), unlike
+    /// groupTreeProductionNodePressures() itself.
+    bool stopWorstGroupTreeCliffViolation(const Network::ExtNetwork& network,
+                                          const int reportStepIdx,
+                                          const Network::Node& root,
+                                          const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree,
+                                          DeferredLogger& deferred_logger);
+
     /// Assemble the network Jacobian from the VFP table derivatives instead of
     /// differencing the residual.
     void useAnalyticJacobian(const bool on) { analytic_jacobian_ = on; }
@@ -402,6 +425,25 @@ protected:
                                      const int reportStepIdx,
                                      const Network::Node& root,
                                      const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree) const;
+
+    /// The shared core groupTreeProductionNodePressures() itself is built from:
+    /// everything through a converged NetworkSolve::solve() call, without
+    /// collapsing the result down to a bare pressure map the way that function
+    /// does. stopWorstGroupTreeCliffViolation() below needs the GroupTreeSystem
+    /// itself (for worstCliffViolation()) and the converged Result, not just
+    /// pressures. nullopt on anything either caller already gives up on --
+    /// logged at debug level by this function itself, the same convention
+    /// groupTreeProductionNodePressures() always used.
+    struct GroupTreeSolve {
+        NetworkSolve::GroupTreeSystem<Scalar> system;
+        std::vector<std::string> order;    // node names by index; order[0] == root.name()
+        NetworkSolve::Result<Scalar> result;
+    };
+    std::optional<GroupTreeSolve>
+    solveGroupTree(const Network::ExtNetwork& network,
+                  const int reportStepIdx,
+                  const Network::Node& root,
+                  const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree) const;
 
     bool newton_solver_ = false;
     bool group_tree_solver_ = false;

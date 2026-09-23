@@ -1014,12 +1014,12 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
 }
 
 template<typename Scalar, typename IndexTraits>
-std::optional<std::map<std::string, Scalar>>
+std::optional<typename BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>::GroupTreeSolve>
 BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>::
-groupTreeProductionNodePressures(const Network::ExtNetwork& network,
-                                 const int reportStepIdx,
-                                 const Network::Node& root,
-                                 const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree) const
+solveGroupTree(const Network::ExtNetwork& network,
+              const int reportStepIdx,
+              const Network::Node& root,
+              const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree) const
 {
     OPM_TIMEFUNCTION();
     using Sys = NetworkSolve::GroupTreeSystem<Scalar>;
@@ -1028,7 +1028,7 @@ groupTreeProductionNodePressures(const Network::ExtNetwork& network,
         OpmLog::debug(fmt::format("Network: solving the production network via the group-tree "
                                   "balancer is not possible at report step {} ({}); using the "
                                   "relaxed update.", reportStepIdx, why));
-        return std::optional<std::map<std::string, Scalar>>{};
+        return std::optional<GroupTreeSolve>{};
     };
 
     if (!root.terminal_pressure().has_value()) {
@@ -1175,18 +1175,70 @@ groupTreeProductionNodePressures(const Network::ExtNetwork& network,
             ? it->second : *root.terminal_pressure();
     }
 
-    const auto result = NetworkSolve::solve(system, guess, kNetworkSolveParams<Scalar>, NetworkSolve::FullStep{});
+    auto result = NetworkSolve::solve(system, guess, kNetworkSolveParams<Scalar>, NetworkSolve::FullStep{});
     if (!result.converged) {
         return giveUp(fmt::format("it did not converge in {} iterations", result.iterations - 1));
     }
     OpmLog::debug(fmt::format("Network: solved the production network under {} via the group-tree "
                               "balancer at report step {} in {} iterations.",
                               root.name(), reportStepIdx, result.iterations));
+    return GroupTreeSolve{std::move(system), std::move(order), std::move(result)};
+}
+
+template<typename Scalar, typename IndexTraits>
+std::optional<std::map<std::string, Scalar>>
+BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>::
+groupTreeProductionNodePressures(const Network::ExtNetwork& network,
+                                 const int reportStepIdx,
+                                 const Network::Node& root,
+                                 const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree) const
+{
+    const auto solved = solveGroupTree(network, reportStepIdx, root, balancedTree);
+    if (!solved.has_value()) {
+        return std::nullopt;
+    }
     std::map<std::string, Scalar> pressures;
-    for (std::size_t n = 0; n < order.size(); ++n) {
-        pressures[order[n]] = result.node_pressure[n];
+    for (std::size_t n = 0; n < solved->order.size(); ++n) {
+        pressures[solved->order[n]] = solved->result.node_pressure[n];
     }
     return pressures;
+}
+
+template<typename Scalar, typename IndexTraits>
+bool
+BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>::
+stopWorstGroupTreeCliffViolation(const Network::ExtNetwork& network,
+                                 const int reportStepIdx,
+                                 const Network::Node& root,
+                                 const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree,
+                                 DeferredLogger& deferred_logger)
+{
+    const auto solved = solveGroupTree(network, reportStepIdx, root, balancedTree);
+    if (!solved.has_value()) {
+        return false;   // the normal give-up/relaxed-update path handles this
+    }
+    const auto worst = solved->system.worstCliffViolation(solved->result);
+    if (!worst.has_value()) {
+        return false;
+    }
+    for (auto* well : well_model_.genericWells()) {
+        if (well->name() == *worst) {
+            // WellState::stopWell() (ws.status) is not dynamic -- once set, a
+            // well stays stopped with nothing to reconsider it. The well
+            // interface's own status (wellStatus_, via stopWell()/openWell())
+            // is what the reservoir's own well solve re-evaluates every
+            // outer iteration (see solveWellWithOperabilityCheck()'s own
+            // wellIsStopped()-gated reopen attempt) -- setting *that* is what
+            // makes this well's next real well-equation solve retest it
+            // (Part 1b's own "revive" already relies on exactly this).
+            well->stopWell();
+            break;
+        }
+    }
+    deferred_logger.info(fmt::format(
+        "Network: well {} converged past its own tubing-curve cliff under the group-tree "
+        "balancer at report step {}; stopping it and rebalancing.", *worst, reportStepIdx));
+    return true;
 }
 
 template<typename Scalar, typename IndexTraits>

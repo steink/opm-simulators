@@ -19,7 +19,6 @@
 #ifndef OPM_NETWORK_GROUP_TREE_SYSTEM_HEADER_INCLUDED
 #define OPM_NETWORK_GROUP_TREE_SYSTEM_HEADER_INCLUDED
 
-#include <opm/simulators/wells/FlattenedTubingCurve.hpp>
 #include <opm/simulators/wells/NetworkSolve.hpp>
 #include <opm/simulators/wells/ProdGroupTreeBalancer.hpp>
 #include <opm/simulators/wells/VFPProdProperties.hpp>
@@ -47,9 +46,10 @@ namespace Opm::NetworkSolve {
 ///
 /// First version: "unproblematic" wells only, i.e. no stopped-well trial IPR
 /// (Part 1b) yet. Lift-cliff handling (Part 3) is opt-in per Thp well: one
-/// with a Well::tilde_lambda set solves its row against that flattened curve
-/// instead of the real table -- see thpWellResidualRow(). No autochoke
-/// either. Every well has one of three kinds:
+/// with a Well::ipr_slope_limit set solves its row against the slope-limited
+/// tubing curve (VFPProdProperties::bhp_with_slope_limit()) instead of the
+/// real table -- see thpWellResidualRow(). No autochoke either. Every well
+/// has one of three kinds:
 ///  - Pinned:  a fixed, already-known rate (an Individual well, its own limit
 ///             binds) -- no unknown of its own at all.
 ///  - Group:   tied to an Active node's own lambda, q_target_mode = guideRate
@@ -101,14 +101,19 @@ public:
         // instead of the usual tubing-curve equation -- see residual().
         Scalar bhp_shutin = 0;
 
-        // Thp only, and optional even then: Part 3's flattened tubing curve,
-        // built by the caller from this well's own table/ipr whenever those
-        // are (re)computed (not by this class). Unset means "use the real
-        // table directly, unflattened" -- the only behaviour before this
-        // field existed, still exercised by every earlier Thp test in
-        // test_networkgrouptreesystem.cpp, and still a legitimate choice for
-        // a well known not to have a lift cliff. See thpWellResidualRow().
-        std::optional<FlattenedTubingCurve<Scalar>> tilde_lambda;
+        // Thp only, and optional even then: Part 3's cliff protection, as the
+        // steepest d(bhp)/d(FLO) this well's own tubing curve is allowed to
+        // have before it is flattened -- the well's own IPR slope in that
+        // same (table-oriented, positive-FLO) sense, plus a margin. Passed
+        // straight to VFPProdProperties::bhp_with_slope_limit(); see
+        // detail::SlopeLimit for what the flattening does and why.
+        //
+        // Unset means "use the real table directly, unflattened" -- the only
+        // behaviour before this field existed, still exercised by every
+        // earlier Thp test in test_networkgrouptreesystem.cpp, and still a
+        // legitimate choice for a well known not to have a lift cliff. See
+        // thpWellResidualRow().
+        std::optional<Scalar> ipr_slope_limit;
     };
 
     /// One Active node from ProdGroupTreeBalancer::extractFlatNetworkInput():
@@ -305,6 +310,7 @@ public:
             const bool has_ipr = wellNetworkData.at(name).has_ipr;
             if (src.networkThp && has_ipr) {
                 well.kind = WellKind::Thp;
+                well.ipr_slope_limit = iprSlopeLimit(well);
             } else {
                 well.kind = WellKind::Pinned;
                 if (has_ipr && src.target > Scalar{0}) {
@@ -410,6 +416,77 @@ public:
     const std::vector<Well>& wells() const { return wells_; }
     const std::vector<ActiveNode>& activeNodes() const { return activeNodes_; }
     Scalar terminalPressure() const { return terminal_pressure_; }
+
+    /// The steepest d(bhp)/d(FLO) \p well's tubing curve may have before
+    /// bhp_with_slope_limit() flattens it -- the well's own IPR slope in that
+    /// same sense, with a margin. Along the IPR, FLO = flo(ipr_a + ipr_b*bhp),
+    /// and flo() is a selection/sum of the phase rates, so d(FLO)/d(bhp) is
+    /// just flo(ipr_b) -- negative for a producer, hence a negative limit.
+    ///
+    /// The margin is relative rather than an absolute pressure-per-rate
+    /// epsilon: a curve exactly parallel to the IPR admits no unique crossing
+    /// either, and "within 5% of the IPR's own slope" scales with the well
+    /// instead of needing to be tuned per deck -- and needs no unit
+    /// conversion to get wrong. nullopt for a well whose own phase mix
+    /// registers as no FLO at all on this table: nothing to limit against, so
+    /// it keeps the unflattened curve.
+    ///
+    /// populateFromFlatNetwork() sets Well::ipr_slope_limit from this for
+    /// every Thp well it builds; it is public so that a hand-built well (the
+    /// tests) can be given the same limit the real path would compute.
+    std::optional<Scalar> iprSlopeLimit(const Well& well) const
+    {
+        const auto& table = props_->getTable(well.vfp_table);
+        const Scalar dflo_dbhp = detail::getFlo(table, well.ipr_b[kWater],
+                                                well.ipr_b[kOil], well.ipr_b[kGas]);
+        if (dflo_dbhp == Scalar{0}) {
+            return std::nullopt;
+        }
+        constexpr Scalar margin = Scalar{0.95};
+        return margin / dflo_dbhp;
+    }
+
+    /// After a converged solve, the name of the Thp well whose converged
+    /// operating point most needs correcting -- see Well::ipr_slope_limit for
+    /// why: a well solved against the slope-limited curve converges cleanly
+    /// even where its real tubing curve falls faster than its own IPR, a
+    /// region it cannot actually operate in. Re-evaluating the lookup at the
+    /// converged point says whether any flattening was needed there at all
+    /// (detail::SlopeLimit::Unflattened means the real table was used as is,
+    /// so the answer stands); anything else means this well's row needs to be
+    /// pinned at zero and the whole tree rebalanced -- the caller's job, not
+    /// this class's, which knows nothing of the balancer or WellState.
+    ///
+    /// Among the wells that did need flattening, the one whose flattened bhp
+    /// departs furthest from what the real table says at the same point is
+    /// returned (nullopt if there are none), matching the "stop the worst
+    /// offender, one at a time" anti-oscillation choice. A Thp well with no
+    /// slope limit set is never flagged -- there is nothing to diagnose
+    /// against.
+    std::optional<std::string> worstCliffViolation(const Result<Scalar>& result) const
+    {
+        std::optional<std::string> worst;
+        Scalar worst_gap = Scalar{0};
+        for (std::size_t w = 0; w < wells_.size(); ++w) {
+            const auto& well = wells_[w];
+            if (well.kind != WellKind::Thp || !well.ipr_slope_limit.has_value()) {
+                continue;
+            }
+            const Scalar thp = result.node_pressure[well.node];
+            const auto& q = result.well_phase_rates[w];
+            const auto limited = slopeLimitedBhp(well, thp, q);
+            if (limited.limit == detail::SlopeLimit::Unflattened) {
+                continue;
+            }
+            const Scalar gap = std::abs(limited.evaluation.value
+                                        - tableBhp(well.vfp_table, thp, q, well.alq));
+            if (!worst.has_value() || gap > worst_gap) {
+                worst_gap = gap;
+                worst = well.name;
+            }
+        }
+        return worst;
+    }
 
     int size() const override { return numNodes() + numActiveLambdas() + numThpWells(); }
 
@@ -578,9 +655,27 @@ public:
         }
         const Scalar thp = x[pIdx(well.node)];
         const auto qw = wellPhaseRatesOwn(w, x);
-        const Scalar computed = well.tilde_lambda ? well.tilde_lambda->bhp(thp, qw)
-                                                  : tableBhp(well.vfp_table, thp, qw, well.alq);
+        const Scalar computed = slopeLimitedBhp(well, thp, qw).evaluation.value;
         return (bhp - computed) / unit::barsa;
+    }
+
+    /// This well's own tubing curve at (thp, q), flattened against its own
+    /// IPR where Well::ipr_slope_limit says to -- see that field. Without a
+    /// limit set this is exactly tableBhp(), reported as Unflattened.
+    detail::SlopeLimitedEvaluation<Scalar>
+    slopeLimitedBhp(const Well& well, const Scalar thp, const std::array<Scalar, NP>& q) const
+    {
+        // props_->bhp*() want water, oil, gas (aqua, liquid, vapour) and
+        // negative-for-production; q here is oil, water, gas and positive --
+        // the same two conversions tableBhp() makes, at the same one place.
+        if (!well.ipr_slope_limit.has_value()) {
+            detail::SlopeLimitedEvaluation<Scalar> plain;
+            plain.evaluation.value = tableBhp(well.vfp_table, thp, q, well.alq);
+            return plain;
+        }
+        return props_->bhp_with_slope_limit(well.vfp_table, -q[kWater], -q[kOil], -q[kGas],
+                                            thp, well.alq, Scalar{0}, Scalar{0}, false,
+                                            *well.ipr_slope_limit);
     }
 
     DenseMatrix<Scalar> jacobian(const State&) const override

@@ -864,27 +864,38 @@ VFPPROD
 
 } // namespace
 
-// Proof that Well::tilde_lambda actually changes what Newton converges to,
+// Proof that Well::ipr_slope_limit actually changes what Newton converges to,
 // not just that it compiles: the node has no table of its own and the
 // terminal pressure sits exactly at the humped table's one thp row (20 bar),
 // so the well's own bhp equation is solved against, respectively, the raw
-// table and its flattened form, with nothing else in the system to blur the
-// comparison.
+// table and its slope-limited form, with nothing else in the system to blur
+// the comparison.
 //
-// PI = 1 (m3/d)/bar and eps = 0.05 bar/(m3/d) are exactly
-// test_flattenedtubingcurve.cpp's own low_flow_hump_gets_bridged_by_a_single_
-// chord case (threshold -0.95 bar/(m3/d)), so the discard pattern is the
-// same already-verified one: flo=20 discarded, bridged by the chord from
-// (10,30) to (30,15) -- bhp = 37.5 - 0.75*flo on [10,30], vs. the raw
-// table's own bhp = 30 - 0.5*flo on [20,30].
+// The table's one thp row, in bar against flo in m3/d, is
+//   (10,30) (20,20) (30,15) (40,25) (50,40)
+// so its segment slopes are -1, -0.5, +1, +1.5 bar/(m3/d): a liquid-loading
+// branch falling steeply out of flo=10, a minimum near flo=30, then the
+// friction-dominated rise.
 //
-// bhp_shutin = 42 bar is hand-picked so IPR(flo) = 42 - flo crosses the *raw*
-// [20,30] segment at exactly (flo=24, bhp=18), and the *bridged* chord at a
-// different point, (flo=18, bhp=24) -- two genuinely different answers, not
-// just two evaluations of the same one. (The [10,20] segment is skipped for
-// this purpose: its own slope is exactly -1, i.e. parallel to any IPR with
-// this same PI, so no unique crossing sits there at all.)
-BOOST_AUTO_TEST_CASE(tilde_lambda_moves_the_thp_wells_converged_point_off_the_cliff)
+// PI = 0.96 (m3/d)/bar puts the IPR's own slope at -1/0.96 = -1.0417
+// bar/(m3/d), so the slope limit is 0.95 * that = -0.9896: the [10,20]
+// segment (-1) is steeper than that and gets flattened, [20,30] (-0.5) and
+// everything above it does not. A query on [10,20] therefore extrapolates
+// [20,30] backwards, which is the line bhp = 30 - 0.5*flo -- and that line
+// *continues* [20,30] itself, so the slope-limited curve is one straight
+// segment over the whole of [10,30].
+//
+// bhp_shutin = 40.6 bar is then picked so that each curve has exactly *one*
+// crossing with IPR(flo) = 40.6 - flo/0.96, which keeps the comparison from
+// depending on which root Newton happens to fall into:
+//   - against the raw table, only the falling [10,20] branch is crossed, at
+//     (flo=14.4, bhp=25.6) -- an unstable operating point, the very thing the
+//     slope limit exists to keep a solve away from;
+//   - against the slope-limited curve, only bhp = 30 - 0.5*flo is crossed, at
+//     flo = 254.4/13, bhp = 262.8/13.
+// Both roots sit inside [10,20], i.e. inside the flattened stretch, so the
+// limit is genuinely in play at the solution and not merely on the way there.
+BOOST_AUTO_TEST_CASE(slope_limit_moves_the_thp_wells_converged_point_off_the_cliff)
 {
     const auto deck = Opm::Parser{}.parseString(kHumpedVfpProd);
     const VFPProdTable table(deck["VFPPROD"].front(), /*gaslift_opt_active=*/false, UnitSystem{});
@@ -892,8 +903,8 @@ BOOST_AUTO_TEST_CASE(tilde_lambda_moves_the_thp_wells_converged_point_off_the_cl
     humped_props.addTable(table);
 
     const double m3d = unit::cubic(unit::meter) / unit::day;
-    const double PI = 1.0 * m3d / unit::barsa;
-    const double bhp_shutin = 42.0 * unit::barsa;
+    const double PI = 0.96 * m3d / unit::barsa;
+    const double bhp_shutin = 40.6 * unit::barsa;
 
     GroupTreeSystem<double>::Well w;
     w.name = "W1";
@@ -903,16 +914,17 @@ BOOST_AUTO_TEST_CASE(tilde_lambda_moves_the_thp_wells_converged_point_off_the_cl
     w.ipr_b[GroupTreeSystem<double>::kOil] = -PI;
     w.ipr_a[GroupTreeSystem<double>::kOil] = PI * bhp_shutin;
 
-    auto buildAndSolve = [&](const bool use_tilde_lambda) {
+    auto buildAndSolve = [&](const bool use_slope_limit) {
         GroupTreeSystem<double> sys(humped_props);
         sys.addNode(Node{"N1", /*parent=*/0, /*vfp_table=*/NoTable, /*efficiency=*/1.0});
         sys.setTerminalPressure(20.0 * unit::barsa);   // exactly the table's one thp row
 
         auto well = w;
-        if (use_tilde_lambda) {
-            well.tilde_lambda.emplace(table, humped_props, table.getTableNum(), well.ipr_b, /*alq=*/0.0,
-                                      /*eps=*/0.05 * unit::barsa / m3d);
-            BOOST_REQUIRE(!well.tilde_lambda->degenerate());
+        if (use_slope_limit) {
+            // The same limit populateFromFlatNetwork() would have given it.
+            well.ipr_slope_limit = sys.iprSlopeLimit(well);
+            BOOST_REQUIRE(well.ipr_slope_limit.has_value());
+            BOOST_CHECK_CLOSE(*well.ipr_slope_limit, (-0.95 / 0.96) * unit::barsa / m3d, 1e-8);
         }
         sys.addWell(well);
 
@@ -928,17 +940,17 @@ BOOST_AUTO_TEST_CASE(tilde_lambda_moves_the_thp_wells_converged_point_off_the_cl
 
     BOOST_REQUIRE_EQUAL(real.well_bhp.size(), 1U);
     BOOST_REQUIRE_EQUAL(flat.well_bhp.size(), 1U);
-    BOOST_TEST_MESSAGE(fmt::format("real: bhp={:.4f} bar oil={:.4f} m3/d   flat: bhp={:.4f} bar oil={:.4f} m3/d",
+    BOOST_TEST_MESSAGE(fmt::format("real: bhp={:.4f} bar oil={:.4f} m3/d   limited: bhp={:.4f} bar oil={:.4f} m3/d",
                                     real.well_bhp[0] / unit::barsa, real.well_rate[0] / m3d,
                                     flat.well_bhp[0] / unit::barsa, flat.well_rate[0] / m3d));
 
-    // Against the raw table: the hand-derived crossing on the discarded segment.
-    BOOST_CHECK_CLOSE(real.well_bhp[0], 18.0 * unit::barsa, 1e-4);
-    BOOST_CHECK_CLOSE(real.well_rate[0], 24.0 * m3d, 1e-4);
+    // Against the raw table: the unstable crossing on the falling branch.
+    BOOST_CHECK_CLOSE(real.well_bhp[0], 25.6 * unit::barsa, 1e-4);
+    BOOST_CHECK_CLOSE(real.well_rate[0], 14.4 * m3d, 1e-4);
 
-    // Against the flattened curve: a genuinely different crossing, on the
-    // bridging chord -- proof tilde_lambda is what actually got solved
-    // against, not the raw table silently reused.
-    BOOST_CHECK_CLOSE(flat.well_bhp[0], 24.0 * unit::barsa, 1e-4);
-    BOOST_CHECK_CLOSE(flat.well_rate[0], 18.0 * m3d, 1e-4);
+    // Against the slope-limited curve: a genuinely different point, off that
+    // branch -- proof the limit is what actually got solved against, not the
+    // raw table silently reused.
+    BOOST_CHECK_CLOSE(flat.well_bhp[0], (262.8 / 13.0) * unit::barsa, 1e-4);
+    BOOST_CHECK_CLOSE(flat.well_rate[0], (254.4 / 13.0) * m3d, 1e-4);
 }
