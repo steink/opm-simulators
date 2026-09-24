@@ -1339,6 +1339,9 @@ updatePressures(const int reportStepIdx,
     // Nodes a simultaneous solve has placed this pass, per domain; the update
     // below treats them differently.
     std::array<std::set<std::string>, details::domainIndex(details::NetworkDomain::Count)> solved_nodes;
+    // The subset of production nodes placed by the group-tree solve: handed to
+    // the wells undamped (see below).
+    std::set<std::string> group_tree_nodes;
     for (const auto& network : details::activeNetworks(well_model_.schedule(), reportStepIdx)) {
         NetworkPressures result;
         if (network.domain == details::NetworkDomain::Production) {
@@ -1413,6 +1416,7 @@ updatePressures(const int reportStepIdx,
                             result.node_pressures[name] = pressure;
                             result.invalid_nodes.erase(name);
                             solved_nodes[details::domainIndex(network.domain)].insert(name);
+                            group_tree_nodes.insert(name);
                         }
                     }
                 }
@@ -1484,7 +1488,19 @@ updatePressures(const int reportStepIdx,
                 // the network gives for the resulting rates.
                 const auto pressure = previous_domain_pressures.at(name);
                 const bool valid = invalid.count(name) == 0;
-                // A node a simultaneous solve has placed is at its fixed point,
+                if (network.domain == details::NetworkDomain::Production
+                    && group_tree_nodes.count(name) > 0) {
+                    // The group-tree solve is the network's answer for the
+                    // balancer's categorization: hand it to the wells as is. A
+                    // well it puts past its tubing-curve cliff is the cliff
+                    // diagnosis' business, not something to hide by creeping
+                    // towards the answer. Drop the node's updater history so a
+                    // later fallback to the relaxed update starts afresh.
+                    network_imbalance = std::max(network_imbalance, std::abs(computed_pressure - pressure));
+                    updaters.erase(name);
+                    continue;
+                }
+                // A node the Newton solve has placed is at its fixed point,
                 // but the wells still need the step to it bounded -- handing
                 // them the whole jump at once is how a well near its tubing
                 // limit gets shut as inoperable in a transient. The bracketing
