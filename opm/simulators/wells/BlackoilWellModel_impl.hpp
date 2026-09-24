@@ -505,6 +505,11 @@ namespace Opm {
             OPM_PARALLEL_CATCH_CLAUSE(exc_type, exc_msg);
         }
 
+        // The balancer only owns production control within an outer iteration
+        // that decided so (see updateWellControlsAndNetworkIteration()); until
+        // then this timestep starts from the standard targets.
+        this->setBalancerOwnsProduction(false);
+        balancer_committed_cmodes_.clear();
         this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
         try {
             // Compute initial well solution for new wells and injectors that change injection type i.e. WAG.
@@ -1305,6 +1310,31 @@ namespace Opm {
             this->rescoupHelper_.receiveMasterGroupNodePressuresFromMaster();
         }
 #endif
+        const auto& iterCtx = simulator_.problem().iterationContext();
+        const int nupcol = this->schedule()[reportStepIdx].nupcol();
+        const auto active_networks = details::activeNetworks(this->schedule(), reportStepIdx);
+        const bool has_production_network = std::any_of(
+            active_networks.begin(), active_networks.end(),
+            [](const auto& n) { return n.domain == details::NetworkDomain::Production; });
+        const bool group_tree_network = has_production_network && this->network().usesGroupTreeSolver();
+
+        // Within NUPCOL the group-tree balancer is the single authority for
+        // production control wherever its output is actually committed to the
+        // wells: with no production network, or with the group-tree network
+        // solver. There, standard production switching and the standard producer
+        // group-target update are bypassed (see balancerOwnsProduction()), the
+        // balancer runs every outer iteration, and local well solves are left to
+        // converge to whatever their constraints dictate -- a local solve ending
+        // on a different control than the one committed is reported below as a
+        // control change, not overridden. With fixedpoint/newton on a network the
+        // balancer's tree is only cached, so standard switching stays in charge.
+        // Set before the group-data update and updateWellControls() below, which
+        // both consult it.
+        const bool balancer_commits = param_.enable_group_tree_balancer_
+            && iterCtx.withinNupcol(nupcol)
+            && (!has_production_network || group_tree_network);
+        this->setBalancerOwnsProduction(balancer_commits);
+
         this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
         // We need to call updateWellControls before we update the network as
         // network updates are only done on thp controlled wells.
@@ -1317,69 +1347,60 @@ namespace Opm {
         // of well IPRs before network_.update() runs below, and before well
         // equations get re-solved again next outer iteration (which would
         // refresh those IPRs out from under an in-progress settling pass).
-        // Deliberately not lagged by an iteration the way the shared block
-        // further down still is for every other combination: this loop is
-        // itself the mechanism deciding whether another round is needed, so
-        // it has to solve against the tree it just built, not last
-        // iteration's -- see stopWorstGroupTreeCliffViolation()'s own doc
-        // comment. Once this settles (or gives up), control returns to the
-        // normal sequence below unchanged; the *next* full outer iteration's
-        // updateWellControls() is what actually re-solves well equations and
-        // refreshes IPRs, and if those move, this loop runs again from
-        // scratch next time round, exactly like any other configuration-
-        // change trigger for the same outer loop.
+        // Runs every outer iteration within NUPCOL: the balancer owns
+        // production control there, so there is no standard switching whose
+        // "changed" flag could gate it. The final, settled tree is committed to
+        // the wells (control modes, targets, group control modes -- not rates,
+        // which come from the network solve and the local well solves).
         bool group_tree_cliff_diagnosis_ran = false;
-        const auto active_networks = details::activeNetworks(this->schedule(), reportStepIdx);
-        const bool has_production_network = std::any_of(
-            active_networks.begin(), active_networks.end(),
-            [](const auto& n) { return n.domain == details::NetworkDomain::Production; });
-        if (param_.enable_group_tree_balancer_ && well_group_control_changed
-            && has_production_network && this->network().usesGroupTreeSolver()) {
-            const auto& iterCtx = simulator_.problem().iterationContext();
-            const int nupcol = this->schedule()[reportStepIdx].nupcol();
-            if (iterCtx.withinNupcol(nupcol)) {
-                group_tree_cliff_diagnosis_ran = true;
-                // The whole anti-oscillation net for v1 (per the implementation
-                // plan): cap the number of stop-and-rebalance rounds rather than
-                // building a real cycle-breaker.
-                constexpr int kMaxCliffDiagnosisIters = 10;
-                bool stopped_something = false;
-                int diagnosis_iters = 0;
-                do {
-                    const auto balancerLimits = prepareWellsForBalancing_(local_deferredLogger);
-                    this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ false);
-                    auto balanced = ProdGroupTreeBalancer::balanceGroupTree(
-                        *this,
-                        this->summaryState(),
-                        reportStepIdx,
-                        param_.group_tree_balancer_tolerance_,
-                        balancerLimits,
-                        local_deferredLogger);
-                    this->network().setBalancedGroupTree(balanced.tree);
+        bool balancer_changed = false;
+        if (balancer_commits && group_tree_network) {
+            group_tree_cliff_diagnosis_ran = true;
+            // The whole anti-oscillation net for v1 (per the implementation
+            // plan): cap the number of stop-and-rebalance rounds rather than
+            // building a real cycle-breaker.
+            constexpr int kMaxCliffDiagnosisIters = 10;
+            bool stopped_something = false;
+            int diagnosis_iters = 0;
+            ProdGroupTreeBalancer::Tree<Scalar> final_tree;
+            do {
+                const auto balancerLimits = prepareWellsForBalancing_(local_deferredLogger);
+                this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ false);
+                auto balanced = ProdGroupTreeBalancer::balanceGroupTree(
+                    *this,
+                    this->summaryState(),
+                    reportStepIdx,
+                    param_.group_tree_balancer_tolerance_,
+                    balancerLimits,
+                    local_deferredLogger);
+                this->network().setBalancedGroupTree(balanced.tree);
 
-                    stopped_something = false;
-                    for (const auto& network : active_networks) {
-                        if (network.domain != details::NetworkDomain::Production) {
-                            continue;
-                        }
-                        for (const auto& tree : network.network.get().roots()) {
-                            stopped_something |= this->network().stopWorstGroupTreeCliffViolation(
-                                network.network.get(), reportStepIdx, tree.get(),
-                                balanced.tree, local_deferredLogger);
-                        }
+                stopped_something = false;
+                for (const auto& network : active_networks) {
+                    if (network.domain != details::NetworkDomain::Production) {
+                        continue;
                     }
-                    this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
-                    ++diagnosis_iters;
-                } while (stopped_something && diagnosis_iters < kMaxCliffDiagnosisIters);
-                if (stopped_something) {
-                    local_deferredLogger.warning(
-                        "GroupTreeCliffDiagnosisNotStable",
-                        fmt::format("Network: group-tree cliff diagnosis did not stabilize "
-                                   "within {} rounds at report step {}; proceeding with the "
-                                   "current stopping configuration.",
-                                   kMaxCliffDiagnosisIters, reportStepIdx));
+                    for (const auto& tree : network.network.get().roots()) {
+                        stopped_something |= this->network().stopWorstGroupTreeCliffViolation(
+                            network.network.get(), reportStepIdx, tree.get(),
+                            balanced.tree, local_deferredLogger);
+                    }
                 }
+                final_tree = std::move(balanced.tree);
+                ++diagnosis_iters;
+            } while (stopped_something && diagnosis_iters < kMaxCliffDiagnosisIters);
+            if (stopped_something) {
+                local_deferredLogger.warning(
+                    "GroupTreeCliffDiagnosisNotStable",
+                    fmt::format("Network: group-tree cliff diagnosis did not stabilize "
+                               "within {} rounds at report step {}; proceeding with the "
+                               "current stopping configuration.",
+                               kMaxCliffDiagnosisIters, reportStepIdx));
             }
+            balancer_changed = commitBalancedTree_(final_tree, /*commitRates=*/false,
+                                                   local_deferredLogger);
+            this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
+
         }
 
         const auto [more_inner_network_update, network_imbalance] =
@@ -1414,50 +1435,51 @@ namespace Opm {
                                        "updateWellControlsAndNetworkIteration() failed: ",
                                        this->terminal_output_, grid().comm());
 
-        // Group-tree balancer: re-categorize Individual/Group control and
-        // redistribute group targets once well controls have actually moved,
-        // while still within NUPCOL (the standard "how many outer iterations
-        // before controls are frozen" window) -- an ordinary configuration-
-        // change trigger for the same outer loop, not run every iteration.
-        // Skipped when the group-tree-solver loop above already ran: it did
-        // this exact balance-and-cache sequence itself, as many times as its
-        // own settling needed, and running it again here would just redo the
-        // last of those rounds for nothing.
-        if (param_.enable_group_tree_balancer_ && well_group_control_changed
-            && !group_tree_cliff_diagnosis_ran) {
-            const auto& iterCtx = simulator_.problem().iterationContext();
-            const int nupcol = this->schedule()[reportStepIdx].nupcol();
-            if (iterCtx.withinNupcol(nupcol)) {
-                const auto balancerLimits = prepareWellsForBalancing_(local_deferredLogger);
-                this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ false);
 
-                auto balanced = ProdGroupTreeBalancer::balanceGroupTree(
-                    *this,
-                    this->summaryState(),
-                    reportStepIdx,
-                    param_.group_tree_balancer_tolerance_,
-                    balancerLimits,
-                    local_deferredLogger);
+        // A local solve (network_.update()'s re-solves or
+        // prepareWellsBeforeAssembling() just above) is free to end on a
+        // different control than the balancer committed, or to stop/reopen the
+        // well; the configuration is then not settled, so report it as a
+        // change to the outer loop and the global Newton.
+        // Compared against the last commit, which for the no-network case is
+        // the previous outer iteration's (it happens below, after the solves).
+        const bool local_solves_disagree = balancer_commits && localSolvesDisagreeWithBalancer_();
 
-                // A production network is what has to consume the balancer's
-                // own output via a coupled pressure solve (this->network(),
-                // see BlackoilWellModelNetworkGeneric::updatePressures()) --
-                // applyTreeToState()'s direct rate/production_cmode stamp is
-                // only correct when nothing else is deciding pressures
-                // against those same wells. Caching the tree unconditionally
-                // whenever a network exists is harmless if --network-solver
-                // is fixedpoint/newton instead of group-tree: nothing reads
-                // it then, and neither does applyTreeToState() run, so the
-                // two mechanisms never fight over the same wells.
-                if (has_production_network) {
-                    this->network().setBalancedGroupTree(balanced.tree);
-                } else {
-                    ProdGroupTreeBalancer::applyTreeToState(balanced.tree, *this, local_deferredLogger);
-                }
+        // Group-tree balancer, every other combination: re-categorize
+        // Individual/Group control and redistribute group targets once well
+        // controls have actually moved, while still within NUPCOL. Skipped when
+        // the group-tree-solver loop above already ran: it did this exact
+        // balance-and-cache sequence itself.
+        //  - No production network: the balancer owns production control, runs
+        //    every outer iteration and commits the full tree, rates included.
+        //  - fixedpoint/newton network: the tree is only cached; standard
+        //    switching stays in charge, so it is still gated on
+        //    well_group_control_changed.
+        if (param_.enable_group_tree_balancer_ && !group_tree_cliff_diagnosis_ran
+            && iterCtx.withinNupcol(nupcol)
+            && (balancer_commits || well_group_control_changed)) {
+            const auto balancerLimits = prepareWellsForBalancing_(local_deferredLogger);
+            this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ false);
 
-                this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
+            auto balanced = ProdGroupTreeBalancer::balanceGroupTree(
+                *this,
+                this->summaryState(),
+                reportStepIdx,
+                param_.group_tree_balancer_tolerance_,
+                balancerLimits,
+                local_deferredLogger);
+
+            if (has_production_network) {
+                this->network().setBalancedGroupTree(balanced.tree);
+            } else {
+                balancer_changed = commitBalancedTree_(balanced.tree, /*commitRates=*/true,
+                                                       local_deferredLogger);
             }
+
+            this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
         }
+        well_group_control_changed = well_group_control_changed || balancer_changed
+            || local_solves_disagree;
 
         // update guide rates
         if (alq_updated || BlackoilWellModelGuideRates(*this).
@@ -1532,6 +1554,47 @@ namespace Opm {
             }
         }
         return result;
+    }
+
+    template<typename TypeTag>
+    bool
+    BlackoilWellModel<TypeTag>::
+    commitBalancedTree_(const ProdGroupTreeBalancer::Tree<Scalar>& tree,
+                        const bool commitRates,
+                        DeferredLogger& deferred_logger)
+    {
+        const bool changed = ProdGroupTreeBalancer::applyTreeToState(tree, *this, deferred_logger,
+                                                                     commitRates);
+        balancer_committed_cmodes_.clear();
+        for (const auto& well : well_container_) {
+            if (this->balancerOwnsProductionControl_(*well)) {
+                balancer_committed_cmodes_.emplace(
+                    well->name(), this->wellState().well(well->indexOfWell()).production_cmode);
+            }
+        }
+        return grid().comm().max(static_cast<int>(changed)) > 0;
+    }
+
+    template<typename TypeTag>
+    bool
+    BlackoilWellModel<TypeTag>::
+    localSolvesDisagreeWithBalancer_() const
+    {
+        bool disagree = false;
+        for (const auto& well : well_container_) {
+            if (!this->balancerOwnsProductionControl_(*well)) {
+                continue;
+            }
+            const auto it = balancer_committed_cmodes_.find(well->name());
+            if (it == balancer_committed_cmodes_.end()) {
+                continue;
+            }
+            if (this->wellState().well(well->indexOfWell()).production_cmode != it->second) {
+                disagree = true;
+                break;
+            }
+        }
+        return grid().comm().max(static_cast<int>(disagree)) > 0;
     }
 
     template<typename TypeTag>
@@ -1977,6 +2040,9 @@ namespace Opm {
                 // We need to communicate the exception thrown to the others and rethrow.
                 OPM_BEGIN_PARALLEL_TRY_CATCH()
                     for (const auto& well : well_container_) {
+                        if (this->balancerOwnsProductionControl_(*well)) {
+                            continue;
+                        }
                         const auto mode = WellInterface<TypeTag>::IndividualOrGroup::Group;
                         const bool changed_well = well->updateWellControl(
                             simulator_, mode, this->groupStateHelper(), this->wellState()
@@ -2002,6 +2068,9 @@ namespace Opm {
                 // We need to communicate the exception thrown to the others and rethrow.
                 OPM_BEGIN_PARALLEL_TRY_CATCH()
                     for (const auto& well : well_container_) {
+                        if (this->balancerOwnsProductionControl_(*well)) {
+                            continue;
+                        }
                         const auto mode = WellInterface<TypeTag>::IndividualOrGroup::Individual;
                         const bool changed_well = well->updateWellControl(
                             simulator_, mode, this->groupStateHelper(), this->wellState()

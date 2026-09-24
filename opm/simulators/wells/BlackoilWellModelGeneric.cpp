@@ -827,7 +827,9 @@ checkGroupHigherConstraints(const Group& group,
         }
     }
 
-    if (!isField && group.isProductionGroup()) {
+    // While the balancer owns production control, a group's production mode is
+    // its decision alone -- see balancerOwnsProduction().
+    if (!isField && group.isProductionGroup() && !this->balancerOwnsProduction()) {
         const Group::ProductionCMode currentControl = this->groupState().production_control(group.name());
         if (auto groupPos = switched_prod_groups_.find(group.name()); groupPos != switched_prod_groups_.end()) {
             auto& ctrls = groupPos->second;
@@ -1449,6 +1451,13 @@ updateAndCommunicateGroupData(const int reportStepIdx,
 
     if (update_wellgrouptarget) {
         for (const auto& well : well_container_generic_) {
+            // The balancer's own targets (committed by applyTreeToState()) are
+            // what a GRUP producer's control equation must see -- recomputing
+            // them here with the standard calculator would silently replace them.
+            if (this->balancerOwnsProduction() && well->isProducer()
+                && well->wellEcl().predictionMode()) {
+                continue;
+            }
             auto& ws = this->wellState().well(well->indexOfWell());
             const Group& group = this->schedule().getGroup(well->wellEcl().groupName(), reportStepIdx);
             std::vector<Scalar> resv_coeff(this->numPhases(), 0.0);

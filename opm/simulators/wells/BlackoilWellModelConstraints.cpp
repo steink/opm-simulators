@@ -534,7 +534,9 @@ updateGroupIndividualControl(const Group& group,
                                               deferred_logger);
     }
 
-    if (group.isProductionGroup()) {
+    // While the balancer owns production control, a group's production mode is
+    // its decision alone -- see BlackoilWellModelGeneric::balancerOwnsProduction().
+    if (group.isProductionGroup() && !wellModel_.balancerOwnsProduction()) {
         changed = changed || updateProductionGroupControl(group,
                                                           max_number_of_group_switch,
                                                           update_group_switching_log,

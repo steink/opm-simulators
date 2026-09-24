@@ -151,6 +151,19 @@ public:
     std::vector<WellInterfaceGeneric<Scalar, IndexTraits>*> genericWells()
     { return well_container_generic_; }
 
+    /// Whether the group-tree balancer currently owns production control: which
+    /// producers are on group vs individual control, their group targets, and
+    /// the production control mode of every group. While true, the standard
+    /// production switching (BlackoilWellModel::updateWellControls() for
+    /// prediction-mode producers, checkGroupHigherConstraints()'s and
+    /// updateGroupIndividualControl()'s production checks) and the standard
+    /// producer group-target update in updateAndCommunicateGroupData() are
+    /// bypassed, so that the balancer's committed categorization is the only
+    /// one in play. Injection is unaffected -- the balancer is production-only.
+    /// Set by the templated well model once per outer network iteration.
+    bool balancerOwnsProduction() const { return balancer_owns_production_; }
+    void setBalancerOwnsProduction(const bool on) { balancer_owns_production_ = on; }
+
     /*
       Immutable version of the currently active wellstate.
     */
@@ -558,6 +571,7 @@ protected:
     bool wells_active_{false};
     bool initial_step_{};
     bool report_step_starts_{};
+    bool balancer_owns_production_{false};   // see balancerOwnsProduction()
 
     std::optional<int> last_run_wellpi_{};
 

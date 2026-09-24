@@ -782,6 +782,36 @@ template<class Scalar> class WellContributions;
             std::unordered_map<std::string, std::pair<int, Scalar>>
             prepareWellsForBalancing_(DeferredLogger& deferred_logger);
 
+            /// @brief True if \p well's control is currently the balancer's to
+            ///   decide rather than standard switching's: a prediction-mode
+            ///   producer while balancerOwnsProduction() is set. History-mode
+            ///   producers are never group-controlled, so they stay with standard
+            ///   switching regardless.
+            bool balancerOwnsProductionControl_(const WellInterface<TypeTag>& well) const
+            {
+                return this->balancerOwnsProduction() && well.isProducer()
+                    && well.wellEcl().predictionMode();
+            }
+
+            /// @brief Commit a balanced tree to the wells and groups (see
+            ///   ProdGroupTreeBalancer::applyTreeToState()) and remember each local
+            ///   producer's committed control, for localSolvesDisagreeWithBalancer_().
+            /// @return True, on every rank, if the commit changed any well's or
+            ///   group's production control.
+            bool commitBalancedTree_(const ProdGroupTreeBalancer::Tree<Scalar>& tree,
+                                     bool commitRates,
+                                     DeferredLogger& deferred_logger);
+
+            /// @brief True, on every rank, if a local well solve since the last
+            ///   commitBalancedTree_() ended any balancer-owned producer on a
+            ///   different control than the one committed -- the balancer's
+            ///   categorization no longer matches what the wells can do.
+            bool localSolvesDisagreeWithBalancer_() const;
+
+            /// Each local balancer-owned producer's production control as of the
+            /// last commitBalancedTree_(); cleared at the start of each timestep.
+            std::unordered_map<std::string, Well::ProducerCMode> balancer_committed_cmodes_;
+
             /// @brief Master-side: send the trailing-final is_final = true to
             ///   unblock the slave when the master's outer loop exited without
             ///   having sent is_final via the normal per-iteration path (e.g.

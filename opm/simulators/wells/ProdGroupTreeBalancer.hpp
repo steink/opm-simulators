@@ -209,17 +209,25 @@ BalancedTree<Scalar> balanceGroupTree(BlackoilWellModelGeneric<Scalar, IndexTrai
                                       const std::unordered_map<std::string, std::pair<int, Scalar>>& limits,
                                       DeferredLogger& logger);
 
-/// Write a balanced tree's rates/production_cmode/group targets directly
-/// into WellState/GroupState -- runGroupTreeBalancer()'s own write-back,
-/// exposed for a caller (Part 4's group-tree network path) that gets its
-/// tree from balanceGroupTree() instead: the correct mechanism whenever
-/// nothing else (a coupled network-pressure solve) is going to consume the
-/// balancer's output for this domain, per groups_and_network_clean.md's own
-/// "no network -> applyTreeToState" split.
+/// Commit a balanced tree to WellState/GroupState: each producer's
+/// production_cmode (GRUP for a Group-category well, its own limiting mode for
+/// an Individual one), its group target and fallback target, and each group's
+/// production control mode.
+///
+/// \p commitRates additionally writes the tree's well and group rates. That is
+/// right when nothing else decides the rates (no production network); with a
+/// network the rates come from the network and local well solves, and the
+/// tree's rates for a THP well are only the balancer's estimate of its limit,
+/// so the caller passes false.
+///
+/// \return true if any local well's or any group's production control mode
+/// changed. The well part is rank-local, so the caller must reduce it over
+/// ranks.
 template<class Scalar, typename IndexTraits>
-void applyTreeToState(const Tree<Scalar>& tree,
+bool applyTreeToState(const Tree<Scalar>& tree,
                       BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
-                      DeferredLogger& logger);
+                      DeferredLogger& logger,
+                      bool commitRates = true);
 
 template<class Scalar, typename IndexTraits>
 bool runGroupTreeBalancer(BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,

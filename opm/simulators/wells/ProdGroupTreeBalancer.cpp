@@ -2115,12 +2115,14 @@ void logTree(const Tree<Scalar>& tree, DeferredLogger& logger)
 
 // Write the results of the tree balancing back into the well and group states.
 template<class Scalar, typename IndexTraits>
-void applyTreeToState(const Tree<Scalar>& tree,
+bool applyTreeToState(const Tree<Scalar>& tree,
                       BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
-                      DeferredLogger& logger)
+                      DeferredLogger& logger,
+                      const bool commitRates)
 {
     auto& wellState  = wellModel.wellState();
     auto& groupState = wellModel.groupState();
+    bool changed = false;
 
     for (const auto& [name, node] : tree) {
         if (node.type == ProdNodeType::Well) {
@@ -2128,18 +2130,24 @@ void applyTreeToState(const Tree<Scalar>& tree,
             auto& ws = wellState.well(name);
             if (!ws.producer) continue;
 
-            // Convert canonical 3-component rates back to active-phase vector
-            const auto activeRates = toActive(node.rates, ws.pu);
-            ws.surface_rates = activeRates;
+            if (commitRates) {
+                // Convert canonical 3-component rates back to active-phase vector
+                ws.surface_rates = toActive(node.rates, ws.pu);
+            }
 
-            // Update control mode
+            // Update control mode. An Individual well the balancer had no limit
+            // for (stopped, or without positive rates, so left out of the
+            // candidate list) keeps its current mode rather than being handed
+            // CMODE_UNDEFINED -- it has nothing better to be switched to.
             const Well::ProducerCMode oldWellCMode = ws.production_cmode;
             if (node.modeCategory== ProdNodeModeCategory::Group) {
                 ws.production_cmode = Well::ProducerCMode::GRUP;
-            } else if (node.modeCategory== ProdNodeModeCategory::Individual) {
+            } else if (node.modeCategory== ProdNodeModeCategory::Individual
+                       && node.mode != Well::ProducerCMode::CMODE_UNDEFINED) {
                 ws.production_cmode = node.mode;
             }
             if (ws.production_cmode != oldWellCMode) {
+                changed = true;
                 logger.debug("ProdGroupTreeBalancer",
                     fmt::format("Balancer: Well {}: production_cmode changed from {} to {}",
                                 name,
@@ -2172,20 +2180,27 @@ void applyTreeToState(const Tree<Scalar>& tree,
             } else {
                 ws.group_target_fallback = std::nullopt;
             }
+            // setTargets() gives a well balanced in its group's preferred mode
+            // (distributeFallbackRates) no meaningful active-mode target (NaN);
+            // its control equation must use the fallback target instead.
+            ws.use_group_target_fallback = ws.group_target_fallback.has_value()
+                && std::isnan(node.groupTarget.value);
         } else {
             if (node.isSatellite) continue; // Skip satellite groups
             // Group node: update group state
-            // Rates in groupState are stored in active-phase order, positive = production
-            const auto& pu = wellModel.phaseUsage();
-            std::vector<Scalar> activeRates(pu.numActivePhases(), Scalar(0));
-            for (int c = 0; c < 3; ++c) {
-                const int a = activeIdx(pu, c);
-                if (a >= 0) {
-                    // GroupState stores positive = production; our rates are negative = production
-                    activeRates[a] = -node.rates[c];
+            if (commitRates) {
+                // Rates in groupState are stored in active-phase order, positive = production
+                const auto& pu = wellModel.phaseUsage();
+                std::vector<Scalar> activeRates(pu.numActivePhases(), Scalar(0));
+                for (int c = 0; c < 3; ++c) {
+                    const int a = activeIdx(pu, c);
+                    if (a >= 0) {
+                        // GroupState stores positive = production; our rates are negative = production
+                        activeRates[a] = -node.rates[c];
+                    }
                 }
+                groupState.update_production_rates(name, activeRates);
             }
-            groupState.update_production_rates(name, activeRates);
 
             // Update group control mode.
             // applyTreeToState() now runs on all MPI ranks simultaneously (each rank
@@ -2209,15 +2224,19 @@ void applyTreeToState(const Tree<Scalar>& tree,
                 }
             }
             groupState.production_control(name, newGroupCMode);
-            if (newGroupCMode != oldGroupCMode && wellModel.comm().rank() == 0) {
-                logger.debug("ProdGroupTreeBalancer",
-                    fmt::format("Balancer: Group '{}': production_control changed from {} to {}",
-                                name,
-                                Group::ProductionCMode2String(oldGroupCMode),
-                                Group::ProductionCMode2String(newGroupCMode)));
+            if (newGroupCMode != oldGroupCMode) {
+                changed = true;
+                if (wellModel.comm().rank() == 0) {
+                    logger.debug("ProdGroupTreeBalancer",
+                        fmt::format("Balancer: Group '{}': production_control changed from {} to {}",
+                                    name,
+                                    Group::ProductionCMode2String(oldGroupCMode),
+                                    Group::ProductionCMode2String(newGroupCMode)));
+                }
             }
         }
     }
+    return changed;
 }
 
 // ---------------------------------------------------------------------------
@@ -2244,6 +2263,12 @@ BalancedTree<Scalar> balanceGroupTree(BlackoilWellModelGeneric<Scalar, IndexTrai
 
     const bool success = runBalancingAlgorithm(wellModel.guideRate(), wellModel.comm().rank(),
                                                tree, tol, logger);
+
+    // Populate every node's group target (and fallback target) from the
+    // balanced rates, top-down from FIELD. applyTreeToState() commits these to
+    // the wells; while the balancer owns production control nothing else
+    // recomputes them (see BlackoilWellModelGeneric::balancerOwnsProduction()).
+    setTargets(tree, "FIELD");
 
     if (wellModel.comm().rank() == 0) {
         logTree(tree, logger);
@@ -2483,9 +2508,9 @@ template BalancedTree<double> balanceGroupTree<double, BlackOilDefaultFluidSyste
     const std::unordered_map<std::string, std::pair<int, double>>&,
     DeferredLogger&);
 
-template void applyTreeToState<double, BlackOilDefaultFluidSystemIndices>(
+template bool applyTreeToState<double, BlackOilDefaultFluidSystemIndices>(
     const Tree<double>&, BlackoilWellModelGeneric<double, BlackOilDefaultFluidSystemIndices>&,
-    DeferredLogger&);
+    DeferredLogger&, bool);
 
 #ifdef FLOW_INSTANTIATE_FLOAT
 
@@ -2501,9 +2526,9 @@ template BalancedTree<float> balanceGroupTree<float, BlackOilDefaultFluidSystemI
     const std::unordered_map<std::string, std::pair<int, float>>&,
     DeferredLogger&);
 
-template void applyTreeToState<float, BlackOilDefaultFluidSystemIndices>(
+template bool applyTreeToState<float, BlackOilDefaultFluidSystemIndices>(
     const Tree<float>&, BlackoilWellModelGeneric<float, BlackOilDefaultFluidSystemIndices>&,
-    DeferredLogger&);
+    DeferredLogger&, bool);
 
 template FlatNetworkInput<float> extractFlatNetworkInput<float>(
     const Tree<float>&, const std::string&, const GuideRate&,
