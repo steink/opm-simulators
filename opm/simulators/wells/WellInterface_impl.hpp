@@ -891,11 +891,13 @@ namespace Opm
         std::fill(ws.stopped_ipr_a.begin(), ws.stopped_ipr_a.end(), Scalar{0});
         std::fill(ws.stopped_ipr_b.begin(), ws.stopped_ipr_b.end(), Scalar{0});
 
-        // Only meaningful for a producer the well model has stopped (still
-        // part of the system, unlike shut) -- calculateMinimumBhpFromThp()
-        // (called via estimateOperableBhp() below) also only supports
-        // producers.
-        if (!this->isProducer() || ws.status != WellStatus::STOP) {
+        // Only meaningful for a producer that is stopped (still part of the
+        // system, unlike shut): persistently (ws.status) or, far more often,
+        // dynamically by the well model (wellIsStopped()) --
+        // calculateMinimumBhpFromThp() (called via estimateOperableBhp()
+        // below) also only supports producers.
+        if (!this->isProducer() || ws.status == WellStatus::SHUT
+            || (ws.status != WellStatus::STOP && !this->wellIsStopped())) {
             return;
         }
 
@@ -910,6 +912,13 @@ namespace Opm
         GroupStateHelperType groupStateHelper_copy = groupStateHelper;
         auto well_guard = groupStateHelper_copy.pushWellState(well_state_copy);
 
+        // The trial is a solve of the well as if open (as
+        // solveWellWithOperabilityCheck() opens it before its own
+        // estimateOperableBhp()): estimateOperableBhp() reports a well that is
+        // stopped after its trial solve as having no operable bhp. The well's
+        // own status is restored afterwards, whatever the outcome.
+        const auto status = this->wellStatus_;
+        this->openWell();
         const auto& summary_state = simulator.vanguard().summaryState();
         const bool use_vfpexplicit = this->operability_status_.use_vfpexplicit;
         this->operability_status_.use_vfpexplicit = true;
@@ -917,11 +926,19 @@ namespace Opm
             simulator, dt, groupStateHelper_copy, summary_state, well_state_copy
         );
         this->operability_status_.use_vfpexplicit = use_vfpexplicit;
+        this->wellStatus_ = status;
 
+        auto& deferred_logger = groupStateHelper.deferredLogger();
         if (!bhp_target.has_value()) {
+            deferred_logger.debug(fmt::format("Stopped well {}: no trial IPR (no operable bhp at "
+                                              "thp {:.3f} bar)", this->name(),
+                                              this->getTHPConstraint(summary_state) / unit::barsa));
             return;   // no crossing, or the trial itself would shut again -- stays zero
         }
         const auto& ws_copy = well_state_copy.well(this->index_of_well_);
+        deferred_logger.debug(fmt::format("Stopped well {}: trial IPR at bhp {:.3f} bar, thp {:.3f} bar",
+                                          this->name(), *bhp_target / unit::barsa,
+                                          this->getTHPConstraint(summary_state) / unit::barsa));
         ws.stopped_ipr_a = ws_copy.implicit_ipr_a;
         ws.stopped_ipr_b = ws_copy.implicit_ipr_b;
     }
@@ -1188,6 +1205,17 @@ namespace Opm
         OPM_TIMEFUNCTION();
         auto& deferred_logger = groupStateHelper.deferredLogger();
         const bool old_well_operable = this->operability_status_.isOperableAndSolvable();
+
+        // A stop the group-tree workflow committed: keep it for the rest of this
+        // global iteration, same treatment as a well kept stopped for too many
+        // re-openings below, but not counted as one.
+        if (this->isHeldStopped()) {
+            this->stopWell();
+            this->solveWellWithZeroRate(simulator, dt, groupStateHelper, well_state);
+            this->changed_to_open_this_step_ = false;
+            changed_to_stopped_this_step_ = false;
+            return;
+        }
 
         if (this->param_.check_well_operability_iter_)
             checkWellOperability(simulator, well_state, groupStateHelper);

@@ -63,6 +63,7 @@
 #include <cstddef>
 #include <iomanip>
 #include <optional>
+#include <unordered_set>
 #include <utility>
 
 #include <fmt/format.h>
@@ -1242,6 +1243,14 @@ namespace Opm {
         const std::size_t max_iteration = param_.network_max_outer_iterations_;
         std::size_t network_update_iteration = 0;
         network_needs_more_balancing_force_another_newton_iteration_ = false;
+        // Decided once for the whole loop: the group-tree workflow's A rounds
+        // take the place of the ordinary outer iterations.
+        const bool group_tree_workflow = this->useGroupTreeWorkflow_(mandatory_network_balance);
+        // A group-tree stop is held for one global iteration only; whether it
+        // should persist beyond that is still open (timestep_workflow.md, Q3).
+        for (const auto& well : well_container_) {
+            well->holdStopped(false);
+        }
         while (do_network_update) {
             if (!this->isRescoupSlaveCoupledNetworkIteration_()
                 && network_update_iteration >= max_iteration ) {
@@ -1280,9 +1289,23 @@ namespace Opm {
             const bool relax_network_balance = network_update_iteration >= iteration_to_relax;
             // Never optimize gas lift in last iteration, to allow network convergence (unless max_iter < 2)
             const bool optimize_gas_lift = ( (network_update_iteration + 1) < std::max(max_iteration, static_cast<std::size_t>(2)) );
-            std::tie(well_group_control_changed, do_network_update, network_imbalance) =
+            if (group_tree_workflow) {
+                std::tie(well_group_control_changed, do_network_update, network_imbalance) =
+                    updateGroupTreeNetworkIteration_(network_update_iteration == 0,
+                                                     relax_network_balance, dt, local_deferredLogger);
+            } else {
+                std::tie(well_group_control_changed, do_network_update, network_imbalance) =
                     updateWellControlsAndNetworkIteration(mandatory_network_balance, relax_network_balance, optimize_gas_lift, dt,local_deferredLogger);
+            }
             ++network_update_iteration;
+        }
+        if (group_tree_workflow) {
+            // The injection networks only once production has settled: with the
+            // reservoir frozen, production feeds injection (VREP / REIN) one way
+            // and nothing flows back (timestep_workflow.md, Q5).
+            this->network_.update(mandatory_network_balance, local_deferredLogger,
+                                  /*relax_network_tolerance=*/false,
+                                  details::DomainScope::Injection);
         }
         if (this->isRescoupMasterCoupledNetworkIteration_()) {
             this->sendSlaveNetworkLoopTerminationSignal_();
@@ -1356,47 +1379,9 @@ namespace Opm {
         bool balancer_changed = false;
         if (balancer_commits && group_tree_network) {
             group_tree_cliff_diagnosis_ran = true;
-            // The whole anti-oscillation net for v1 (per the implementation
-            // plan): cap the number of stop-and-rebalance rounds rather than
-            // building a real cycle-breaker.
-            constexpr int kMaxCliffDiagnosisIters = 10;
-            bool stopped_something = false;
-            int diagnosis_iters = 0;
-            ProdGroupTreeBalancer::Tree<Scalar> final_tree;
-            do {
-                const auto balancerLimits = prepareWellsForBalancing_(local_deferredLogger);
-                this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ false);
-                auto balanced = ProdGroupTreeBalancer::balanceGroupTree(
-                    *this,
-                    this->summaryState(),
-                    reportStepIdx,
-                    param_.group_tree_balancer_tolerance_,
-                    balancerLimits,
-                    local_deferredLogger);
-                this->network().setBalancedGroupTree(balanced.tree);
-
-                stopped_something = false;
-                for (const auto& network : active_networks) {
-                    if (network.domain != details::NetworkDomain::Production) {
-                        continue;
-                    }
-                    for (const auto& tree : network.network.get().roots()) {
-                        stopped_something |= this->network().stopWorstGroupTreeCliffViolation(
-                            network.network.get(), reportStepIdx, tree.get(),
-                            balanced.tree, local_deferredLogger);
-                    }
-                }
-                final_tree = std::move(balanced.tree);
-                ++diagnosis_iters;
-            } while (stopped_something && diagnosis_iters < kMaxCliffDiagnosisIters);
-            if (stopped_something) {
-                local_deferredLogger.warning(
-                    "GroupTreeCliffDiagnosisNotStable",
-                    fmt::format("Network: group-tree cliff diagnosis did not stabilize "
-                               "within {} rounds at report step {}; proceeding with the "
-                               "current stopping configuration.",
-                               kMaxCliffDiagnosisIters, reportStepIdx));
-            }
+            const auto final_tree = settleGroupTree_(reportStepIdx, active_networks,
+                                                     /*offer_reopen_candidates=*/false,
+                                                     local_deferredLogger);
             balancer_changed = commitBalancedTree_(final_tree, /*commitRates=*/false,
                                                    local_deferredLogger);
             this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
@@ -1554,6 +1539,284 @@ namespace Opm {
             }
         }
         return result;
+    }
+
+    template<typename TypeTag>
+    bool
+    BlackoilWellModel<TypeTag>::
+    useGroupTreeWorkflow_(const bool mandatory_network_balance) const
+    {
+        if (!param_.enable_group_tree_balancer_ || param_.network_solver_ != "group-tree") {
+            return false;
+        }
+        const int reportStepIdx = simulator_.episodeIndex();
+        const int nupcol = this->schedule()[reportStepIdx].nupcol();
+        if (!simulator_.problem().iterationContext().withinNupcol(nupcol)) {
+            return false;
+        }
+        if (!this->network_.shouldBalance(reportStepIdx) && !mandatory_network_balance) {
+            return false;
+        }
+        if (this->isReservoirCouplingMaster() || this->isReservoirCouplingSlave()
+            || this->schedule().glo(reportStepIdx).active()) {
+            return false;
+        }
+        const auto& network = this->schedule()[reportStepIdx].network();
+        if (!network.active()) {
+            return false;
+        }
+        const auto names = network.node_names();
+        return std::none_of(names.begin(), names.end(),
+                            [&network](const std::string& name)
+                            { return network.node(name).as_choke(); });
+    }
+
+    template<typename TypeTag>
+    std::tuple<bool, bool, typename BlackoilWellModel<TypeTag>::Scalar>
+    BlackoilWellModel<TypeTag>::
+    updateGroupTreeNetworkIteration_(const bool first_round,
+                                     const bool relax_network_tolerance,
+                                     const double dt,
+                                     DeferredLogger& deferred_logger)
+    {
+        OPM_TIMEFUNCTION();
+        const int reportStepIdx = simulator_.episodeIndex();
+        const auto active_networks = details::activeNetworks(this->schedule(), reportStepIdx);
+
+        this->setBalancerOwnsProduction(true);
+        this->network_.configureSolvers(deferred_logger);
+        this->network_.noteNetworkTimeStep(simulator_.time(), dt);
+
+        // Standard switching, which with the balancer owning production covers
+        // the injectors only.
+        this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
+        bool well_group_control_changed = updateWellControls(deferred_logger);
+
+        // A1: the reservoir has moved since the wells were last solved, so
+        // solve them once per global iteration before anything uses their
+        // IPRs. Later rounds start from the previous round's A3 instead.
+        if (first_round) {
+            OPM_BEGIN_PARALLEL_TRY_CATCH();
+            prepareWellsBeforeAssembling(dt);
+            OPM_END_PARALLEL_TRY_CATCH_LOG(deferred_logger,
+                                           "updateGroupTreeNetworkIteration_() failed: ",
+                                           this->terminal_output_, grid().comm());
+            this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
+        }
+        this->network_.refreshWellNetworkData(dt, details::DomainScope::Production);
+        this->snapshotGroupTreeIprs_();
+
+        // B: balance and settle the open set, IPRs frozen; stopped wells with
+        // a trial IPR are offered for reopening. B decides the open set: every
+        // producer it leaves stopped stays stopped in the local solves for the
+        // rest of this global iteration (held) -- the wells' own operability
+        // check does not overrule it -- and every well it reopens is checked
+        // in A3 (groupTreeIprMismatch_()).
+        std::unordered_set<std::string> stopped_before;
+        for (const auto& well : well_container_) {
+            if (well->wellIsStopped()) {
+                stopped_before.insert(well->name());
+            }
+        }
+        const auto tree = this->settleGroupTree_(reportStepIdx, active_networks,
+                                                 /*offer_reopen_candidates=*/true, deferred_logger);
+        group_tree_reopened_.clear();
+        for (const auto& well : well_container_) {
+            if (!this->balancerOwnsProductionControl_(*well)) {
+                continue;
+            }
+            if (well->wellIsStopped()) {
+                well->holdStopped(true);
+            } else if (stopped_before.count(well->name()) > 0) {
+                // Reopened by B: its IPR for the A3 check is the trial IPR
+                // the network solve used (now in implicit_ipr_a/b).
+                group_tree_reopened_.insert(well->name());
+                const auto& ws = this->wellState().well(well->indexOfWell());
+                group_tree_ipr_snapshot_[well->name()] = {ws.implicit_ipr_a, ws.implicit_ipr_b};
+            }
+        }
+
+        // B4: commit the categorization and targets, and hand the production
+        // node pressures to the wells as THP limits (group-tree nodes
+        // undamped; a tree the solve gave up on falls back to the relaxed
+        // update, which then needs further rounds).
+        const bool balancer_changed = commitBalancedTree_(tree, /*commitRates=*/false, deferred_logger);
+        this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
+        const auto& secant_mode = param_.network_pressure_update_secant_;
+        const Scalar network_imbalance = grid().comm().max(
+            this->network_.updatePressures(reportStepIdx,
+                                           param_.network_pressure_update_damping_factor_,
+                                           param_.network_max_pressure_update_in_bars_ * unit::barsa,
+                                           secant_mode != "none",
+                                           secant_mode == "all",
+                                           details::DomainScope::Production));
+
+        // A3: solve the wells at the committed constraints.
+        OPM_BEGIN_PARALLEL_TRY_CATCH();
+        prepareWellsBeforeAssembling(dt);
+        OPM_END_PARALLEL_TRY_CATCH_LOG(deferred_logger,
+                                       "updateGroupTreeNetworkIteration_() failed: ",
+                                       this->terminal_output_, grid().comm());
+        this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
+
+        // How far the IPRs B used are off at the operating point the wells
+        // reached: above tolerance, B's answer rests on a stale linearisation
+        // and another round re-balances with A3's fresh IPRs.
+        const Scalar ipr_mismatch = this->groupTreeIprMismatch_(deferred_logger);
+        if (this->terminal_output_) {
+            deferred_logger.debug(fmt::format("GroupTreeWorkflow: report step {} round done: "
+                                              "node pressure change {:.3g} bar, IPR mismatch {:.3g}, "
+                                              "categorization changed {}",
+                                              reportStepIdx, network_imbalance / unit::barsa,
+                                              ipr_mismatch, balancer_changed));
+        }
+
+        const bool local_solves_disagree = this->localSolvesDisagreeWithBalancer_();
+        well_group_control_changed = well_group_control_changed || balancer_changed
+            || local_solves_disagree;
+
+        if (BlackoilWellModelGuideRates(*this).guideRateUpdateIsNeeded(reportStepIdx)) {
+            this->guide_rate_handler_.updateGuideRates(
+                reportStepIdx, simulator_.time(), this->wellState(), this->groupState()
+            );
+        }
+
+        const auto& balance = this->schedule()[reportStepIdx].network_balance();
+        constexpr Scalar relaxation_factor = 10.0;
+        const Scalar tolerance = relax_network_tolerance
+            ? relaxation_factor * balance.pressure_tolerance()
+            : balance.pressure_tolerance();
+        // Node pressures still moving covers a tree the group-tree solve gave
+        // up on (relaxed update); for a solved tree the IPR mismatch is the
+        // actual convergence measure.
+        const bool more_network_update = this->network_.active()
+            && (network_imbalance > tolerance || ipr_mismatch > param_.group_tree_ipr_tolerance_);
+        return {well_group_control_changed, more_network_update, network_imbalance};
+    }
+
+    template<typename TypeTag>
+    void
+    BlackoilWellModel<TypeTag>::
+    snapshotGroupTreeIprs_()
+    {
+        group_tree_ipr_snapshot_.clear();
+        for (const auto& well : well_container_) {
+            if (!this->balancerOwnsProductionControl_(*well)) {
+                continue;
+            }
+            const auto& ws = this->wellState().well(well->indexOfWell());
+            group_tree_ipr_snapshot_.emplace(well->name(),
+                                             std::make_pair(ws.implicit_ipr_a, ws.implicit_ipr_b));
+        }
+    }
+
+    template<typename TypeTag>
+    typename BlackoilWellModel<TypeTag>::Scalar
+    BlackoilWellModel<TypeTag>::
+    groupTreeIprMismatch_(DeferredLogger& deferred_logger) const
+    {
+        // Rates below this (about 0.01 m3/day) carry no information.
+        constexpr Scalar kRateFloor = 1.0e-7;
+        constexpr Scalar kLogThreshold = 1.0e-3;
+        Scalar worst = 0.0;
+        for (const auto& well : well_container_) {
+            const auto it = group_tree_ipr_snapshot_.find(well->name());
+            if (it == group_tree_ipr_snapshot_.end() || !well->parallelWellInfo().isOwner()) {
+                continue;
+            }
+            if (well->wellIsStopped()) {
+                // A well B reopened that its own solve stops again: B's
+                // decision does not hold up, which is as far off as it gets.
+                if (group_tree_reopened_.count(well->name()) > 0) {
+                    deferred_logger.debug(fmt::format("GroupTreeWorkflow: well {} was reopened by "
+                                                      "the network but stopped in its own solve",
+                                                      well->name()));
+                    worst = 1.0;
+                }
+                continue;
+            }
+            const auto& ws = this->wellState().well(well->indexOfWell());
+            if (ws.status != WellStatus::OPEN) {
+                continue;
+            }
+            const auto& [ipr_a, ipr_b] = it->second;
+            Scalar well_worst = 0.0;
+            for (std::size_t p = 0; p < ws.surface_rates.size() && p < ipr_a.size(); ++p) {
+                // q = b * bhp - a, production negative.
+                const Scalar predicted = ipr_b[p] * ws.bhp - ipr_a[p];
+                const Scalar actual = ws.surface_rates[p];
+                const Scalar scale = std::max(std::abs(predicted), std::abs(actual));
+                if (scale > kRateFloor) {
+                    well_worst = std::max(well_worst, std::abs(actual - predicted) / scale);
+                }
+            }
+            if (well_worst > kLogThreshold) {
+                deferred_logger.debug(fmt::format("GroupTreeWorkflow: well {} IPR mismatch {:.3g} "
+                                                  "(bhp {:.3f} bar, cmode {})",
+                                                  well->name(), well_worst, ws.bhp / unit::barsa,
+                                                  WellProducerCMode2String(ws.production_cmode)));
+            }
+            worst = std::max(worst, well_worst);
+        }
+        return grid().comm().max(worst);
+    }
+
+    template<typename TypeTag>
+    ProdGroupTreeBalancer::Tree<typename BlackoilWellModel<TypeTag>::Scalar>
+    BlackoilWellModel<TypeTag>::
+    settleGroupTree_(const int reportStepIdx,
+                     const std::vector<details::ActiveNetworkDescriptor>& active_networks,
+                     const bool offer_reopen_candidates,
+                     DeferredLogger& deferred_logger)
+    {
+        // Variant B-ii (see timestep_workflow.md, Q7): rebalance after every
+        // change of the open set, so each stop decision is made against a
+        // categorization that accounts for the wells already stopped or
+        // reopened. Stopped wells are offered for reopening in the first pass
+        // only, so after it the open set only shrinks and the loop ends.
+        // The whole anti-oscillation net for v1 (per the implementation
+        // plan): cap the number of stop-and-rebalance rounds rather than
+        // building a real cycle-breaker.
+        constexpr int kMaxCliffDiagnosisIters = 10;
+        bool open_set_changed = false;
+        int diagnosis_iters = 0;
+        ProdGroupTreeBalancer::Tree<Scalar> final_tree;
+        do {
+            const auto balancerLimits = prepareWellsForBalancing_(deferred_logger);
+            this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ false);
+            auto balanced = ProdGroupTreeBalancer::balanceGroupTree(
+                *this,
+                this->summaryState(),
+                reportStepIdx,
+                param_.group_tree_balancer_tolerance_,
+                balancerLimits,
+                deferred_logger);
+            this->network().setBalancedGroupTree(balanced.tree);
+
+            open_set_changed = false;
+            for (const auto& network : active_networks) {
+                if (network.domain != details::NetworkDomain::Production) {
+                    continue;
+                }
+                for (const auto& tree : network.network.get().roots()) {
+                    open_set_changed |= this->network().updateGroupTreeOpenSet(
+                        network.network.get(), reportStepIdx, tree.get(), balanced.tree,
+                        /*offerReopenCandidates=*/diagnosis_iters == 0 && offer_reopen_candidates,
+                        deferred_logger);
+                }
+            }
+            final_tree = std::move(balanced.tree);
+            ++diagnosis_iters;
+        } while (open_set_changed && diagnosis_iters < kMaxCliffDiagnosisIters);
+        if (open_set_changed) {
+            deferred_logger.warning(
+                "GroupTreeCliffDiagnosisNotStable",
+                fmt::format("Network: group-tree cliff diagnosis did not stabilize "
+                           "within {} rounds at report step {}; proceeding with the "
+                           "current stopping configuration.",
+                           kMaxCliffDiagnosisIters, reportStepIdx));
+        }
+        return final_tree;
     }
 
     template<typename TypeTag>

@@ -230,6 +230,9 @@ public:
 
     /// @brief Get the deferred logger
     /// @throws std::logic_error if no logger has been set via pushLogger()
+    /// @brief True if a logger has been set via pushLogger()
+    bool hasDeferredLogger() const { return this->deferred_logger_ != nullptr; }
+
     DeferredLogger& deferredLogger() const
     {
         if (this->deferred_logger_ == nullptr) {

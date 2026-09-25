@@ -936,8 +936,9 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
     }
 
     // Per candidate: present, usable ipr, three ipr_a, three ipr_b, efficiency
-    // scaling, has a network-sourced (dynamic) thp limit.
-    constexpr int kEntries = 10;
+    // scaling, has a network-sourced (dynamic) thp limit, stopped, usable trial
+    // ipr, three trial ipr_a, three trial ipr_b.
+    constexpr int kEntries = 18;
     std::vector<Scalar> shared(candidates.size() * kEntries, Scalar{0});
     for (std::size_t i = 0; i < candidates.size(); ++i) {
         const auto it = local.find(candidates[i].name);
@@ -972,6 +973,20 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
         // extractFlatNetworkInput()'s own doc comment on networkThpWells);
         // harmless to compute unconditionally for every well.
         e[9] = it->second->getDynamicThpLimit().has_value() ? Scalar{1} : Scalar{0};
+        // Only the well model's own dynamic stop (wellIsStopped() on an OPEN
+        // well) makes a reopen candidate: a persistent STOP (deck, economic
+        // limits) is not the network's to undo.
+        if (ws.status == WellStatus::OPEN && it->second->wellIsStopped()) {
+            e[10] = Scalar{1};
+            if (static_cast<int>(ws.stopped_ipr_b.size()) >= pu.numActivePhases()
+                && ws.stopped_ipr_b[pos[Sys::kOil]] > Scalar{0}) {
+                e[11] = Scalar{1};
+                for (int ph = 0; ph < Sys::NP; ++ph) {
+                    e[12 + ph] = ws.stopped_ipr_a[pos[ph]];
+                    e[15 + ph] = -ws.stopped_ipr_b[pos[ph]];
+                }
+            }
+        }
     }
     well_model_.comm().sum(shared.data(), shared.size());
 
@@ -1008,6 +1023,12 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
             data.ipr_b[ph] = e[5 + ph];
         }
         data.network_thp = e[9] > Scalar{0};
+        data.stopped = e[10] > Scalar{0};
+        data.has_trial_ipr = e[11] > Scalar{0};
+        for (int ph = 0; ph < Sys::NP; ++ph) {
+            data.trial_ipr_a[ph] = e[12 + ph];
+            data.trial_ipr_b[ph] = e[15 + ph];
+        }
         result.emplace(candidates[i].name, std::move(data));
     }
     return result;
@@ -1019,15 +1040,29 @@ BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>::
 solveGroupTree(const Network::ExtNetwork& network,
               const int reportStepIdx,
               const Network::Node& root,
-              const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree) const
+              const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree,
+              const bool offerReopenCandidates) const
 {
     OPM_TIMEFUNCTION();
     using Sys = NetworkSolve::GroupTreeSystem<Scalar>;
 
+    // Through the well model's deferred logger when there is one, so these
+    // lines land in order with the balancer's own output (which is deferred).
+    // Every rank reaches the same outcome; report it once.
+    const auto log = [this](const std::string& msg) {
+        if (well_model_.comm().rank() != 0) {
+            return;
+        }
+        if (well_model_.groupStateHelper().hasDeferredLogger()) {
+            well_model_.groupStateHelper().deferredLogger().debug(msg);
+        } else {
+            OpmLog::debug(msg);
+        }
+    };
     auto giveUp = [&](const std::string& why) {
-        OpmLog::debug(fmt::format("Network: solving the production network via the group-tree "
-                                  "balancer is not possible at report step {} ({}); using the "
-                                  "relaxed update.", reportStepIdx, why));
+        log(fmt::format("Network: solving the production network via the group-tree "
+                        "balancer is not possible at report step {} ({}); using the "
+                        "relaxed update.", reportStepIdx, why));
         return std::optional<GroupTreeSolve>{};
     };
 
@@ -1166,6 +1201,42 @@ solveGroupTree(const Network::ExtNetwork& network,
     }
 
     system.populateFromFlatNetwork(flat, resolved);
+
+    // Reopen candidates: stopped wells under this root with a usable trial IPR.
+    // A stopped well is never in the balanced tree, so it is added here, at its
+    // own network node, and counted in the sum of its nearest Active ancestor
+    // (with the efficiency accumulated up to it, as the balancer would).
+    int num_candidates = 0;
+    if (offerReopenCandidates) {
+        for (const auto& [name, data] : wellNetworkData) {
+            if (!data.stopped || !data.has_trial_ipr || resolved.count(name) > 0
+                || !schedule.hasWell(name, reportStepIdx)) {
+                continue;
+            }
+            const auto& well = schedule.getWell(name, reportStepIdx);
+            const auto node_it = index.find(well.groupName());
+            if (node_it == index.end()) {
+                continue;   // not under this root
+            }
+            auto wd = data;
+            wd.node = node_it->second;
+            Scalar efficiency = well.getEfficiencyFactor()
+                * well_model_.wellState().getGlobalEfficiencyScalingFactor(name);
+            std::optional<int> active_node;
+            std::string group = well.groupName();
+            while (true) {
+                active_node = system.activeNodeIndex(group);
+                if (active_node.has_value() || group == "FIELD") {
+                    break;
+                }
+                const auto& g = schedule.getGroup(group, reportStepIdx);
+                efficiency *= g.getGroupEfficiencyFactor();
+                group = g.parent();
+            }
+            system.addReopenCandidate(name, wd, active_node, efficiency);
+            ++num_candidates;
+        }
+    }
     system.finalize();
 
     std::vector<Scalar> guess(system.numNodes());
@@ -1179,9 +1250,11 @@ solveGroupTree(const Network::ExtNetwork& network,
     if (!result.converged) {
         return giveUp(fmt::format("it did not converge in {} iterations", result.iterations - 1));
     }
-    OpmLog::debug(fmt::format("Network: solved the production network under {} via the group-tree "
-                              "balancer at report step {} in {} iterations.",
-                              root.name(), reportStepIdx, result.iterations));
+    log(fmt::format("Network: solved the production network under {} via the group-tree "
+                    "balancer at report step {} in {} iterations{}.",
+                    root.name(), reportStepIdx, result.iterations,
+                    num_candidates > 0 ? fmt::format(" ({} reopen candidates)", num_candidates)
+                                       : std::string{}));
     return GroupTreeSolve{std::move(system), std::move(order), std::move(result)};
 }
 
@@ -1207,38 +1280,92 @@ groupTreeProductionNodePressures(const Network::ExtNetwork& network,
 template<typename Scalar, typename IndexTraits>
 bool
 BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>::
-stopWorstGroupTreeCliffViolation(const Network::ExtNetwork& network,
-                                 const int reportStepIdx,
-                                 const Network::Node& root,
-                                 const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree,
-                                 DeferredLogger& deferred_logger)
+updateGroupTreeOpenSet(const Network::ExtNetwork& network,
+                       const int reportStepIdx,
+                       const Network::Node& root,
+                       const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree,
+                       const bool offerReopenCandidates,
+                       DeferredLogger& deferred_logger)
 {
-    const auto solved = solveGroupTree(network, reportStepIdx, root, balancedTree);
+    using Sys = NetworkSolve::GroupTreeSystem<Scalar>;
+    const auto solved = solveGroupTree(network, reportStepIdx, root, balancedTree,
+                                       offerReopenCandidates);
     if (!solved.has_value()) {
         return false;   // the normal give-up/relaxed-update path handles this
     }
-    const auto worst = solved->system.worstCliffViolation(solved->result);
-    if (!worst.has_value()) {
-        return false;
-    }
-    for (auto* well : well_model_.genericWells()) {
-        if (well->name() == *worst) {
-            // WellState::stopWell() (ws.status) is not dynamic -- once set, a
-            // well stays stopped with nothing to reconsider it. The well
-            // interface's own status (wellStatus_, via stopWell()/openWell())
-            // is what the reservoir's own well solve re-evaluates every
-            // outer iteration (see solveWellWithOperabilityCheck()'s own
-            // wellIsStopped()-gated reopen attempt) -- setting *that* is what
-            // makes this well's next real well-equation solve retest it
-            // (Part 1b's own "revive" already relies on exactly this).
-            well->stopWell();
-            break;
+    const auto findWell = [this](const std::string& name) -> WellInterfaceGeneric<Scalar, IndexTraits>* {
+        for (auto* well : well_model_.genericWells()) {
+            if (well->name() == name) {
+                return well;
+            }
+        }
+        return nullptr;   // not on this rank
+    };
+    const bool report = well_model_.comm().rank() == 0;
+    bool changed = false;
+
+    // Reopen the candidates the solve lets flow on the real tubing curve.
+    // The dynamic status (openWell()) is what the well model's own solves
+    // read; the well state is seeded with the network's operating point and
+    // the trial IPR the solve used, which is what the balancer and the next
+    // network solve see until the well's own solve refreshes them.
+    const auto& pu = well_model_.phaseUsage();
+    std::array<int, Sys::NP> pos{};
+    pos[Sys::kOil]   = pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx);
+    pos[Sys::kWater] = pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx);
+    pos[Sys::kGas]   = pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx);
+    for (const auto& outcome : solved->system.reopenOutcomes(solved->result)) {
+        if (!outcome.reopens) {
+            if (report) {
+                deferred_logger.debug(fmt::format(
+                    "Network: well {} stays stopped under the group-tree balancer at report "
+                    "step {}: {} (bhp {:.3f} bar, thp {:.3f} bar).",
+                    outcome.name, reportStepIdx,
+                    outcome.at_shutin ? "no flow at this node pressure"
+                                      : "it would flow only on the flattened tubing curve",
+                    outcome.bhp / unit::barsa, outcome.thp / unit::barsa));
+            }
+            continue;
+        }
+        changed = true;
+        if (auto* well = findWell(outcome.name)) {
+            well->openWell();
+            well->holdStopped(false);
+            auto& ws = well_model_.wellState()[well->indexOfWell()];
+            for (int ph = 0; ph < Sys::NP; ++ph) {
+                ws.surface_rates[pos[ph]] = -outcome.q[ph];
+            }
+            ws.bhp = outcome.bhp;
+            ws.thp = outcome.thp;
+            ws.production_cmode = Well::ProducerCMode::THP;
+            ws.implicit_ipr_a = ws.stopped_ipr_a;
+            ws.implicit_ipr_b = ws.stopped_ipr_b;
+        }
+        if (report) {
+            deferred_logger.debug(fmt::format(
+                "Network: reopening well {} under the group-tree balancer at report step {} "
+                "(oil {:.4g} m3/day at bhp {:.3f} bar, thp {:.3f} bar).",
+                outcome.name, reportStepIdx, outcome.q[Sys::kOil] * unit::day,
+                outcome.bhp / unit::barsa, outcome.thp / unit::barsa));
         }
     }
-    deferred_logger.info(fmt::format(
-        "Network: well {} converged past its own tubing-curve cliff under the group-tree "
-        "balancer at report step {}; stopping it and rebalancing.", *worst, reportStepIdx));
-    return true;
+
+    // Stop the single worst open well whose converged point lies on the
+    // flattened part of its tubing curve -- a point it cannot actually
+    // operate at. The dynamic status is what the well model's own solves
+    // re-evaluate; WellState::stopWell() (ws.status) would be persistent.
+    if (const auto worst = solved->system.worstCliffViolation(solved->result)) {
+        changed = true;
+        if (auto* well = findWell(*worst)) {
+            well->stopWell();
+        }
+        if (report) {
+            deferred_logger.info(fmt::format(
+                "Network: well {} converged past its own tubing-curve cliff under the group-tree "
+                "balancer at report step {}; stopping it and rebalancing.", *worst, reportStepIdx));
+        }
+    }
+    return changed;
 }
 
 template<typename Scalar, typename IndexTraits>
@@ -1301,7 +1428,8 @@ updatePressures(const int reportStepIdx,
                 const Scalar damping_factor,
                 const Scalar upper_update_bound,
                 const bool use_secant,
-                const bool secant_for_production)
+                const bool secant_for_production,
+                const details::DomainScope scope)
 {
     OPM_TIMEFUNCTION();
     if (!details::anyNetworkActive(well_model_.schedule(), reportStepIdx)) {
@@ -1317,7 +1445,8 @@ updatePressures(const int reportStepIdx,
     std::array<std::map<std::string, Scalar>, details::domainIndex(details::NetworkDomain::Count)> plateau_floor;
     for (const auto& well : well_model_.genericWells()) {
         const auto domain = details::domainForWell(*well);
-        if (!domain.has_value() || !well->wellEcl().predictionMode()) {
+        if (!domain.has_value() || !details::inScope(scope, *domain)
+            || !well->wellEcl().predictionMode()) {
             continue;
         }
         const auto& ws = well_model_.wellState()[well->indexOfWell()];
@@ -1343,6 +1472,9 @@ updatePressures(const int reportStepIdx,
     // the wells undamped (see below).
     std::set<std::string> group_tree_nodes;
     for (const auto& network : details::activeNetworks(well_model_.schedule(), reportStepIdx)) {
+        if (!details::inScope(scope, network.domain)) {
+            continue;
+        }
         NetworkPressures result;
         if (network.domain == details::NetworkDomain::Production) {
             if (this->newton_solver_ && this->network_autochoke_) {
@@ -1459,6 +1591,9 @@ updatePressures(const int reportStepIdx,
     }
 
     for (const auto& network : details::activeNetworks(well_model_.schedule(), reportStepIdx)) {
+        if (!details::inScope(scope, network.domain)) {
+            continue;
+        }
         auto& domain_pressures = this->nodePressures(network.domain);
         const auto& invalid = this->invalidNodes(network.domain);
         const auto& previous_domain_pressures = previous_node_pressures[details::domainIndex(network.domain)];
@@ -1564,7 +1699,7 @@ updatePressures(const int reportStepIdx,
             }
         }
 
-        if (!domain.has_value()) {
+        if (!domain.has_value() || !details::inScope(scope, *domain)) {
             continue;
         }
 

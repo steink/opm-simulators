@@ -83,6 +83,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Opm {
@@ -625,6 +626,60 @@ template<class Scalar> class WellContributions;
                                                                         const bool optimize_gas_lift,
                                                                         const double dt,
                                                                         DeferredLogger& local_deferredLogger);
+
+            /// True if this global iteration's well/network update uses the
+            /// group-tree workflow (timestep_workflow.md, section 3) rather than
+            /// updateWellControlsAndNetworkIteration(): group-tree balancer and
+            /// network solver, within NUPCOL, a production network to balance,
+            /// and none of what that workflow does not handle yet (autochoke
+            /// nodes, gas-lift optimisation, reservoir coupling).
+            bool useGroupTreeWorkflow_(const bool mandatory_network_balance) const;
+
+            /// One A round of the group-tree workflow, in the outer loop's place
+            /// of updateWellControlsAndNetworkIteration(): on the first round
+            /// the A1 well solves, then the IPR refresh, B (settleGroupTree_()),
+            /// B4 (commit the tree, production node pressures as THP limits) and
+            /// A3 (well solves at the committed constraints). The injection
+            /// network is left to updateWellControlsAndNetwork(), after the
+            /// rounds end. Returns the same triple as
+            /// updateWellControlsAndNetworkIteration().
+            std::tuple<bool, bool, Scalar> updateGroupTreeNetworkIteration_(const bool first_round,
+                                                                            const bool relax_network_tolerance,
+                                                                            const double dt,
+                                                                            DeferredLogger& deferred_logger);
+
+            /// B of the group-tree workflow: balance, solve the network for
+            /// that balance, change the open set by what the solve says
+            /// (updateGroupTreeOpenSet(): reopen candidates, with
+            /// \p offer_reopen_candidates, in the first pass only; stop the
+            /// worst well past its tubing-curve cliff), and repeat until the
+            /// open set is unchanged (capped). Returns the last balanced tree;
+            /// the status changes are applied to the wells as they happen.
+            ProdGroupTreeBalancer::Tree<Scalar>
+            settleGroupTree_(const int reportStepIdx,
+                             const std::vector<details::ActiveNetworkDescriptor>& active_networks,
+                             const bool offer_reopen_candidates,
+                             DeferredLogger& deferred_logger);
+
+            /// Remember the implicit IPR of every local balancer-owned producer,
+            /// as the network solve is about to use it.
+            void snapshotGroupTreeIprs_();
+
+            /// Largest relative difference, over the open producers of the last
+            /// snapshotGroupTreeIprs_() and their phases, between the rate a
+            /// well now produces and the rate the snapshot IPR gives at its
+            /// current bhp -- how far the linearisation the network solve relied
+            /// on is off at the operating point the wells actually reached.
+            /// Global over ranks; wells above a small threshold are logged.
+            Scalar groupTreeIprMismatch_(DeferredLogger& deferred_logger) const;
+
+            /// Per local producer: the implicit IPR (a, b) the last group-tree
+            /// network solve used, see snapshotGroupTreeIprs_().
+            std::unordered_map<std::string, std::pair<std::vector<Scalar>, std::vector<Scalar>>>
+                group_tree_ipr_snapshot_;
+
+            /// Local producers the last B reopened (see updateGroupTreeNetworkIteration_()).
+            std::unordered_set<std::string> group_tree_reopened_;
 
             /// Update rank's notion of intersecting wells and their
             /// associate solution variables.

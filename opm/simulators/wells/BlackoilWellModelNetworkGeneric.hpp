@@ -104,6 +104,19 @@ namespace details {
     std::vector<ActiveNetworkDescriptor>
     activeNetworks(const Schedule& schedule, const int timeStepIdx);
 
+    /// Which network domains a network update covers.
+    enum class DomainScope { All, Production, Injection };
+
+    /// True if \p domain is covered by \p scope.
+    inline bool inScope(const DomainScope scope, const NetworkDomain domain)
+    {
+        switch (scope) {
+        case DomainScope::Production: return domain == NetworkDomain::Production;
+        case DomainScope::Injection:  return domain != NetworkDomain::Production;
+        default:                      return true;
+        }
+    }
+
 } // namespace details
 
 
@@ -155,11 +168,16 @@ public:
     /// the fixed point when the wells respond monotonically); otherwise, and as fallback,
     /// the change is damped by damping_factor and capped at update_upper_bound.
     /// Returns the largest |r| over the nodes.
+    ///
+    /// \p scope restricts the update -- the evaluation, the pressure step and the
+    /// THP-limit write-back -- to the production or the injection networks; the
+    /// other domain's node pressures are left as they are.
     Scalar updatePressures(const int reportStepIdx,
                            const Scalar damping_factor,
                            const Scalar update_upper_bound,
                            const bool use_secant,
-                           const bool secant_for_production);
+                           const bool secant_for_production,
+                           const details::DomainScope scope = details::DomainScope::All);
 
     /// Forget the secant history; call at the start of every time step.
     void beginTimeStep()
@@ -238,27 +256,25 @@ public:
         balanced_group_tree_ = std::move(tree);
     }
 
-    /// Part 3/4g's cliff diagnosis. After a converged group-tree solve against
-    /// \p balancedTree, checks every Thp well's converged FLO against its own
-    /// tilde_lambda's firstUndiscardedFlo() (GroupTreeSystem::worstCliffViolation()
-    /// does the actual comparison). If any well's converged point fell in a
-    /// discarded/bridged interval of its real tubing curve -- a region it
-    /// cannot actually operate in -- stops the single worst such well
-    /// (WellState::stopWell(), the same real "this well can't operate here"
-    /// state the reservoir well solve itself would produce, not a network-
-    /// local fiction) and returns true, so the caller knows to rebalance and
-    /// re-solve before trusting this tree's answer. Returns false if the solve
-    /// didn't converge at all (the caller's normal give-up/relaxed-update path
-    /// handles that -- this function does not retry) or if it converged with
-    /// nothing to correct. Called from outside this class's own hierarchy
-    /// (BlackoilWellModel::updateWellControlsAndNetworkIteration(), ahead of
-    /// network_.update() -- see that call site's own comment for why), unlike
-    /// groupTreeProductionNodePressures() itself.
-    bool stopWorstGroupTreeCliffViolation(const Network::ExtNetwork& network,
-                                          const int reportStepIdx,
-                                          const Network::Node& root,
-                                          const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree,
-                                          DeferredLogger& deferred_logger);
+    /// One B2/B3 step of the group-tree workflow (timestep_workflow.md,
+    /// section 3): solve the network for \p balancedTree, then change the open
+    /// set by what the solution says.
+    ///  - With \p offerReopenCandidates (the first pass of B), stopped wells
+    ///    with a usable trial IPR enter the solve as reopen candidates; those
+    ///    that flow on the real tubing curve are reopened (openWell()) and their
+    ///    well state seeded with the network's operating point.
+    ///  - The single worst open well whose converged point lies on the flattened
+    ///    part of its tubing curve (GroupTreeSystem::worstCliffViolation()) is
+    ///    stopped (stopWell(), the dynamic status).
+    /// Returns true if the open set changed, so the caller rebalances and
+    /// solves again; false if the solve did not converge (the relaxed update
+    /// takes over) or nothing changed.
+    bool updateGroupTreeOpenSet(const Network::ExtNetwork& network,
+                                const int reportStepIdx,
+                                const Network::Node& root,
+                                const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree,
+                                const bool offerReopenCandidates,
+                                DeferredLogger& deferred_logger);
 
     /// Assemble the network Jacobian from the VFP table derivatives instead of
     /// differencing the residual.
@@ -429,7 +445,7 @@ protected:
     /// The shared core groupTreeProductionNodePressures() itself is built from:
     /// everything through a converged NetworkSolve::solve() call, without
     /// collapsing the result down to a bare pressure map the way that function
-    /// does. stopWorstGroupTreeCliffViolation() below needs the GroupTreeSystem
+    /// does. updateGroupTreeOpenSet() above needs the GroupTreeSystem
     /// itself (for worstCliffViolation()) and the converged Result, not just
     /// pressures. nullopt on anything either caller already gives up on --
     /// logged at debug level by this function itself, the same convention
@@ -440,10 +456,15 @@ protected:
         NetworkSolve::Result<Scalar> result;
     };
     std::optional<GroupTreeSolve>
+    ///
+    /// With \p offerReopenCandidates, stopped wells with a usable trial IPR
+    /// enter the system as reopen candidates (see
+    /// GroupTreeSystem::addReopenCandidate()).
     solveGroupTree(const Network::ExtNetwork& network,
                   const int reportStepIdx,
                   const Network::Node& root,
-                  const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree) const;
+                  const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree,
+                  const bool offerReopenCandidates = false) const;
 
     bool newton_solver_ = false;
     bool group_tree_solver_ = false;

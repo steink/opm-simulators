@@ -137,6 +137,7 @@ BlackoilModelParameters<Scalar>::BlackoilModelParameters()
     group_control_fraction_tolerance_ = Parameters::Get<Parameters::GroupControlFractionTolerance<Scalar>>();
     enable_group_tree_balancer_ = Parameters::Get<Parameters::EnableGroupTreeBalancer>();
     group_tree_balancer_tolerance_ = Parameters::Get<Parameters::GroupTreeBalancerTolerance<Scalar>>();
+    group_tree_ipr_tolerance_ = Parameters::Get<Parameters::GroupTreeIprTolerance<Scalar>>();
 }
 
 template<class Scalar>
@@ -382,6 +383,10 @@ void BlackoilModelParameters<Scalar>::registerParameters()
          "distribution) after well controls change, while still within NUPCOL");
     Parameters::Register<Parameters::GroupTreeBalancerTolerance<Scalar>>
         ("Convergence tolerance for the group-tree balancer's own guide-rate distribution");
+    Parameters::Register<Parameters::GroupTreeIprTolerance<Scalar>>
+        ("Relative well-rate tolerance on the IPRs the group-tree network solve used, measured "
+         "after the wells' own solves; above it the group-tree workflow re-balances with fresh "
+         "IPRs (--network-solver=group-tree with the group-tree balancer)");
     // if openMP is available, use two threads per mpi rank by default
 #if _OPENMP
     Parameters::SetDefault<Parameters::ThreadsPerProcess>(2);

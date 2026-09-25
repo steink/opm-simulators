@@ -26,6 +26,7 @@
 #include <opm/input/eclipse/Schedule/Well/WellEnums.hpp>
 #include <opm/input/eclipse/Units/Units.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <functional>
@@ -114,6 +115,13 @@ public:
         // legitimate choice for a well known not to have a lift cliff. See
         // thpWellResidualRow().
         std::optional<Scalar> ipr_slope_limit;
+
+        // Thp only: a stopped well offered for reopening (addReopenCandidate()).
+        // Its ipr_a/b are its trial IPR; it starts at bhp_shutin (rate 0), so
+        // the solve itself decides whether its node pressure lets it flow --
+        // see reopenOutcomes(). Never ranked by worstCliffViolation(): a
+        // candidate on the flattened curve is simply not reopened.
+        bool reopen_candidate = false;
     };
 
     /// One Active node from ProdGroupTreeBalancer::extractFlatNetworkInput():
@@ -220,7 +228,93 @@ public:
         // own use building extractFlatNetworkInput()'s networkThpWells set
         // before this struct even comes into play.
         bool network_thp = false;
+
+        // Stopped (persistently or dynamically), and -- when has_trial_ipr --
+        // the flowing trial IPR the well model computed for it (stopped_ipr_a/b,
+        // in this struct's own sign convention), for addReopenCandidate(). Not
+        // used by populateFromFlatNetwork(): a stopped well is never in the
+        // balanced tree.
+        bool stopped = false;
+        bool has_trial_ipr = false;
+        std::array<Scalar, NP> trial_ipr_a{};
+        std::array<Scalar, NP> trial_ipr_b{};
     };
+
+    /// Add a stopped well as a reopen candidate (Well::reopen_candidate): a Thp
+    /// well on its trial IPR at its own network node, counted in the sum of
+    /// \p active_node (with \p efficiency) when it has an Active ancestor. Call
+    /// after populateFromFlatNetwork() and before finalize().
+    void addReopenCandidate(const std::string& name,
+                            const WellNetworkData& wd,
+                            const std::optional<int> active_node,
+                            const Scalar efficiency)
+    {
+        Well well;
+        well.name = name;
+        well.node = wd.node;
+        well.efficiency = wd.efficiency;
+        well.vfp_table = wd.vfp_table;
+        well.alq = wd.alq;
+        well.ipr_a = wd.trial_ipr_a;
+        well.ipr_b = wd.trial_ipr_b;
+        well.kind = WellKind::Thp;
+        well.ipr_slope_limit = iprSlopeLimit(well);
+        well.reopen_candidate = true;
+        const int idx = addWell(std::move(well));
+        if (active_node.has_value()) {
+            activeNodes_[*active_node].member_wells.emplace_back(idx, efficiency);
+        }
+    }
+
+    /// Index of the Active node named \p name, if there is one.
+    std::optional<int> activeNodeIndex(const std::string& name) const
+    {
+        for (std::size_t k = 0; k < activeNodes_.size(); ++k) {
+            if (activeNodes_[k].name == name) {
+                return static_cast<int>(k);
+            }
+        }
+        return std::nullopt;
+    }
+
+    /// What the converged solve says about each reopen candidate: it reopens
+    /// if it flows (off its shut-in cap) on the real tubing curve -- one that
+    /// only crosses on the flattened curve would be stopped again straight
+    /// away, so it stays stopped. \p q is its own (pre-efficiency) rate, oil /
+    /// water / gas, production positive.
+    struct ReopenOutcome
+    {
+        std::string name;
+        bool reopens = false;
+        bool at_shutin = false;       // settled on its cap: no flow at this node pressure
+        bool on_real_curve = true;    // false: crosses only on the flattened curve
+        std::array<Scalar, NP> q{};
+        Scalar bhp = 0;
+        Scalar thp = 0;
+    };
+    std::vector<ReopenOutcome> reopenOutcomes(const Result<Scalar>& result) const
+    {
+        std::vector<ReopenOutcome> out;
+        for (std::size_t w = 0; w < wells_.size(); ++w) {
+            const auto& well = wells_[w];
+            if (!well.reopen_candidate) {
+                continue;
+            }
+            ReopenOutcome o;
+            o.name = well.name;
+            o.q = result.well_phase_rates[w];
+            o.bhp = result.well_bhp[w];
+            o.thp = result.node_pressure[well.node];
+            const bool flows = std::any_of(o.q.begin(), o.q.end(),
+                                           [](const Scalar r) { return r > Scalar{0}; });
+            o.at_shutin = !flows || o.bhp >= well.bhp_shutin - Scalar{1.0e-3} * unit::barsa;
+            o.on_real_curve = !well.ipr_slope_limit.has_value()
+                || slopeLimitedBhp(well, o.thp, o.q).limit == detail::SlopeLimit::Unflattened;
+            o.reopens = !o.at_shutin && o.on_real_curve;
+            out.push_back(std::move(o));
+        }
+        return out;
+    }
 
     /// Populate wells_/activeNodes_ from an already-balanced, already-flattened
     /// group tree (ProdGroupTreeBalancer::extractFlatNetworkInput()'s output),
@@ -469,7 +563,8 @@ public:
         Scalar worst_gap = Scalar{0};
         for (std::size_t w = 0; w < wells_.size(); ++w) {
             const auto& well = wells_[w];
-            if (well.kind != WellKind::Thp || !well.ipr_slope_limit.has_value()) {
+            if (well.kind != WellKind::Thp || !well.ipr_slope_limit.has_value()
+                || well.reopen_candidate) {
                 continue;
             }
             const Scalar thp = result.node_pressure[well.node];
@@ -522,7 +617,10 @@ public:
         }
         for (int w = 0; w < numWells(); ++w) {
             if (wells_[w].kind == WellKind::Thp) {
-                x[thpBhpIdx(w)] = node_pressure_guess[wells_[w].node - 1];
+                // A reopen candidate starts where it is: stopped, rate 0.
+                x[thpBhpIdx(w)] = wells_[w].reopen_candidate
+                    ? wells_[w].bhp_shutin
+                    : node_pressure_guess[wells_[w].node - 1];
             }
         }
         return x;
@@ -695,12 +793,31 @@ public:
     /// decided fresh from the current iterate alone every time, the same way
     /// a standard bound-constrained ("projected") Newton method treats an
     /// active box constraint.
+    ///
+    /// At the cap the rate is zero, and the well stays capped only while its
+    /// tubing curve still needs at least bhp_shutin there; if it needs less,
+    /// the free row would pull bhp below the cap -- the well can flow -- so the
+    /// cap is released (the projected-Newton rule for an active bound). Without
+    /// this a well that once reached its cap, or a reopen candidate starting
+    /// at it, could never flow again within the solve.
     bool updateControls(const State& x) override
     {
         bool moved = false;
         for (int w = 0; w < numWells(); ++w) {
             if (wells_[w].kind != WellKind::Thp) { continue; }
-            const bool capped = x[thpBhpIdx(w)] >= wells_[w].bhp_shutin;
+            const auto& well = wells_[w];
+            bool capped = x[thpBhpIdx(w)] >= well.bhp_shutin;
+            if (capped) {
+                // Just off the cap, so the phase fractions are the well's own
+                // rather than 0/0 at exactly zero rate.
+                const Scalar bhp = well.bhp_shutin - Scalar{1.0e-3} * unit::barsa;
+                std::array<Scalar, NP> q{};
+                for (int p = 0; p < NP; ++p) {
+                    q[p] = well.ipr_a[p] + well.ipr_b[p] * bhp;
+                }
+                const Scalar thp = x[pIdx(well.node)];
+                capped = slopeLimitedBhp(well, thp, q).evaluation.value >= well.bhp_shutin;
+            }
             moved = moved || (capped != thp_capped_[w]);
             thp_capped_[w] = capped;
         }

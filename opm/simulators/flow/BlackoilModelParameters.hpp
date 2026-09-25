@@ -184,6 +184,8 @@ struct EnableGroupTreeBalancer { static constexpr bool value = false; };
 template<class Scalar>
 struct GroupTreeBalancerTolerance { static constexpr Scalar value = 1e-4; };
 template<class Scalar>
+struct GroupTreeIprTolerance { static constexpr Scalar value = 1e-2; };
+template<class Scalar>
 struct LocalToleranceScalingMb { static constexpr Scalar value = 1.0; };
 
 template<class Scalar>
@@ -413,6 +415,11 @@ public:
 
     /// Convergence tolerance for the group-tree balancer's own guide-rate distribution
     Scalar group_tree_balancer_tolerance_;
+
+    /// Relative well-rate tolerance on the IPR linearisation the group-tree
+    /// network solve used, measured at the operating point the wells reach
+    /// in their own solves; above it the group-tree workflow does another round.
+    Scalar group_tree_ipr_tolerance_;
 
     /// Nonlinear solver type: newton or nldd
     std::string nonlinear_solver_;

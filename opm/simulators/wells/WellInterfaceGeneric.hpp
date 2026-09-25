@@ -127,6 +127,14 @@ public:
 
     bool wellIsStopped() const { return this->wellStatus_ == Well::Status::STOP; }
 
+    /// Keep a stopped well stopped in its local solves: the group-tree
+    /// workflow's network-level stop decision holds for the rest of the global
+    /// iteration instead of being undone by the well's own operability check.
+    /// Cleared by the well model at the start of each global iteration's
+    /// well/network update.
+    void holdStopped(const bool on) { this->hold_stopped_ = on; }
+    bool isHeldStopped() const { return this->hold_stopped_; }
+
     int currentStep() const { return this->current_step_; }
 
     int pvtRegionIdx() const { return pvtRegionIdx_; }
@@ -428,6 +436,7 @@ protected:
     std::vector<int> saturation_table_number_;
 
     Well::Status wellStatus_;
+    bool hold_stopped_{false};
 
     Scalar gravity_;
     Scalar wsolvent_;

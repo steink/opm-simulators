@@ -57,10 +57,26 @@ class BlackoilWellModelNetwork :
 public:
     BlackoilWellModelNetwork(BlackoilWellModel<TypeTag>& well_model);
 
+    /// Balance the network(s) in \p scope: refresh the wells' network data,
+    /// then alternate updatePressures() and well re-solves until the node
+    /// pressures settle (the S loop). A no-op unless balancing is due.
     std::tuple<bool, Scalar>
     update(const bool mandatory_network_balance,
            DeferredLogger& deferred_logger,
-           const bool relax_network_tolerance = false);
+           const bool relax_network_tolerance = false,
+           const details::DomainScope scope = details::DomainScope::All);
+
+    /// Validate --network-solver and set the solver flags from the run
+    /// parameters. update() does this itself; a caller driving the pressure
+    /// update directly must call it first.
+    void configureSolvers(DeferredLogger& deferred_logger);
+
+    /// Refresh every predicting well's implicit IPR, stopped-well trial IPR and
+    /// VFP datum correction for the simultaneous (newton / group-tree) solves;
+    /// a no-op for the fixed-point solver. \p scope restricts it to the wells of
+    /// the production or the injection networks.
+    void refreshWellNetworkData(const double dt,
+                                const details::DomainScope scope = details::DomainScope::All);
 
     // Pre-step network solve at static reservoir conditions (group and well states might be updated)
     void doPreStepRebalance(DeferredLogger& deferred_logger);

@@ -89,11 +89,91 @@ doPreStepRebalance(DeferredLogger& deferred_logger)
 }
 
 template<typename TypeTag>
+void
+BlackoilWellModelNetwork<TypeTag>::
+configureSolvers(DeferredLogger& deferred_logger)
+{
+    const auto& solver_mode = well_model_.param().network_solver_;
+    if (solver_mode != "fixedpoint" && solver_mode != "newton" && solver_mode != "group-tree") {
+        OPM_DEFLOG_THROW(std::runtime_error,
+                         "Invalid value '" + solver_mode + "' for --network-solver; "
+                         "expected fixedpoint, newton or group-tree", deferred_logger);
+    }
+    this->useNewtonSolver(solver_mode == "newton");
+    this->useGroupTreeSolver(solver_mode == "group-tree");
+    this->useAnalyticJacobian(well_model_.param().network_analytic_jacobian_);
+    this->useNetworkGroupControl(well_model_.param().network_group_control_);
+    this->useNetworkAutochoke(well_model_.param().network_autochoke_);
+    this->useNetworkComplementarity(well_model_.param().network_complementarity_);
+    this->useGasLiftNetworkResponse(well_model_.param().gaslift_network_response_);
+    this->dumpNetworkFailuresTo(well_model_.param().network_dump_failures_);
+}
+
+template<typename TypeTag>
+void
+BlackoilWellModelNetwork<TypeTag>::
+refreshWellNetworkData(const double dt, const details::DomainScope scope)
+{
+    if (!this->newton_solver_ && !this->group_tree_solver_) {
+        return;
+    }
+    // The simultaneous solve needs every well's rate response to its own
+    // bhp. That is the implicit IPR, which the well solve maintains only
+    // where its own control logic happens to need it -- never for
+    // injectors, and for producers only on some paths. Refresh it here
+    // for all of them, or a network solve arrives with a well it cannot
+    // linearise and hands the whole network back to the relaxed update.
+    // gatherWellNetworkDataForGroupTree() has the identical dependency
+    // (it excludes any well whose implicit IPR isn't already usable),
+    // so group-tree needs this refresh exactly as much as newton does.
+    // The VFP datum-depth correction below is computed but unused by
+    // GroupTreeSystem (well_vfp_dp_ is only ever read from the Newton
+    // builders) -- harmless to still compute it here rather than gate
+    // it separately.
+    for (const auto& well : well_model_) {
+        if (!well->wellEcl().predictionMode()) {
+            continue;
+        }
+        const auto domain = details::domainForWell(*well);
+        if (scope != details::DomainScope::All
+            && (!domain.has_value() || !details::inScope(scope, *domain))) {
+            continue;
+        }
+        well->updateIPRImplicit(well_model_.simulator(),
+                                well_model_.groupStateHelper(),
+                                well_model_.wellState());
+        // A stopped producer's own implicit_ipr above is linearised
+        // at its current, degenerate zero-rate state -- refresh a
+        // separate, physically-grounded trial IPR (stopped_ipr_a/b)
+        // at the same cadence; a no-op for any well not currently
+        // stopped. Not consumed here or by any network solve yet.
+        well->updateStoppedWellTrialIpr(well_model_.simulator(), dt,
+                                        well_model_.groupStateHelper(),
+                                        well_model_.wellState());
+        // The tubing table's datum is not the well's reference
+        // depth; the well's thp evaluation corrects for it and
+        // the network system has to apply the same.
+        const int table = well->wellEcl().vfp_table_number();
+        Scalar dp = 0.0;
+        if (table > 0) {
+            const auto& vfp = well_model_.getVFPProperties();
+            const Scalar datum = well->isInjector()
+                ? vfp.getInj()->getTable(table).getDatumDepth()
+                : vfp.getProd()->getTable(table).getDatumDepth();
+            // wellhelpers::computeHydrostaticCorrection, inline.
+            dp = well->refDensity() * well->gravity() * (datum - well->refDepth());
+        }
+        this->setWellVfpDp(well->name(), dp);
+    }
+}
+
+template<typename TypeTag>
 std::tuple<bool, typename BlackoilWellModelNetwork<TypeTag>::Scalar>
 BlackoilWellModelNetwork<TypeTag>::
 update(const bool mandatory_network_balance,
        DeferredLogger& deferred_logger,
-       const bool relax_network_tolerance)
+       const bool relax_network_tolerance,
+       const details::DomainScope scope)
 {
     OPM_TIMEFUNCTION();
     const int episodeIdx = well_model_.simulator().episodeIndex();
@@ -102,6 +182,8 @@ update(const bool mandatory_network_balance,
     }
 
     const auto& comm = well_model_.simulator().vanguard().grid().comm();
+    const bool production_in_scope = scope != details::DomainScope::Injection;
+    const bool injection_in_scope = scope != details::DomainScope::Production;
 
     // network related
     Scalar network_imbalance = 0.0;
@@ -111,7 +193,8 @@ update(const bool mandatory_network_balance,
         const double dt = well_model_.simulator().timeStepSize();
         this->noteNetworkTimeStep(well_model_.simulator().time(), dt);
         // Calculate common THP for subsea manifold well group (item 3 of NODEPROP set to YES)
-        const bool well_group_thp_updated = computeWellGroupThp(dt, deferred_logger);
+        const bool well_group_thp_updated = production_in_scope
+            && computeWellGroupThp(dt, deferred_logger);
         const int max_number_of_sub_iterations =
             well_model_.param().network_max_sub_iterations_;
         const Scalar network_pressure_update_damping_factor =
@@ -136,66 +219,10 @@ update(const bool mandatory_network_balance,
                                [production](const auto& n)
                                { return (n.domain == details::NetworkDomain::Production) == production; });
         };
-        const bool refresh_group_data_between =
-            has_domain(/*production=*/true) && has_domain(/*production=*/false);
-        const auto& solver_mode = well_model_.param().network_solver_;
-        if (solver_mode != "fixedpoint" && solver_mode != "newton" && solver_mode != "group-tree") {
-            OPM_DEFLOG_THROW(std::runtime_error,
-                             "Invalid value '" + solver_mode + "' for --network-solver; "
-                             "expected fixedpoint, newton or group-tree", deferred_logger);
-        }
-        this->useNewtonSolver(solver_mode == "newton");
-        this->useGroupTreeSolver(solver_mode == "group-tree");
-        this->useAnalyticJacobian(well_model_.param().network_analytic_jacobian_);
-        this->useNetworkGroupControl(well_model_.param().network_group_control_);
-        this->useNetworkAutochoke(well_model_.param().network_autochoke_);
-        this->useNetworkComplementarity(well_model_.param().network_complementarity_);
-        this->useGasLiftNetworkResponse(well_model_.param().gaslift_network_response_);
-        this->dumpNetworkFailuresTo(well_model_.param().network_dump_failures_);
-        if (solver_mode == "newton" || solver_mode == "group-tree") {
-            // The simultaneous solve needs every well's rate response to its own
-            // bhp. That is the implicit IPR, which the well solve maintains only
-            // where its own control logic happens to need it -- never for
-            // injectors, and for producers only on some paths. Refresh it here
-            // for all of them, or a network solve arrives with a well it cannot
-            // linearise and hands the whole network back to the relaxed update.
-            // gatherWellNetworkDataForGroupTree() has the identical dependency
-            // (it excludes any well whose implicit IPR isn't already usable),
-            // so group-tree needs this refresh exactly as much as newton does.
-            // The VFP datum-depth correction below is computed but unused by
-            // GroupTreeSystem (well_vfp_dp_ is only ever read from the Newton
-            // builders) -- harmless to still compute it here rather than gate
-            // it separately.
-            for (const auto& well : well_model_) {
-                if (well->wellEcl().predictionMode()) {
-                    well->updateIPRImplicit(well_model_.simulator(),
-                                            well_model_.groupStateHelper(),
-                                            well_model_.wellState());
-                    // A stopped producer's own implicit_ipr above is linearised
-                    // at its current, degenerate zero-rate state -- refresh a
-                    // separate, physically-grounded trial IPR (stopped_ipr_a/b)
-                    // at the same cadence; a no-op for any well not currently
-                    // stopped. Not consumed here or by any network solve yet.
-                    well->updateStoppedWellTrialIpr(well_model_.simulator(), dt,
-                                                    well_model_.groupStateHelper(),
-                                                    well_model_.wellState());
-                    // The tubing table's datum is not the well's reference
-                    // depth; the well's thp evaluation corrects for it and
-                    // the network system has to apply the same.
-                    const int table = well->wellEcl().vfp_table_number();
-                    Scalar dp = 0.0;
-                    if (table > 0) {
-                        const auto& vfp = well_model_.getVFPProperties();
-                        const Scalar datum = well->isInjector()
-                            ? vfp.getInj()->getTable(table).getDatumDepth()
-                            : vfp.getProd()->getTable(table).getDatumDepth();
-                        // wellhelpers::computeHydrostaticCorrection, inline.
-                        dp = well->refDensity() * well->gravity() * (datum - well->refDepth());
-                    }
-                    this->setWellVfpDp(well->name(), dp);
-                }
-            }
-        }
+        const bool refresh_group_data_between = production_in_scope && injection_in_scope
+            && has_domain(/*production=*/true) && has_domain(/*production=*/false);
+        this->configureSolvers(deferred_logger);
+        this->refreshWellNetworkData(dt, scope);
 
         bool more_network_sub_update = false;
         for (int i = 0; i < max_number_of_sub_iterations; i++) {
@@ -204,7 +231,8 @@ update(const bool mandatory_network_balance,
                                       network_pressure_update_damping_factor,
                                       network_max_pressure_update,
                                       use_secant,
-                                      secant_production);
+                                      secant_production,
+                                      scope);
             network_imbalance = comm.max(local_network_imbalance);
             const auto& balance = well_model_.schedule()[episodeIdx].network_balance();
             constexpr Scalar relaxation_factor = 10.0;
@@ -248,11 +276,15 @@ update(const bool mandatory_network_balance,
                     }
                 }
             };
-            resolve(/*injectors=*/false);
+            if (production_in_scope) {
+                resolve(/*injectors=*/false);
+            }
             if (refresh_group_data_between) {
                 well_model_.updateAndCommunicateGroupData(episodeIdx, /*update_wellgrouptarget*/ true);
             }
-            resolve(/*injectors=*/true);
+            if (injection_in_scope) {
+                resolve(/*injectors=*/true);
+            }
             well_model_.updateAndCommunicateGroupData(episodeIdx, /*update_wellgrouptarget*/ true);
         }
         more_network_update = more_network_sub_update || well_group_thp_updated;
