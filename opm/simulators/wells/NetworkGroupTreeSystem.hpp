@@ -91,6 +91,10 @@ public:
         // other two phases; Pinned does not (its q is already fully known).
         int vfp_table = NoTable;
         Scalar alq = 0;
+        // The tubing table's datum depth vs. the well's reference depth: the
+        // well's bhp is the table's value minus this (as in the well's own
+        // solve and NetworkProductionSystem). Thp wells only.
+        Scalar vfp_dp = 0;
         std::array<Scalar, NP> ipr_a{};
         std::array<Scalar, NP> ipr_b{};   // q_p = ipr_a[p] + ipr_b[p] * bhp
 
@@ -223,6 +227,7 @@ public:
         Scalar efficiency = 1;
         int vfp_table = NoTable;
         Scalar alq = 0;
+        Scalar vfp_dp = 0;   // see Well::vfp_dp
         std::array<Scalar, NP> ipr_a{};
         std::array<Scalar, NP> ipr_b{};
 
@@ -269,6 +274,7 @@ public:
         well.efficiency = wd.efficiency;
         well.vfp_table = wd.vfp_table;
         well.alq = wd.alq;
+        well.vfp_dp = wd.vfp_dp;
         well.ipr_a = wd.trial_ipr_a;
         well.ipr_b = wd.trial_ipr_b;
         well.kind = WellKind::Thp;
@@ -372,6 +378,7 @@ public:
             well.efficiency = wd.efficiency;
             well.vfp_table = wd.vfp_table;
             well.alq = wd.alq;
+            well.vfp_dp = wd.vfp_dp;
             well.ipr_a = wd.ipr_a;
             well.ipr_b = wd.ipr_b;
             return well;
@@ -783,7 +790,7 @@ public:
         }
         const Scalar thp = x[pIdx(well.node)];
         const auto qw = wellPhaseRatesOwn(w, x);
-        const Scalar computed = slopeLimitedBhp(well, thp, qw).evaluation.value;
+        const Scalar computed = slopeLimitedBhp(well, thp, qw).evaluation.value - well.vfp_dp;
         return (bhp - computed) / unit::barsa;
     }
 
@@ -908,7 +915,8 @@ public:
                     q[p] = well.ipr_a[p] + well.ipr_b[p] * bhp;
                 }
                 const Scalar thp = x[pIdx(well.node)];
-                capped = slopeLimitedBhp(well, thp, q).evaluation.value >= well.bhp_shutin;
+                capped = slopeLimitedBhp(well, thp, q).evaluation.value - well.vfp_dp
+                    >= well.bhp_shutin;
             }
             moved = moved || (capped != thp_capped_[w]);
             thp_capped_[w] = capped;

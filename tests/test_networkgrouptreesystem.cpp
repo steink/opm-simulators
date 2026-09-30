@@ -276,6 +276,38 @@ BOOST_FIXTURE_TEST_CASE(single_group_controlled_well, Fixture)
     BOOST_CHECK_CLOSE(result.node_pressure[1], expected, 1e-6);
 }
 
+// The tubing table's datum is not the well's reference depth: the Thp row
+// must give bhp = table(thp, q) - vfp_dp, the correction the well's own solve
+// applies, or the network and the well disagree about whether it can lift.
+BOOST_FIXTURE_TEST_CASE(thp_well_applies_the_datum_depth_correction, Fixture)
+{
+    GroupTreeSystem<double> sys(props);
+    sys.addNode(Node{"N1", /*parent=*/0, /*vfp_table=*/3, /*efficiency=*/1.0});
+    const double terminal = 10.0 * unit::barsa;
+    sys.setTerminalPressure(terminal);
+
+    GroupTreeSystem<double>::Well w;
+    w.name = "W1";
+    w.node = 1;
+    w.kind = GroupTreeSystem<double>::WellKind::Thp;
+    w.vfp_table = 3;
+    w.vfp_dp = 2.0 * unit::barsa;
+    const double q_pivot = 500.0 * unit::cubic(unit::meter) / unit::day;
+    w.ipr_b[0] = -q_pivot / (50.0 * unit::barsa);
+    w.ipr_a[0] = q_pivot - w.ipr_b[0] * (15.0 * unit::barsa);
+    sys.addWell(w);
+
+    const std::vector<double> guess{15.0 * unit::barsa};
+    sys.finalize();
+    const auto result = NetworkSolve::solve(sys, guess, kParams, FullStep{});
+    checkAnalyticJacobian(sys, guess, result);
+    BOOST_REQUIRE(result.converged);
+
+    const auto& q = result.well_phase_rates[0];
+    const double table = props.bhp(3, -q[1], -q[0], -q[2], result.node_pressure[1], 0.0, 0.0, 0.0, false);
+    BOOST_CHECK_CLOSE(result.well_bhp[0], table - w.vfp_dp, 1e-6);
+}
+
 // A fixed-pressure node below the root (another root of the network that also
 // feeds a node further up, as in NETWORK-01-MULTIROOT): N2 is pinned at its own
 // pressure and its Thp well is solved against it, while its flow still counts

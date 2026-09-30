@@ -943,8 +943,8 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
 
     // Per candidate: present, usable ipr, three ipr_a, three ipr_b, efficiency
     // scaling, has a network-sourced (dynamic) thp limit, stopped, usable trial
-    // ipr, three trial ipr_a, three trial ipr_b.
-    constexpr int kEntries = 18;
+    // ipr, three trial ipr_a, three trial ipr_b, tubing-table datum correction.
+    constexpr int kEntries = 19;
     std::vector<Scalar> shared(candidates.size() * kEntries, Scalar{0});
     for (std::size_t i = 0; i < candidates.size(); ++i) {
         const auto it = local.find(candidates[i].name);
@@ -982,6 +982,11 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
         // Only the well model's own dynamic stop (wellIsStopped() on an OPEN
         // well) makes a reopen candidate: a persistent STOP (deck, economic
         // limits) is not the network's to undo.
+        // The tubing table's datum is not the well's reference depth: the
+        // well's own solve applies this correction (see refreshWellNetworkData()).
+        if (const auto dp = well_vfp_dp_.find(candidates[i].name); dp != well_vfp_dp_.end()) {
+            e[18] = dp->second;
+        }
         if (ws.status == WellStatus::OPEN && it->second->wellIsStopped()) {
             e[10] = Scalar{1};
             if (static_cast<int>(ws.stopped_ipr_b.size()) >= pu.numActivePhases()
@@ -1015,11 +1020,7 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
         data.has_ipr = e[1] > Scalar{0};
         data.efficiency = candidates[i].efficiency * e[8];
         data.vfp_table = candidates[i].vfp_table;
-        // Unlike NetworkProductionSystem (well_vfp_dp_, the tubing table's datum
-        // vs. the well's own reference-depth hydrostatic correction),
-        // GroupTreeSystem has nowhere to apply this correction yet -- a real,
-        // if likely small, gap for the "unproblematic wells" scope, not
-        // something this gather can paper over on its own.
+        data.vfp_dp = e[18];
         // The alq a Thp well's tubing table sees is decided elsewhere (WLIFTOPT
         // gas lift, or a fixed deck value); left at its default (0) here, same
         // as every "unproblematic wells" test so far -- revisit once gas lift
