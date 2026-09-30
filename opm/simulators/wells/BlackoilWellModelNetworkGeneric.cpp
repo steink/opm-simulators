@@ -1076,6 +1076,7 @@ solveGroupTree(const Network::ExtNetwork& network,
     const auto& schedule = well_model_.schedule();
     Sys system(*well_model_.getVFPProperties().getProd());
     system.setTerminalPressure(*root.terminal_pressure());
+    system.setAnalyticJacobian(analytic_jacobian_);
 
     // Nodes, parents before children -- same walk as
     // newtonProductionNodePressures(), minus autochoke (GroupTreeSystem has

@@ -25,11 +25,14 @@
 #include <opm/input/eclipse/Schedule/Well/Well.hpp>
 #include <opm/input/eclipse/Schedule/Well/WellEnums.hpp>
 #include <opm/input/eclipse/Units/Units.hpp>
+#include <opm/material/densead/Evaluation.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <functional>
+#include <limits>
+#include <map>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -500,7 +503,32 @@ public:
                 well.bhp_shutin = shutInBhp(well);
             }
         }
+
+        // Topology and column lookups, so residual() and jacobian() need not
+        // search for them on every call.
+        wells_at_.assign(nodes_.size(), {});
+        children_.assign(nodes_.size(), {});
+        thp_col_.assign(wells_.size(), -1);
+        num_thp_ = 0;
+        for (int w = 0; w < numWells(); ++w) {
+            if (wells_[w].node > 0) {
+                wells_at_[wells_[w].node].push_back(w);
+            }
+            if (wells_[w].kind == WellKind::Thp) {
+                thp_col_[w] = numNodes() + numActiveLambdas() + num_thp_++;
+            }
+        }
+        for (std::size_t c = 1; c < nodes_.size(); ++c) {
+            if (nodes_[c].parent > 0) {
+                children_[nodes_[c].parent].push_back(static_cast<int>(c));
+            }
+        }
+        buildRateDerivatives();
     }
+
+    /// Assemble jacobian() from the table derivatives instead of letting
+    /// solve() difference residual(). See jacobian().
+    void setAnalyticJacobian(const bool on) { analytic_jacobian_ = on; }
 
     int numNodes() const { return static_cast<int>(nodes_.size()) - 1; }   // excludes the terminal
     int numActiveNodes() const { return static_cast<int>(activeNodes_.size()); }
@@ -688,20 +716,7 @@ public:
         // node's pressure is what the tubing table says that q needs at the
         // upstream pressure -- or just the upstream pressure, node-to-node,
         // where there is no table.
-        std::vector<std::array<Scalar, NP>> q(nodes_.size());
-        for (int i = n; i >= 1; --i) {
-            std::array<Scalar, NP> qi{};
-            for (int w = 0; w < numWells(); ++w) {
-                if (wells_[w].node != i) { continue; }
-                const auto qw = wellPhaseRatesOwn(w, x);
-                for (int p = 0; p < NP; ++p) { qi[p] += wells_[w].efficiency * qw[p]; }
-            }
-            for (std::size_t c = 1; c < nodes_.size(); ++c) {
-                if (nodes_[c].parent != i) { continue; }
-                for (int p = 0; p < NP; ++p) { qi[p] += nodes_[c].efficiency * q[c][p]; }
-            }
-            q[i] = qi;
-        }
+        const auto q = nodeFlows(x);
         for (int i = 1; i <= n; ++i) {
             const Scalar upstream = (nodes_[i].parent == 0) ? terminal_pressure_ : x[pIdx(nodes_[i].parent)];
             const Scalar computed = hasTable(nodes_[i])
@@ -776,14 +791,73 @@ public:
                                             *well.ipr_slope_limit);
     }
 
-    DenseMatrix<Scalar> jacobian(const State&) const override
+    /// The Jacobian of residual(), from the table derivatives. Every well rate
+    /// is affine in the unknowns (Pinned: constant; Group: in its node's
+    /// lambda; Thp: in its own bhp), so node flows and target rows have
+    /// constant derivatives, precomputed by finalize(); only the tubing tables
+    /// need derivatives at x (tableLookup()). Rows are scaled exactly as
+    /// residual() scales them.
+    DenseMatrix<Scalar> jacobian(const State& x) const override
     {
-        // No analytic Jacobian yet -- solve() differences residual() instead
-        // (see usesAnalyticJacobian()). Never called; the trivial empty
-        // matrix here is just to satisfy the pure virtual.
-        return DenseMatrix<Scalar>(size());
+        DenseMatrix<Scalar> J(size());
+        const Scalar bar = unit::barsa;
+        const int n = numNodes();
+        const auto q = nodeFlows(x);
+
+        // Node rows: (p_i - table(p_parent, q_i)) / bar.
+        for (int i = 1; i <= n; ++i) {
+            const int row = pIdx(i);
+            const int parent = nodes_[i].parent;
+            J(row, row) += Scalar{1} / bar;
+            if (hasTable(nodes_[i])) {
+                const Scalar upstream = (parent == 0) ? terminal_pressure_ : x[pIdx(parent)];
+                const auto t = tableLookup(nodes_[i].vfp_table, upstream, q[i], node_alq_[i],
+                                           std::nullopt);
+                if (parent != 0) {
+                    J(row, pIdx(parent)) -= t.dthp / bar;
+                }
+                for (const auto& [col, dq] : node_flow_jac_[i]) {
+                    J(row, col) -= (t.dq[kOil] * dq[kOil] + t.dq[kWater] * dq[kWater]
+                                    + t.dq[kGas] * dq[kGas]) / bar;
+                }
+            } else if (parent != 0) {
+                J(row, pIdx(parent)) -= Scalar{1} / bar;
+            }
+        }
+
+        // Target rows: linear, see buildRateDerivatives().
+        for (int k = 0; k < numActiveNodes(); ++k) {
+            if (lambda_slot_[k] < 0) {
+                continue;
+            }
+            for (const auto& [col, c] : target_jac_[k]) {
+                J(lambdaIdx(k), col) += c;
+            }
+        }
+
+        // Thp-well rows: (bhp - table~(p_node, q_w(bhp))) / bar, or the
+        // shut-in pin (bhp - bhp_shutin) / bar while capped.
+        for (int w = 0; w < numWells(); ++w) {
+            const auto& well = wells_[w];
+            if (well.kind != WellKind::Thp) {
+                continue;
+            }
+            const int row = thpBhpIdx(w);
+            if (thp_capped_[w]) {
+                J(row, row) += Scalar{1} / bar;
+                continue;
+            }
+            const Scalar thp = x[pIdx(well.node)];
+            const auto t = tableLookup(well.vfp_table, thp, wellPhaseRatesOwn(w, x), well.alq,
+                                       well.ipr_slope_limit);
+            const Scalar dtable_dbhp = t.dq[kOil] * well.ipr_b[kOil]
+                + t.dq[kWater] * well.ipr_b[kWater] + t.dq[kGas] * well.ipr_b[kGas];
+            J(row, row) += (Scalar{1} - dtable_dbhp) / bar;
+            J(row, pIdx(well.node)) -= t.dthp / bar;
+        }
+        return J;
     }
-    bool usesAnalyticJacobian() const override { return false; }
+    bool usesAnalyticJacobian() const override { return analytic_jacobian_; }
 
     /// The one piece of per-iterate state this class has: whether each Thp
     /// well's *current* bhp has reached its own bhp_shutin (see that field's
@@ -887,12 +961,7 @@ public:
     }
 
 private:
-    int numThpWells() const
-    {
-        int n = 0;
-        for (const auto& w : wells_) { n += (w.kind == WellKind::Thp) ? 1 : 0; }
-        return n;
-    }
+    int numThpWells() const { return num_thp_; }
     int pIdx(const int node) const { return node - 1; }
     // Only ever called for a node with lambda_slot_[active_node] >= 0: the
     // only way to reach it is via a well in that node's own own_wells (the
@@ -900,11 +969,134 @@ private:
     // both of which are exactly the two places that only exist because
     // own_wells is non-empty.
     int lambdaIdx(const int active_node) const { return numNodes() + lambda_slot_[active_node]; }
-    int thpBhpIdx(const int w) const
+    int thpBhpIdx(const int w) const { return thp_col_[w]; }
+
+    /// Every node's (efficiency-scaled) inflow at x, bottom-up: its own wells'
+    /// rates plus its children's flows. Index 0 (the terminal) is unused.
+    std::vector<std::array<Scalar, NP>> nodeFlows(const State& x) const
     {
-        int idx = numNodes() + numActiveLambdas();
-        for (int i = 0; i < w; ++i) { idx += (wells_[i].kind == WellKind::Thp) ? 1 : 0; }
-        return idx;
+        std::vector<std::array<Scalar, NP>> q(nodes_.size());
+        for (int i = numNodes(); i >= 1; --i) {
+            std::array<Scalar, NP> qi{};
+            for (const int w : wells_at_[i]) {
+                const auto qw = wellPhaseRatesOwn(w, x);
+                for (int p = 0; p < NP; ++p) { qi[p] += wells_[w].efficiency * qw[p]; }
+            }
+            for (const int c : children_[i]) {
+                for (int p = 0; p < NP; ++p) { qi[p] += nodes_[c].efficiency * q[c][p]; }
+            }
+            q[i] = qi;
+        }
+        return q;
+    }
+
+    /// A tubing-table lookup with its derivatives: the value and d/dthp from
+    /// bhp_with_slope_limit() (the partials of the very line the value comes
+    /// from), d/dq by automatic differentiation of the same lookup in the three
+    /// phase rates, which also carries how the water and gas fractions move
+    /// with them. With no limit the lookup is the plain table (the limit can
+    /// never trigger), but with the unclipped FLO derivative -- the templated
+    /// bhp() clips it at zero, which would describe a different function than
+    /// the value on a downward-sloping part of the table.
+    struct TableDerivatives
+    {
+        Scalar value = 0;
+        Scalar dthp = 0;
+        std::array<Scalar, NP> dq{};   // d/d(own positive rate), oil, water, gas
+    };
+    TableDerivatives tableLookup(const int table, const Scalar thp,
+                                 const std::array<Scalar, NP>& q, const Scalar alq,
+                                 const std::optional<Scalar> max_slope) const
+    {
+        const Scalar limit = max_slope.value_or(std::numeric_limits<Scalar>::lowest());
+        // props_->bhp*() want water, oil, gas and negative-for-production.
+        const auto plain = props_->bhp_with_slope_limit(table, -q[kWater], -q[kOil], -q[kGas],
+                                                        thp, alq, Scalar{0}, Scalar{0}, false,
+                                                        limit);
+        using Eval = DenseAd::Evaluation<Scalar, NP>;
+        const Eval aqua = Eval::createVariable(-q[kWater], kWater);
+        const Eval liquid = Eval::createVariable(-q[kOil], kOil);
+        const Eval vapour = Eval::createVariable(-q[kGas], kGas);
+        const Eval ad = props_->bhp_with_slope_limit(table, aqua, liquid, vapour, thp, alq,
+                                                     Scalar{0}, Scalar{0}, false, limit);
+        TableDerivatives out;
+        out.value = plain.evaluation.value;
+        out.dthp = plain.evaluation.dthp;
+        for (int p = 0; p < NP; ++p) {
+            out.dq[p] = -ad.derivative(p);   // d/dq = -d/d(-q)
+        }
+        return out;
+    }
+
+    /// Precompute the constant derivatives jacobian() needs (called by
+    /// finalize()): each well's rates with respect to the unknowns, each
+    /// node's inflow from those, bottom-up with efficiencies, and each target
+    /// row -- already divided by the row's scale, as residual() does.
+    void buildRateDerivatives()
+    {
+        using Sparse = std::map<int, std::array<Scalar, NP>>;
+        std::vector<Sparse> rate(wells_.size());
+        for (int w = 0; w < numWells(); ++w) {
+            const auto& well = wells_[w];
+            if (well.kind == WellKind::Group) {
+                // q_p = a_p + b_p * (g * lambda - A) / B, A and B the IPR
+                // projected on the node's mode (bhpFromTarget()).
+                const auto& a = activeNodes_[well.active_node];
+                const Scalar B = projectOnMode(well.ipr_b, phaseWeights(a.mode, a.resv_coeff));
+                if (B != Scalar{0}) {
+                    auto& d = rate[w][lambdaIdx(well.active_node)];
+                    for (int p = 0; p < NP; ++p) { d[p] = well.ipr_b[p] * well.guide_rate / B; }
+                }
+            } else if (well.kind == WellKind::Thp) {
+                rate[w][thpBhpIdx(w)] = well.ipr_b;
+            }
+        }
+
+        std::vector<Sparse> flow(nodes_.size());
+        for (int i = numNodes(); i >= 1; --i) {
+            for (const int w : wells_at_[i]) {
+                for (const auto& [col, d] : rate[w]) {
+                    auto& f = flow[i][col];
+                    for (int p = 0; p < NP; ++p) { f[p] += wells_[w].efficiency * d[p]; }
+                }
+            }
+            for (const int c : children_[i]) {
+                for (const auto& [col, d] : flow[c]) {
+                    auto& f = flow[i][col];
+                    for (int p = 0; p < NP; ++p) { f[p] += nodes_[c].efficiency * d[p]; }
+                }
+            }
+        }
+        node_flow_jac_.assign(nodes_.size(), {});
+        for (std::size_t i = 1; i < nodes_.size(); ++i) {
+            node_flow_jac_[i].assign(flow[i].begin(), flow[i].end());
+        }
+
+        // Target rows: activeNodeTotal() with the node's own weights, divided
+        // by the same scale residual() uses.
+        target_jac_.assign(activeNodes_.size(), {});
+        for (int k = 0; k < numActiveNodes(); ++k) {
+            if (lambda_slot_[k] < 0) {
+                continue;
+            }
+            const auto& a = activeNodes_[k];
+            const auto weights = phaseWeights(a.mode, a.resv_coeff);
+            const Scalar scale = (a.target > Scalar{0}) ? a.target : Scalar{1};
+            std::map<int, Scalar> row;
+            std::function<void(int, Scalar)> add = [&](const int node, const Scalar factor) {
+                const auto& an = activeNodes_[node];
+                auto addWell = [&](const int w, const Scalar eff) {
+                    for (const auto& [col, d] : rate[w]) {
+                        row[col] += factor * eff * projectOnMode(d, weights) / scale;
+                    }
+                };
+                for (const int w : an.own_wells) { addWell(w, wells_[w].efficiency); }
+                for (const auto& [w, eff] : an.member_wells) { addWell(w, eff); }
+                for (const auto& [child, eff] : an.active_children) { add(child, factor * eff); }
+            };
+            add(k, Scalar{1});
+            target_jac_[k].assign(row.begin(), row.end());
+        }
     }
     bool hasTable(const Node& n) const { return n.vfp_table != NoTable; }
 
@@ -986,6 +1178,17 @@ private:
     // true once its current bhp has reached bhp_shutin -- see that field's
     // own doc comment and residual()'s use of it.
     std::vector<bool> thp_capped_;
+
+    // Set by finalize(): wells feeding each node, each node's children, each
+    // well's Thp column (-1 if not Thp), and the constant derivatives
+    // jacobian() uses (see buildRateDerivatives()).
+    std::vector<std::vector<int>> wells_at_;
+    std::vector<std::vector<int>> children_;
+    std::vector<int> thp_col_;
+    int num_thp_ = 0;
+    std::vector<std::vector<std::pair<int, std::array<Scalar, NP>>>> node_flow_jac_;
+    std::vector<std::vector<std::pair<int, Scalar>>> target_jac_;
+    bool analytic_jacobian_ = false;
 };
 
 } // namespace Opm::NetworkSolve

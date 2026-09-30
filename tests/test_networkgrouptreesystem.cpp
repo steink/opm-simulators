@@ -38,6 +38,7 @@
 #include <array>
 #include <cmath>
 #include <string>
+#include <vector>
 
 using namespace Opm;
 using namespace Opm::NetworkSolve;
@@ -65,6 +66,56 @@ VFPPROD
 )";
 
 const NetworkSolve::Parameters<double> kParams{1e-7, 50};
+
+// The analytic Jacobian of residual() at x, against a forward difference.
+// The tables are piecewise linear, so a small step inside an interval
+// differences exactly; the tolerance covers round-off and the rare step that
+// crosses a knot.
+void checkJacobianAt(GroupTreeSystem<double>& sys, const std::vector<double>& x)
+{
+    sys.updateControls(x);
+    const auto J = sys.jacobian(x);
+    const auto r = sys.residual(x);
+    const int n = sys.size();
+    for (int j = 0; j < n; ++j) {
+        const double h = 1e-6 * sys.columnScale(j);
+        auto xh = x;
+        xh[j] -= h;   // downwards: a Thp bhp may sit at its shut-in cap
+        const auto rh = sys.residual(xh);
+        for (int i = 0; i < n; ++i) {
+            const double fd = (r[i] - rh[i]) / h;
+            BOOST_TEST_INFO("J(" << i << "," << j << ")");
+            BOOST_CHECK_SMALL(J(i, j) - fd, 1e-6 + 1e-4 * std::abs(fd));
+        }
+    }
+}
+
+// Every test system, once more with the analytic Jacobian: the Jacobian
+// itself at the starting point and at a point moved off it, and the full
+// solve, which must reach the same node pressures in no more iterations.
+void checkAnalyticJacobian(const GroupTreeSystem<double>& sys,
+                           const std::vector<double>& guess,
+                           const Result<double>& fd_result)
+{
+    auto copy = sys;
+    copy.setAnalyticJacobian(true);
+    BOOST_CHECK(copy.usesAnalyticJacobian());
+
+    auto x = copy.start(guess);
+    checkJacobianAt(copy, x);
+    for (auto& xj : x) {
+        xj *= 0.987;   // relative, so a lambda or rate never changes sign
+    }
+    checkJacobianAt(copy, x);
+
+    const auto result = NetworkSolve::solve(copy, guess, kParams, FullStep{});
+    BOOST_CHECK_EQUAL(result.converged, fd_result.converged);
+    BOOST_CHECK_LE(result.iterations, fd_result.iterations);
+    BOOST_REQUIRE_EQUAL(result.node_pressure.size(), fd_result.node_pressure.size());
+    for (std::size_t i = 0; i < result.node_pressure.size(); ++i) {
+        BOOST_CHECK_CLOSE(result.node_pressure[i], fd_result.node_pressure[i], 1e-6);
+    }
+}
 
 struct Fixture
 {
@@ -104,6 +155,7 @@ BOOST_FIXTURE_TEST_CASE(single_pinned_well, Fixture)
     const std::vector<double> guess{15.0 * unit::barsa};
     sys.finalize();
     const auto result = NetworkSolve::solve(sys, guess, kParams, FullStep{});
+    checkAnalyticJacobian(sys, guess, result);
     BOOST_REQUIRE(result.converged);
 
     // A direct call to the same table, at the same rate and terminal
@@ -159,6 +211,7 @@ VFPPROD
     const std::vector<double> guess{15.0 * unit::barsa};
     sys.finalize();
     const auto result = NetworkSolve::solve(sys, guess, kParams, FullStep{});
+    checkAnalyticJacobian(sys, guess, result);
     BOOST_REQUIRE(result.converged);
 
     const double expected_with_alq = local_props.bhp(7, 0.0, -oil_rate, 0.0, terminal, alq, 0.0, 0.0, false);
@@ -205,6 +258,7 @@ BOOST_FIXTURE_TEST_CASE(single_group_controlled_well, Fixture)
     const std::vector<double> guess{15.0 * unit::barsa};
     sys.finalize();
     const auto result = NetworkSolve::solve(sys, guess, kParams, FullStep{});
+    checkAnalyticJacobian(sys, guess, result);
     BOOST_REQUIRE(result.converged);
 
     // The lone well under this Active node gets the whole target, whatever
@@ -250,6 +304,7 @@ BOOST_FIXTURE_TEST_CASE(single_thp_controlled_well, Fixture)
     const std::vector<double> guess{15.0 * unit::barsa};
     sys.finalize();
     const auto result = NetworkSolve::solve(sys, guess, kParams, FullStep{});
+    checkAnalyticJacobian(sys, guess, result);
     BOOST_REQUIRE(result.converged);
     BOOST_TEST_MESSAGE(fmt::format("converged in {} iterations, node_pressure={:.4f} bar, well_bhp={:.4f} bar",
                                     result.iterations, result.node_pressure[1] / unit::barsa,
@@ -312,6 +367,7 @@ BOOST_FIXTURE_TEST_CASE(thp_well_capped_at_its_own_shut_in_bhp, Fixture)
     const std::vector<double> guess{15.0 * unit::barsa};
     sys.finalize();
     const auto result = NetworkSolve::solve(sys, guess, kParams, FullStep{});
+    checkAnalyticJacobian(sys, guess, result);
     BOOST_REQUIRE(result.converged);
     BOOST_TEST_MESSAGE(fmt::format("converged in {} iterations: bhp={:.4f} bar, rate={:.4f} m3/d",
                                     result.iterations, result.well_bhp[0] / unit::barsa,
@@ -372,6 +428,7 @@ BOOST_FIXTURE_TEST_CASE(mixed_group_and_thp_wells_share_one_lambda, Fixture)
     const std::vector<double> guess{15.0 * unit::barsa};
     sys.finalize();
     const auto result = NetworkSolve::solve(sys, guess, kParams, FullStep{});
+    checkAnalyticJacobian(sys, guess, result);
     BOOST_REQUIRE(result.converged);
     BOOST_TEST_MESSAGE(fmt::format("converged in {} iterations: G1={:.2f} T1={:.2f} m3/d, node_pressure={:.4f} bar",
                                     result.iterations, result.well_rate[0] / (unit::cubic(unit::meter) / unit::day),
@@ -460,6 +517,7 @@ BOOST_FIXTURE_TEST_CASE(nested_active_node_uses_the_childs_target_not_its_wells,
     const std::vector<double> guess{15.0 * unit::barsa};
     sys.finalize();
     const auto result = NetworkSolve::solve(sys, guess, kParams, FullStep{});
+    checkAnalyticJacobian(sys, guess, result);
     BOOST_REQUIRE(result.converged);
 
     // GP1 (child) is a lone well: it gets its whole target, exactly, no
@@ -560,6 +618,7 @@ BOOST_FIXTURE_TEST_CASE(nested_active_node_with_different_modes_must_project_not
     const std::vector<double> guess{15.0 * unit::barsa};
     sys.finalize();
     const auto result = NetworkSolve::solve(sys, guess, kParams, FullStep{});
+    checkAnalyticJacobian(sys, guess, result);
     BOOST_REQUIRE(result.converged);
     BOOST_REQUIRE_EQUAL(result.well_phase_rates.size(), 2U);
     const auto& q_wc = result.well_phase_rates[0];
@@ -666,6 +725,7 @@ BOOST_FIXTURE_TEST_CASE(nested_active_node_with_a_thp_well_under_the_child, Fixt
     const std::vector<double> guess{15.0 * unit::barsa};
     sys.finalize();
     const auto result = NetworkSolve::solve(sys, guess, kParams, FullStep{});
+    checkAnalyticJacobian(sys, guess, result);
     BOOST_REQUIRE(result.converged);
     BOOST_REQUIRE_EQUAL(result.well_rate.size(), 3U);
     const double wt_oil = result.well_rate[0];
@@ -754,6 +814,7 @@ BOOST_FIXTURE_TEST_CASE(active_node_with_empty_own_wells_has_its_row_dropped, Fi
 
     const std::vector<double> guess{15.0 * unit::barsa};
     const auto result = NetworkSolve::solve(sys, guess, kParams, FullStep{});
+    checkAnalyticJacobian(sys, guess, result);
     BOOST_REQUIRE(result.converged);
     BOOST_REQUIRE_EQUAL(result.well_rate.size(), 2U);
     const double gp1_oil = result.well_rate[0];
@@ -826,6 +887,7 @@ BOOST_FIXTURE_TEST_CASE(pinned_well_counts_toward_its_parents_sum_via_member_wel
     const std::vector<double> guess{15.0 * unit::barsa};
     sys.finalize();
     const auto result = NetworkSolve::solve(sys, guess, kParams, FullStep{});
+    checkAnalyticJacobian(sys, guess, result);
     BOOST_REQUIRE(result.converged);
 
     BOOST_REQUIRE_EQUAL(result.well_rate.size(), 2U);
@@ -930,7 +992,9 @@ BOOST_AUTO_TEST_CASE(slope_limit_moves_the_thp_wells_converged_point_off_the_cli
 
         const std::vector<double> guess{20.0 * unit::barsa};
         sys.finalize();
-        return NetworkSolve::solve(sys, guess, kParams, FullStep{});
+        const auto result = NetworkSolve::solve(sys, guess, kParams, FullStep{});
+        checkAnalyticJacobian(sys, guess, result);
+        return result;
     };
 
     const auto real = buildAndSolve(false);
