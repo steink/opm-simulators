@@ -1246,10 +1246,25 @@ namespace Opm {
         // Decided once for the whole loop: the group-tree workflow's A rounds
         // take the place of the ordinary outer iterations.
         const bool group_tree_workflow = this->useGroupTreeWorkflow_(mandatory_network_balance);
-        // A group-tree stop is held for one global iteration only; whether it
-        // should persist beyond that is still open (timestep_workflow.md, Q3).
-        for (const auto& well : well_container_) {
-            well->holdStopped(false);
+        // How long a group-tree stop is held (timestep_workflow.md, Q3). Well
+        // objects are recreated every timestep, so "timestep" needs no release
+        // here at all.
+        {
+            const auto& hold = param_.group_tree_stop_hold_;
+            if (hold != "iteration" && hold != "timestep" && hold != "nupcol") {
+                OPM_DEFLOG_THROW(std::runtime_error,
+                                 "Invalid value '" + hold + "' for --group-tree-stop-hold; "
+                                 "expected iteration, timestep or nupcol", local_deferredLogger);
+            }
+            const int reportStepIdx = simulator_.episodeIndex();
+            const bool release = hold == "iteration"
+                || (hold == "nupcol" && !simulator_.problem().iterationContext()
+                        .withinNupcol(this->schedule()[reportStepIdx].nupcol()));
+            if (release) {
+                for (const auto& well : well_container_) {
+                    well->holdStopped(false);
+                }
+            }
         }
         while (do_network_update) {
             if (!this->isRescoupSlaveCoupledNetworkIteration_()

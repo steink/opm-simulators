@@ -138,6 +138,7 @@ BlackoilModelParameters<Scalar>::BlackoilModelParameters()
     enable_group_tree_balancer_ = Parameters::Get<Parameters::EnableGroupTreeBalancer>();
     group_tree_balancer_tolerance_ = Parameters::Get<Parameters::GroupTreeBalancerTolerance<Scalar>>();
     group_tree_ipr_tolerance_ = Parameters::Get<Parameters::GroupTreeIprTolerance<Scalar>>();
+    group_tree_stop_hold_ = Parameters::Get<Parameters::GroupTreeStopHold>();
 }
 
 template<class Scalar>
@@ -387,6 +388,10 @@ void BlackoilModelParameters<Scalar>::registerParameters()
         ("Relative well-rate tolerance on the IPRs the group-tree network solve used, measured "
          "after the wells' own solves; above it the group-tree workflow re-balances with fresh "
          "IPRs (--network-solver=group-tree with the group-tree balancer)");
+    Parameters::Register<Parameters::GroupTreeStopHold>
+        ("How long a well stop decided by the group-tree network solve is held in the wells' "
+         "own solves before they may reopen it: 'iteration' (one global iteration), "
+         "'timestep', or 'nupcol' (while within NUPCOL)");
     // if openMP is available, use two threads per mpi rank by default
 #if _OPENMP
     Parameters::SetDefault<Parameters::ThreadsPerProcess>(2);
