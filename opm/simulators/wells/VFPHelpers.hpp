@@ -101,6 +101,28 @@ struct SlopeLimitedEvaluation
 };
 
 /**
+ * Where a well stops being able to lift: see VFPHelpers::maxFlowingThp().
+ */
+template<class Scalar>
+struct MaxFlowingThp
+{
+    /// The well can flow at the table's lowest THP. If not, nothing below
+    /// is meaningful: the well cannot operate anywhere within the table.
+    bool flows{false};
+    /// The well can still flow at the table's highest THP: thp is then that
+    /// value, a lower bound on the true maximum the table cannot resolve.
+    bool capped{false};
+    /// The highest THP at which the well can flow.
+    Scalar thp{0};
+    /// The operating point there: FLO along the table's own (positive) axis,
+    /// and the well's bhp on its IPR. At an interior maximum this is where
+    /// the IPR just touches the tubing curve; its rate is the lowest stable
+    /// rate the well can have.
+    Scalar flo{0};
+    Scalar bhp{0};
+};
+
+/**
  * Helper struct for linear interpolation
  */
 template<class Scalar>
@@ -290,6 +312,58 @@ public:
                      const Scalar ipr_a,
                      const Scalar ipr_b,
                      const std::function<Scalar(const Scalar)>& adjust_bhp);
+
+    /**
+     * How far a well is from being able to lift at \p thp:
+     *
+     *   F(thp) = min over FLO of [ adjust_bhp(table bhp(thp, FLO), thp) - bhp_IPR(FLO) ]
+     *
+     * over the FLO the well can reach without going below \p bhp_limit, where
+     * bhp_IPR is the well's IPR, in the same FLO terms intersectWithIPR() uses:
+     * flo = ipr_a - ipr_b * bhp (production positive, ipr_b > 0), so
+     * bhp_IPR(FLO) = (ipr_a - FLO) / ipr_b. F <= 0 means the IPR reaches the
+     * tubing curve somewhere, i.e. the well can flow at this THP; the more
+     * negative, the more margin.
+     *
+     * wfr, gfr and alq are held fixed. With them fixed the table is piecewise
+     * linear in FLO and the IPR is linear, so the minimum is taken over the
+     * FLO knots, FLO = 0 and the FLO at \p bhp_limit: exact, and table
+     * lookups only. \p adjust_bhp maps a table bhp to an actual bhp at a given
+     * THP (datum depth, WVFPDP), as in intersectWithIPR().
+     *
+     * \p flo_at_min, if not null, receives the FLO where the minimum is taken.
+     * Returns +infinity for an IPR that cannot produce at all above \p bhp_limit.
+     */
+    static Scalar liftMargin(const VFPProdTable& table,
+                             const Scalar thp,
+                             const Scalar wfr,
+                             const Scalar gfr,
+                             const Scalar alq,
+                             const Scalar ipr_a,
+                             const Scalar ipr_b,
+                             const Scalar bhp_limit,
+                             const std::function<Scalar(const Scalar, const Scalar)>& adjust_bhp,
+                             Scalar* flo_at_min = nullptr);
+
+    /**
+     * The highest THP within the table's THP range at which a well with this
+     * IPR can flow: the largest thp with liftMargin(thp) <= 0. See
+     * detail::MaxFlowingThp for what is returned.
+     *
+     * The table need not be monotone in THP, so F is evaluated at every THP
+     * knot first to bracket the highest one where the well can flow, and the
+     * crossing is then refined by bisection inside the interval above it.
+     * Everything is table lookups; no well solve is involved.
+     */
+    static detail::MaxFlowingThp<Scalar>
+    maxFlowingThp(const VFPProdTable& table,
+                  const Scalar wfr,
+                  const Scalar gfr,
+                  const Scalar alq,
+                  const Scalar ipr_a,
+                  const Scalar ipr_b,
+                  const Scalar bhp_limit,
+                  const std::function<Scalar(const Scalar, const Scalar)>& adjust_bhp);
 };
 
 } // namespace

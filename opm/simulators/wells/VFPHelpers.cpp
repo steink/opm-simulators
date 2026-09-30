@@ -31,6 +31,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 namespace {
@@ -718,6 +719,106 @@ intersectWithIPR(const VFPProdTable& table,
     } else {
         return std::nullopt;
     }
+}
+
+template<class Scalar>
+Scalar VFPHelpers<Scalar>::
+liftMargin(const VFPProdTable& table,
+           const Scalar thp,
+           const Scalar wfr,
+           const Scalar gfr,
+           const Scalar alq,
+           const Scalar ipr_a,
+           const Scalar ipr_b,
+           const Scalar bhp_limit,
+           const std::function<Scalar(const Scalar, const Scalar)>& adjust_bhp,
+           Scalar* flo_at_min)
+{
+    constexpr Scalar infinity = std::numeric_limits<Scalar>::infinity();
+    // The FLO the well reaches at its bhp limit; nothing past it is admissible.
+    const Scalar flo_max = ipr_a - ipr_b * bhp_limit;
+    if (!(ipr_b > Scalar{0}) || !(flo_max > Scalar{0})) {
+        return infinity;
+    }
+
+    const auto thp_i = findInterpData(thp, table.getTHPAxis());
+    const auto wfr_i = findInterpData(wfr, table.getWFRAxis());
+    const auto gfr_i = findInterpData(gfr, table.getGFRAxis());
+    const auto alq_i = findInterpData(alq, table.getALQAxis());
+
+    Scalar margin = infinity;
+    auto consider = [&](const Scalar flo) {
+        const auto flo_i = findInterpData(flo, table.getFloAxis());
+        const Scalar required = adjust_bhp(interpolate(table, flo_i, thp_i, wfr_i, gfr_i, alq_i).value, thp);
+        const Scalar available = (ipr_a - flo) / ipr_b;
+        if (required - available < margin) {
+            margin = required - available;
+            if (flo_at_min != nullptr) {
+                *flo_at_min = flo;
+            }
+        }
+    };
+    consider(Scalar{0});
+    for (const double flo : table.getFloAxis()) {
+        if (flo > 0.0 && flo < flo_max) {
+            consider(static_cast<Scalar>(flo));
+        }
+    }
+    consider(flo_max);
+    return margin;
+}
+
+template<class Scalar>
+detail::MaxFlowingThp<Scalar> VFPHelpers<Scalar>::
+maxFlowingThp(const VFPProdTable& table,
+              const Scalar wfr,
+              const Scalar gfr,
+              const Scalar alq,
+              const Scalar ipr_a,
+              const Scalar ipr_b,
+              const Scalar bhp_limit,
+              const std::function<Scalar(const Scalar, const Scalar)>& adjust_bhp)
+{
+    detail::MaxFlowingThp<Scalar> out;
+    auto margin = [&](const Scalar thp, Scalar* flo = nullptr) {
+        return liftMargin(table, thp, wfr, gfr, alq, ipr_a, ipr_b, bhp_limit, adjust_bhp, flo);
+    };
+
+    // Bracket: the highest THP knot at which the well can flow. Scanned from
+    // the top, since a table not monotone in THP can have flowing knots above
+    // non-flowing ones.
+    const auto& thps = table.getTHPAxis();
+    int k = static_cast<int>(thps.size()) - 1;
+    while (k >= 0 && margin(static_cast<Scalar>(thps[k])) > Scalar{0}) {
+        --k;
+    }
+    if (k < 0) {
+        return out;   // cannot flow anywhere in the table
+    }
+    out.flows = true;
+
+    Scalar lo = static_cast<Scalar>(thps[k]);
+    if (k == static_cast<int>(thps.size()) - 1) {
+        out.capped = true;
+    } else {
+        // Refine inside [thps[k], thps[k+1]]: margin <= 0 at lo, > 0 at hi.
+        Scalar hi = static_cast<Scalar>(thps[k + 1]);
+        const Scalar tol = Scalar{1.0e-6} * (hi - lo);
+        for (int it = 0; it < 100 && hi - lo > tol; ++it) {
+            const Scalar mid = Scalar{0.5} * (lo + hi);
+            if (margin(mid) <= Scalar{0}) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+    }
+    out.thp = lo;
+    Scalar flo = 0;
+    margin(lo, &flo);
+    out.flo = flo;
+    out.bhp = (ipr_a - flo) / ipr_b;
+    return out;
 }
 
 namespace detail {
