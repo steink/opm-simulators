@@ -1813,7 +1813,8 @@ namespace Opm {
                 if (network.domain != details::NetworkDomain::Production) {
                     continue;
                 }
-                for (const auto& tree : network.network.get().roots()) {
+                for (const auto& tree : BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>::
+                                            independentRoots(network.network.get())) {
                     open_set_changed |= this->network().updateGroupTreeOpenSet(
                         network.network.get(), reportStepIdx, tree.get(), balanced.tree,
                         /*offerReopenCandidates=*/diagnosis_iters == 0 && offer_reopen_candidates,

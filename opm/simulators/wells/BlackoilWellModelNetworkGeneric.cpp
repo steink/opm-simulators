@@ -1109,9 +1109,6 @@ solveGroupTree(const Network::ExtNetwork& network,
             index[child] = static_cast<int>(order.size());
             order.push_back(child);
             const auto& child_node = network.node(child);
-            if (child_node.terminal_pressure().has_value()) {
-                return giveUp(fmt::format("{} is a fixed-pressure node below the root", child));
-            }
             if (child_node.as_choke()) {
                 return giveUp(fmt::format("{} is an autochoke node (not supported by the "
                                           "group-tree solver)", child));
@@ -1131,7 +1128,12 @@ solveGroupTree(const Network::ExtNetwork& network,
             }
             NetworkSolve::Node node{child, static_cast<int>(at), branch.vfp_table().value_or(NetworkSolve::NoTable)};
             node.efficiency = child_node.efficiency();
-            system.addNode(std::move(node), alq);
+            const int node_idx = system.addNode(std::move(node), alq);
+            // Another root of the network, below this one: its pressure is
+            // fixed, its flow still counts upwards (see independentRoots()).
+            if (child_node.terminal_pressure().has_value()) {
+                system.setFixedPressure(node_idx, *child_node.terminal_pressure());
+            }
         }
     }
 
@@ -1551,7 +1553,7 @@ updatePressures(const int reportStepIdx,
                 // iteration old (see setBalancedGroupTree()'s own doc comment),
                 // not this one's, since the balancer runs after updatePressures()
                 // in the very iteration that produced it.
-                for (const auto& tree : network.network.get().roots()) {
+                for (const auto& tree : independentRoots(network.network.get())) {
                     if (auto solved = this->groupTreeProductionNodePressures(
                             network.network.get(), reportStepIdx, tree.get(), *this->balanced_group_tree_)) {
                         for (const auto& [name, pressure] : *solved) {

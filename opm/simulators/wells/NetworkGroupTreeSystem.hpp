@@ -172,7 +172,18 @@ public:
     {
         nodes_.push_back(std::move(n));
         node_alq_.push_back(alq);
+        fixed_pressure_.push_back(std::nullopt);
         return static_cast<int>(nodes_.size()) - 1;
+    }
+
+    /// Pin node \p node's pressure at \p pressure instead of computing it from
+    /// the branch above: a fixed-pressure node below the root (another root of
+    /// the network that also feeds a node further up). Its subtree is solved
+    /// from that pressure, and its flow still counts in every node above it --
+    /// the same treatment the fixed-point network computation gives it.
+    void setFixedPressure(const int node, const Scalar pressure)
+    {
+        fixed_pressure_[node] = pressure;
     }
     int addWell(Well w) { wells_.push_back(std::move(w)); return static_cast<int>(wells_.size()) - 1; }
     int addActiveNode(ActiveNode a) { activeNodes_.push_back(std::move(a)); return static_cast<int>(activeNodes_.size()) - 1; }
@@ -630,7 +641,7 @@ public:
         State x(size(), Scalar{0});
         const int n = numNodes();
         for (int i = 0; i < n; ++i) {
-            x[i] = node_pressure_guess[i];
+            x[i] = fixed_pressure_[i + 1].value_or(node_pressure_guess[i]);
         }
         for (int k = 0; k < numActiveNodes(); ++k) {
             if (lambda_slot_[k] < 0) {
@@ -718,6 +729,10 @@ public:
         // where there is no table.
         const auto q = nodeFlows(x);
         for (int i = 1; i <= n; ++i) {
+            if (fixed_pressure_[i].has_value()) {
+                r[pIdx(i)] = (x[pIdx(i)] - *fixed_pressure_[i]) / unit::barsa;
+                continue;
+            }
             const Scalar upstream = (nodes_[i].parent == 0) ? terminal_pressure_ : x[pIdx(nodes_[i].parent)];
             const Scalar computed = hasTable(nodes_[i])
                 ? tableBhp(nodes_[i].vfp_table, upstream, q[i], node_alq_[i]) : upstream;
@@ -809,6 +824,9 @@ public:
             const int row = pIdx(i);
             const int parent = nodes_[i].parent;
             J(row, row) += Scalar{1} / bar;
+            if (fixed_pressure_[i].has_value()) {
+                continue;
+            }
             if (hasTable(nodes_[i])) {
                 const Scalar upstream = (parent == 0) ? terminal_pressure_ : x[pIdx(parent)];
                 const auto t = tableLookup(nodes_[i].vfp_table, upstream, q[i], node_alq_[i],
@@ -1163,6 +1181,7 @@ private:
     const VFPProdProperties<Scalar>* props_;
     std::vector<Node> nodes_{Node{}};   // index 0: the terminal (parent == -1)
     std::vector<Scalar> node_alq_{Scalar{0}};   // parallel to nodes_; see addNode()
+    std::vector<std::optional<Scalar>> fixed_pressure_{std::nullopt};   // parallel to nodes_; see setFixedPressure()
     std::vector<Well> wells_;
     std::vector<ActiveNode> activeNodes_;
     Scalar terminal_pressure_ = 0;

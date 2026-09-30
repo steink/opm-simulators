@@ -37,13 +37,16 @@
 #include <opm/simulators/wells/ProdGroupTreeBalancer.hpp>
 #include <opm/simulators/utils/ParallelCommunication.hpp>
 
+#include <algorithm>
 #include <array>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace Opm {
     class DeferredLogger;
@@ -269,6 +272,30 @@ public:
     /// Returns true if the open set changed, so the caller rebalances and
     /// solves again; false if the solve did not converge (the relaxed update
     /// takes over) or nothing changed.
+    /// The roots of \p network that head a tree of their own: each distinct
+    /// fixed-pressure node without a branch above it. ExtNetwork::roots() also
+    /// lists a fixed-pressure node that feeds a node further up (it is the
+    /// uptree node of a branch with a fixed pressure), and lists a root once
+    /// per branch below it; the group-tree solve treats the former as a
+    /// fixed-pressure node inside its parent's tree, so it is solved once, with
+    /// the group constraints spanning both.
+    static std::vector<std::reference_wrapper<const Network::Node>>
+    independentRoots(const Network::ExtNetwork& network)
+    {
+        std::vector<std::reference_wrapper<const Network::Node>> out;
+        for (const auto& root : network.roots()) {
+            const auto& name = root.get().name();
+            if (network.uptree_branch(name).has_value()) {
+                continue;
+            }
+            if (std::none_of(out.begin(), out.end(),
+                             [&name](const auto& r) { return r.get().name() == name; })) {
+                out.push_back(root);
+            }
+        }
+        return out;
+    }
+
     bool updateGroupTreeOpenSet(const Network::ExtNetwork& network,
                                 const int reportStepIdx,
                                 const Network::Node& root,

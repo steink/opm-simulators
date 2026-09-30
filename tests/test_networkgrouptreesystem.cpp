@@ -276,6 +276,59 @@ BOOST_FIXTURE_TEST_CASE(single_group_controlled_well, Fixture)
     BOOST_CHECK_CLOSE(result.node_pressure[1], expected, 1e-6);
 }
 
+// A fixed-pressure node below the root (another root of the network that also
+// feeds a node further up, as in NETWORK-01-MULTIROOT): N2 is pinned at its own
+// pressure and its Thp well is solved against it, while its flow still counts
+// in N1's, whose pressure follows from the terminal as usual.
+BOOST_FIXTURE_TEST_CASE(fixed_pressure_node_below_the_root, Fixture)
+{
+    GroupTreeSystem<double> sys(props);
+    sys.addNode(Node{"N1", /*parent=*/0, /*vfp_table=*/3, /*efficiency=*/1.0});
+    const int n2 = sys.addNode(Node{"N2", /*parent=*/1, /*vfp_table=*/3, /*efficiency=*/1.0});
+    const double terminal = 10.0 * unit::barsa;
+    const double fixed = 22.0 * unit::barsa;
+    sys.setTerminalPressure(terminal);
+    sys.setFixedPressure(n2, fixed);
+
+    const double m3d = unit::cubic(unit::meter) / unit::day;
+    GroupTreeSystem<double>::Well w1;
+    w1.name = "W1";
+    w1.node = 1;
+    w1.kind = GroupTreeSystem<double>::WellKind::Pinned;
+    w1.fixed_q = {500.0 * m3d, 0.0, 0.0};
+    sys.addWell(w1);
+
+    GroupTreeSystem<double>::Well w2;
+    w2.name = "W2";
+    w2.node = n2;
+    w2.kind = GroupTreeSystem<double>::WellKind::Thp;
+    w2.vfp_table = 3;
+    const double q_pivot = 500.0 * m3d;
+    w2.ipr_b[0] = -q_pivot / (50.0 * unit::barsa);
+    w2.ipr_a[0] = q_pivot - w2.ipr_b[0] * (15.0 * unit::barsa);
+    sys.addWell(w2);
+
+    const std::vector<double> guess{15.0 * unit::barsa, 15.0 * unit::barsa};
+    sys.finalize();
+    const auto result = NetworkSolve::solve(sys, guess, kParams, FullStep{});
+    checkAnalyticJacobian(sys, guess, result);
+    BOOST_REQUIRE(result.converged);
+    BOOST_REQUIRE_EQUAL(result.node_pressure.size(), 3U);   // terminal, N1, N2
+
+    // N2 sits at its fixed pressure, whatever the branch above would say.
+    BOOST_CHECK_CLOSE(result.node_pressure[2], fixed, 1e-9);
+
+    // W2 is solved against N2's fixed pressure as its thp.
+    const double bhp = result.well_bhp[1];
+    const auto& q2 = result.well_phase_rates[1];
+    BOOST_CHECK_CLOSE(bhp, props.bhp(3, -q2[1], -q2[0], -q2[2], fixed, 0.0, 0.0, 0.0, false), 1e-6);
+
+    // N1 carries both wells' flow, and follows from the terminal.
+    const double q_total = w1.fixed_q[0] + q2[0];
+    BOOST_CHECK_CLOSE(result.node_pressure[1],
+                      props.bhp(3, 0.0, -q_total, 0.0, terminal, 0.0, 0.0, 0.0, false), 1e-6);
+}
+
 // One well, on the network's THP control -- the one kind not covered above,
 // and the only one with a genuine unknown of its own (bhp) and real two-way
 // pressure coupling: the well's own row needs its node's pressure (its thp)
