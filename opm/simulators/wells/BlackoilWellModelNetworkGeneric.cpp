@@ -312,7 +312,10 @@ newtonNodePressures(const Network::ExtNetwork& network,
                                     branch.vfp_table().value_or(NetworkSolve::NoTable)};
             node.efficiency = network.node(child).efficiency();
             system.addNode(std::move(node));
-            if (well_model_.schedule().getGroup(child, reportStepIdx).hasSatelliteInjection()) {
+            // A network node need not be a group (BRANPROP/NODEPROP junctions);
+            // only a group can carry satellite rates.
+            if (well_model_.schedule().hasGroup(child, reportStepIdx)
+                && well_model_.schedule().getGroup(child, reportStepIdx).hasSatelliteInjection()) {
                 return giveUp(fmt::format("{} carries satellite injection, which arrives as a "
                                           "rate rather than as wells", child));
             }
@@ -602,7 +605,10 @@ newtonProductionNodePressures(const Network::ExtNetwork& network,
             // The group sum returns it *instead of* its wells, so its wells are
             // left out below to match. Lift gas the node is told to add is the
             // satellite's own here; each well's is carried on the well.
-            if (schedule.getGroup(child, reportStepIdx).hasSatelliteProduction()) {
+            // A network node need not be a group (BRANPROP/NODEPROP junctions);
+            // only a group can carry satellite rates.
+            if (schedule.hasGroup(child, reportStepIdx)
+                && schedule.getGroup(child, reportStepIdx).hasSatelliteProduction()) {
                 using Rate = GSatProd::GSatProdGroupProp::Rate;
                 const auto& sat = schedule[reportStepIdx].gsatprod().get(
                     child, well_model_.summaryState());
@@ -1110,7 +1116,10 @@ solveGroupTree(const Network::ExtNetwork& network,
                 return giveUp(fmt::format("{} is an autochoke node (not supported by the "
                                           "group-tree solver)", child));
             }
-            if (schedule.getGroup(child, reportStepIdx).hasSatelliteProduction()) {
+            // A network node need not be a group (BRANPROP/NODEPROP junctions);
+            // only a group can carry satellite rates.
+            if (schedule.hasGroup(child, reportStepIdx)
+                && schedule.getGroup(child, reportStepIdx).hasSatelliteProduction()) {
                 return giveUp(fmt::format("{} is a satellite-production network node (not "
                                           "supported by the group-tree solver)", child));
             }
