@@ -978,6 +978,116 @@ namespace Opm
     }
 
     template<typename TypeTag>
+    bool
+    WellInterface<TypeTag>::
+    initialSolveForGroupTree(const Simulator& simulator,
+                             const GroupStateHelperType& groupStateHelper,
+                             WellStateType& well_state,
+                             const bool network_well)
+    {
+        OPM_TIMEFUNCTION();
+        auto& deferred_logger = groupStateHelper.deferredLogger();
+        const auto& summary_state = simulator.vanguard().summaryState();
+        const double dt = simulator.timeStepSize();
+        auto& ws = well_state.well(this->index_of_well_);
+        const auto deck_controls = this->well_ecl_.productionControls(summary_state);
+        const std::optional<Scalar> node_pressure = this->getDynamicThpLimit();
+
+        // 1. The strictest individual limit: the deck's controls without the
+        //    THP limit and group control, started at the bhp limit under BHP
+        //    control (maximum drawdown, the most robust start).
+        auto prod_controls = deck_controls;
+        prod_controls.skipControl(Well::ProducerCMode::THP);
+        prod_controls.skipControl(Well::ProducerCMode::GRUP);
+        const auto inj_controls = Well::InjectionControls(0);
+        const WellBhpThpCalculator calc(*this);
+        const Scalar bhp_limit = calc.mostStrictBhpFromBhpLimits(summary_state);
+        ws.production_cmode = Well::ProducerCMode::BHP;
+        ws.bhp = bhp_limit;
+        this->openWell();
+        this->updatePrimaryVariables(groupStateHelper);
+        bool converged = false;
+        try {
+            converged = this->iterateWellEqWithSwitching(simulator, dt, inj_controls, prod_controls,
+                                                         groupStateHelper, well_state,
+                                                         /*fixed_control=*/false,
+                                                         /*fixed_status=*/false,
+                                                         /*solving_with_zero_rate=*/false);
+        } catch (const std::exception& e) {
+            deferred_logger.debug(fmt::format("Initial solve of well {} threw: {}", this->name(), e.what()));
+        }
+        if (!converged || this->wellIsStopped()) {
+            deferred_logger.debug(fmt::format("Initial solve of well {}: {} at its individual limits",
+                                              this->name(), converged ? "no flow" : "not converged"));
+            return false;
+        }
+        deferred_logger.debug(fmt::format("Initial solve of well {}: converged at its individual limits "
+                                          "under {} control, bhp {:.3f} bar",
+                                          this->name(), WellProducerCMode2String(ws.production_cmode),
+                                          ws.bhp / unit::barsa));
+        if (!network_well || deck_controls.vfp_table_number <= 0) {
+            return true;
+        }
+
+        // 2. A network well: a THP guess, never above what the well can lift.
+        const auto& table = this->vfpProperties()->getProd()->getTable(deck_controls.vfp_table_number);
+        const Scalar rho = this->getRefDensity();
+        Scalar thp_guess = node_pressure.has_value() ? *node_pressure
+            : (deck_controls.thp_limit > 0.0 ? static_cast<Scalar>(deck_controls.thp_limit)
+                                             : static_cast<Scalar>(table.getTHPAxis().front()));
+        this->updateIPRImplicit(simulator, groupStateHelper, well_state);
+        auto rates = ws.surface_rates;
+        this->adaptRatesForVFP(rates);
+        const auto max_thp = calc.maxFlowingThp(well_state, this->well_ecl_, rates, rho, summary_state);
+        if (max_thp.flows) {
+            thp_guess = std::min(thp_guess, max_thp.thp);
+        }
+
+        if (ws.production_cmode == Well::ProducerCMode::BHP && max_thp.flows) {
+            // Only the bhp limit binds: its IPR, taken at maximum drawdown,
+            // would be extrapolated far by the network solve. Solve once more
+            // where the IPR meets the tubing curve at the THP guess.
+            this->setDynamicThpLimit(thp_guess);   // estimateStableBhp() reads the THP limit
+            const auto bhp = calc.estimateStableBhp(well_state, this->well_ecl_, rates, rho, summary_state);
+            if (bhp.has_value()) {
+                const Scalar target = std::max(*bhp, bhp_limit);
+                const bool ok = this->solveWellWithBhp(simulator, dt, target, groupStateHelper, well_state);
+                deferred_logger.debug(fmt::format("Initial solve of well {}: solve at bhp {:.3f} bar for THP "
+                                                  "guess {:.3f} bar: {}", this->name(), target / unit::barsa,
+                                                  thp_guess / unit::barsa,
+                                                  ok && !this->wellIsStopped() ? "flows"
+                                                  : (ok ? "no flow" : "not converged")));
+                if (!ok || this->wellIsStopped()) {
+                    // Back to the solution at the individual limit.
+                    this->openWell();
+                    ws.production_cmode = Well::ProducerCMode::BHP;
+                    this->solveWellWithBhp(simulator, dt, bhp_limit, groupStateHelper, well_state);
+                }
+            }
+        } else if (ws.production_cmode != Well::ProducerCMode::BHP) {
+            // A rate limit binds: the THP the well has at that solution.
+            rates = ws.surface_rates;
+            this->adaptRatesForVFP(rates);
+            thp_guess = std::max(calc.calculateThpFromBhp(rates, ws.bhp, rho, this->getALQ(well_state),
+                                                          thp_guess, deferred_logger),
+                                 static_cast<Scalar>(table.getTHPAxis().front()));
+        }
+
+        // 3. Without a node pressure, the THP guess becomes the dynamic THP
+        //    limit until the first network solve replaces it.
+        if (node_pressure.has_value()) {
+            this->setDynamicThpLimit(*node_pressure);
+        } else {
+            this->setDynamicThpLimit(thp_guess);
+            ws.thp = thp_guess;
+            deferred_logger.debug(fmt::format("Initial solve of well {}: dynamic THP limit {:.3f} bar "
+                                              "until the network is solved", this->name(),
+                                              thp_guess / unit::barsa));
+        }
+        return true;
+    }
+
+    template<typename TypeTag>
     typename WellInterface<TypeTag>::Anchor
     WellInterface<TypeTag>::
     computeAnchor(const Simulator& simulator,

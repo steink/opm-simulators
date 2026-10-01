@@ -631,6 +631,23 @@ template<class Scalar> class WellContributions;
             /// (WellInterface::computeAnchor()); --log-well-anchors only.
             void logWellAnchors_(const int reportStepIdx, DeferredLogger& deferred_logger);
 
+            /// True if the group-tree workflow applies at \p reportStepIdx at all:
+            /// group-tree balancer and network solver, a production network, and
+            /// none of what the workflow does not handle yet (autochoke nodes,
+            /// gas-lift optimisation, reservoir coupling). useGroupTreeWorkflow_()
+            /// adds the per-iteration conditions.
+            bool groupTreeModeActive_(const int reportStepIdx) const;
+
+            /// Producers given their initial solve in this timestep's
+            /// beginTimeStep() (initialSolveForGroupTree()): prepareTimeStep()
+            /// does not reset their state to targets.
+            std::unordered_set<std::string> group_tree_initially_solved_;
+
+            /// Set by assemble() while prepareTimeStep() has just solved every
+            /// well at this reservoir state: the first round of the group-tree
+            /// workflow then skips A1.
+            bool wells_solved_this_iteration_{false};
+
             /// True if this global iteration's well/network update uses the
             /// group-tree workflow (timestep_workflow.md, section 3) rather than
             /// updateWellControlsAndNetworkIteration(): group-tree balancer and

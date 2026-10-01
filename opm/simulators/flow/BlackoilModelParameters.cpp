@@ -140,6 +140,7 @@ BlackoilModelParameters<Scalar>::BlackoilModelParameters()
     group_tree_ipr_tolerance_ = Parameters::Get<Parameters::GroupTreeIprTolerance<Scalar>>();
     group_tree_stop_hold_ = Parameters::Get<Parameters::GroupTreeStopHold>();
     log_well_anchors_ = Parameters::Get<Parameters::LogWellAnchors>();
+    group_tree_initialization_ = Parameters::Get<Parameters::GroupTreeInitialization>();
     group_tree_reopen_thp_margin_ = Parameters::Get<Parameters::GroupTreeReopenThpMargin<Scalar>>();
 }
 
@@ -397,6 +398,11 @@ void BlackoilModelParameters<Scalar>::registerParameters()
     Parameters::Register<Parameters::LogWellAnchors>
         ("Compute every predicting producer's maximum flowing THP (its anchor) at the start of "
          "each timestep and write it to the debug log; diagnostic only, no effect on the run");
+    Parameters::Register<Parameters::GroupTreeInitialization>
+        ("With the group-tree workflow: give producers without a valid previous solution an "
+         "initial solve at their individual limits at the start of the timestep, skip the "
+         "pre-step network rebalance, and do not re-solve the wells in the first network round "
+         "of a timestep");
     Parameters::Register<Parameters::GroupTreeReopenThpMargin<Scalar>>
         ("A stopped producer is offered to the group-tree network solve for reopening only if its "
          "maximum flowing THP exceeds its current THP limit (the node pressure) by this margin "

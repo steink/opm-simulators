@@ -512,6 +512,10 @@ namespace Opm {
         this->setBalancerOwnsProduction(false);
         balancer_committed_cmodes_.clear();
         this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
+        group_tree_initially_solved_.clear();
+        const bool group_tree_mode = param_.group_tree_initialization_
+            && this->groupTreeModeActive_(reportStepIdx);
+        const auto& production_network = this->schedule()[reportStepIdx].network();
         try {
             // Compute initial well solution for new wells and injectors that change injection type i.e. WAG.
             for (auto& well : well_container_) {
@@ -526,6 +530,26 @@ namespace Opm {
                         != this->prevWellState().well(well->name()).status;
 
                 if (event || dyn_status_change || slave_needs_well_solution) {
+                    // Group-tree workflow: a producer without a valid previous
+                    // solution gets the initial solve of
+                    // timestep_initialization.md, 6.2, instead.
+                    if (group_tree_mode && well->isProducer() && well->wellEcl().predictionMode()) {
+                        try {
+                            well->scaleSegmentRatesAndPressure(this->wellState());
+                            well->calculateExplicitQuantities(simulator_, this->groupStateHelper());
+                            well->updateWellStateWithTarget(simulator_, this->groupStateHelper(), this->wellState());
+                            const bool network_well = production_network.active()
+                                && production_network.has_node(well->wellEcl().groupName());
+                            if (well->initialSolveForGroupTree(simulator_, this->groupStateHelper(),
+                                                               this->wellState(), network_well)) {
+                                group_tree_initially_solved_.insert(well->name());
+                            }
+                        } catch (const std::exception& e) {
+                            local_deferredLogger.warning("WELL_INITIAL_SOLVE_FAILED",
+                                "Initial solve of well " + well->name() + " failed: " + e.what());
+                        }
+                        continue;
+                    }
                     try {
                         well->scaleSegmentRatesAndPressure(this->wellState());
                         well->calculateExplicitQuantities(simulator_, this->groupStateHelper());
@@ -1272,10 +1296,17 @@ namespace Opm {
                                            this->terminal_output_, grid().comm());
         }
 
+        // prepareTimeStep() has just solved every well at this reservoir state
+        // (the first global iteration): the group-tree workflow's first round
+        // need not solve them again.
+        wells_solved_this_iteration_ = param_.group_tree_initialization_
+            && iterCtx.needsTimestepInit() && this->wellsActive()
+            && param_.solve_welleq_initially_;
         const bool well_group_control_changed = updateWellControlsAndNetwork(
                             /*mandatory_network_balance=*/false,
                             dt,
                             local_deferredLogger);
+        wells_solved_this_iteration_ = false;
 
         // even when there is no wells active, the network nodal pressure still need to be updated through updateWellControlsAndNetwork()
         // but there is no need to assemble the well equations
@@ -1376,8 +1407,11 @@ namespace Opm {
             // Never optimize gas lift in last iteration, to allow network convergence (unless max_iter < 2)
             const bool optimize_gas_lift = ( (network_update_iteration + 1) < std::max(max_iteration, static_cast<std::size_t>(2)) );
             if (group_tree_workflow) {
+                // A1 on the first round, unless prepareTimeStep() has just
+                // solved every well at this reservoir state.
                 std::tie(well_group_control_changed, do_network_update, network_imbalance) =
-                    updateGroupTreeNetworkIteration_(network_update_iteration == 0,
+                    updateGroupTreeNetworkIteration_(network_update_iteration == 0
+                                                         && !wells_solved_this_iteration_,
                                                      relax_network_balance, dt, local_deferredLogger);
             } else {
                 std::tie(well_group_control_changed, do_network_update, network_imbalance) =
@@ -1632,15 +1666,23 @@ namespace Opm {
     BlackoilWellModel<TypeTag>::
     useGroupTreeWorkflow_(const bool mandatory_network_balance) const
     {
-        if (!param_.enable_group_tree_balancer_ || param_.network_solver_ != "group-tree") {
+        const int reportStepIdx = simulator_.episodeIndex();
+        if (!this->groupTreeModeActive_(reportStepIdx)) {
             return false;
         }
-        const int reportStepIdx = simulator_.episodeIndex();
         const int nupcol = this->schedule()[reportStepIdx].nupcol();
         if (!simulator_.problem().iterationContext().withinNupcol(nupcol)) {
             return false;
         }
-        if (!this->network_.shouldBalance(reportStepIdx) && !mandatory_network_balance) {
+        return this->network_.shouldBalance(reportStepIdx) || mandatory_network_balance;
+    }
+
+    template<typename TypeTag>
+    bool
+    BlackoilWellModel<TypeTag>::
+    groupTreeModeActive_(const int reportStepIdx) const
+    {
+        if (!param_.enable_group_tree_balancer_ || param_.network_solver_ != "group-tree") {
             return false;
         }
         if (this->isReservoirCouplingMaster() || this->isReservoirCouplingSlave()
@@ -2709,9 +2751,13 @@ namespace Opm {
         for (const auto& well : well_container_) {
             auto& events = this->wellState().well(well->indexOfWell()).events;
             if (events.hasEvent(WellState<Scalar, IndexTraits>::event_mask)) {
-                well->updateWellStateWithTarget(
-                    simulator_, this->groupStateHelper(), this->wellState()
-                );
+                // A well given its initial solve in beginTimeStep() keeps that
+                // solution instead of being reset to its targets.
+                if (group_tree_initially_solved_.count(well->name()) == 0) {
+                    well->updateWellStateWithTarget(
+                        simulator_, this->groupStateHelper(), this->wellState()
+                    );
+                }
                 well->updatePrimaryVariables(this->groupStateHelper());
                 // There is no new well control change input within a report step,
                 // so next time step, the well does not consider to have effective events anymore.
@@ -2738,8 +2784,11 @@ namespace Opm {
         }
         updatePrimaryVariables();
 
-        // Actually do the pre-step network rebalance, using the updated well states and initial solutions
-        if (do_prestep_network_rebalance) {
+        // Actually do the pre-step network rebalance, using the updated well states and initial solutions.
+        // Not with the group-tree workflow: its first round in this iteration does the same at the
+        // same reservoir state (timestep_initialization.md, 6.2a).
+        if (do_prestep_network_rebalance
+            && !(param_.group_tree_initialization_ && this->groupTreeModeActive_(episodeIdx))) {
             network_.doPreStepRebalance(deferred_logger);
         }
     }

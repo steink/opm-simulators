@@ -430,6 +430,24 @@ public:
         int rounds{0};
     };
 
+    /// The initial solve of a producer without a valid previous solution in
+    /// the group-tree workflow (timestep_initialization.md, 6.2): solve at its
+    /// strictest individual limit (THP limit and group control left out),
+    /// started under BHP control at its bhp limit. For a well in a network with
+    /// a tubing table: when only the bhp limit binds, solve once more at the
+    /// bhp where its IPR meets the tubing curve at a THP guess (the node
+    /// pressure if known, else the deck THP limit, else the table's lowest THP,
+    /// never above the well's maximum flowing THP); and if its node has no
+    /// pressure yet, set its dynamic THP limit to the THP it now has, so the
+    /// deck THP limit no longer applies and later solves start from this
+    /// solution under the same constraint. \p well_state is updated. Returns
+    /// whether the solve at the individual limit converged with the well
+    /// flowing.
+    bool initialSolveForGroupTree(const Simulator& simulator,
+                                  const GroupStateHelperType& groupStateHelper,
+                                  WellStateType& well_state,
+                                  const bool network_well);
+
     /// The well's maximum flowing THP, with its operating point and IPR
     /// there, refined from the best available starting point, on a scratch
     /// copy of \p well_state:
