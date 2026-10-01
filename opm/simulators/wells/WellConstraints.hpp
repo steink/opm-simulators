@@ -85,6 +85,13 @@ public:
                                               const bool check_group_constraints,
                                               DeferredLogger& deferred_logger) const;
 
+    //! \brief The rate-only half of estimateStrictestProductionConstraint, against
+    //! given positive-valued surface rates (e.g. the well's potentials).
+    std::pair<Well::ProducerCMode, Scalar>
+    estimateStrictestProductionRateConstraintFromRates(const std::vector<Scalar>& pos_surface_rates,
+                                                       const RateConvFunc& calcReservoirVoidageRates,
+                                                       const Well::ProductionControls& controls) const;
+
 private:
     //! \brief Core loop: find the minimum scale among ORAT/WRAT/GRAT/LRAT/RESV given
     //! explicit positive-valued rate vectors. Callers are responsible for GRUP handling.

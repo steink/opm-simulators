@@ -109,6 +109,11 @@ protected:
                                               const bool check_group_constraints,
                                               DeferredLogger& deferred_logger) const;
 
+    //! \brief Forwards to WellConstraints::estimateStrictestProductionRateConstraintFromRates.
+    std::pair<Well::ProducerCMode, typename FluidSystem::Scalar>
+    estimateStrictestProductionRateConstraintFromRates(const std::vector<Scalar>& pos_surface_rates,
+                                                       const Well::ProductionControls& controls) const;
+
     bool checkGroupConstraints(const GroupStateHelperType& groupStateHelper,
                                const Schedule& schedule,
                                const SummaryState& summaryState,

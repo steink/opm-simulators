@@ -194,6 +194,46 @@ namespace Opm
     }
 
     template<typename TypeTag>
+    std::optional<std::pair<Well::ProducerCMode, typename WellInterface<TypeTag>::Scalar>>
+    WellInterface<TypeTag>::
+    estimateStrictestProductionLimitFromPotentials(const WellStateType& well_state,
+                                                   const SummaryState& summary_state) const
+    {
+        if (!this->isProducer()) {
+            return std::nullopt;
+        }
+        const auto& ws = well_state.well(this->index_of_well_);
+        const auto& potentials = ws.well_potentials;
+        const Scalar total_potential = std::accumulate(potentials.begin(), potentials.end(), Scalar(0));
+        if (!(total_potential > Scalar(0))) {
+            return std::nullopt;
+        }
+
+        // A rate limit binds if the potentials exceed it (scale < 1).
+        const auto controls = this->wellEcl().productionControls(summary_state);
+        const auto [rate_mode, rate_scale] =
+            this->estimateStrictestProductionRateConstraintFromRates(potentials, controls);
+        if (rate_mode != Well::ProducerCMode::CMODE_UNDEFINED && rate_scale < Scalar(1)) {
+            switch (rate_mode) {
+            case Well::ProducerCMode::ORAT: return std::make_pair(rate_mode, Scalar(controls.oil_rate));
+            case Well::ProducerCMode::WRAT: return std::make_pair(rate_mode, Scalar(controls.water_rate));
+            case Well::ProducerCMode::GRAT: return std::make_pair(rate_mode, Scalar(controls.gas_rate));
+            case Well::ProducerCMode::LRAT: return std::make_pair(rate_mode, Scalar(controls.liquid_rate));
+            case Well::ProducerCMode::RESV: return std::make_pair(rate_mode, Scalar(controls.resv_rate));
+            default: break;
+            }
+        }
+
+        // Otherwise the pressure limit the potentials were computed at binds.
+        // They don't record which one it was: THP if the well has a THP limit
+        // (a network THP, or a deck THP limit), else BHP.
+        const auto mode = this->wellHasTHPConstraints(summary_state)
+            ? Well::ProducerCMode::THP
+            : Well::ProducerCMode::BHP;
+        return std::make_pair(mode, total_potential);
+    }
+
+    template<typename TypeTag>
     typename WellInterface<TypeTag>::Scalar
     WellInterface<TypeTag>::
     wpolymer() const

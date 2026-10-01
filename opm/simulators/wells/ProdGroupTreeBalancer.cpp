@@ -245,7 +245,8 @@ void populateWellNode(ProdGroupTreeNode<Scalar>& node,
                       int fipnum,
                       int pvtreg,
                       const BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
-                      const std::unordered_map<std::string, std::pair<int, Scalar>>& limits)
+                      const std::unordered_map<std::string, std::pair<int, Scalar>>& limits,
+                      const WellRateMap<Scalar>* rateOverride)
 {
     // Use globally available state so this function produces the same result on
     // every MPI rank regardless of which rank owns the well.
@@ -273,6 +274,13 @@ void populateWellNode(ProdGroupTreeNode<Scalar>& node,
         for (int c = 0; c < 3; ++c) {
             const int a = activeIdx(pu, c);
             node.rates[c] = (a >= 0 && a < static_cast<int>(wr.size())) ? -wr[a] : Scalar(0);
+        }
+    }
+    if (rateOverride != nullptr) {
+        if (const auto it = rateOverride->find(wellName); it != rateOverride->end()) {
+            for (int c = 0; c < 3; ++c) {
+                node.rates[c] = -it->second[c];
+            }
         }
     }
     node.initialRates = node.rates; // snapshot of current rates
@@ -559,7 +567,8 @@ template<class Scalar, typename IndexTraits>
 Tree<Scalar> buildTree(const BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
                        const SummaryState& summaryState,
                        int reportStep,
-                       const std::unordered_map<std::string, std::pair<int, Scalar>>& limits)
+                       const std::unordered_map<std::string, std::pair<int, Scalar>>& limits,
+                       const WellRateMap<Scalar>* rateOverride)
 {
     const auto& schedule   = wellModel.schedule();
     const auto& wellState  = wellModel.wellState();
@@ -593,7 +602,7 @@ Tree<Scalar> buildTree(const BlackoilWellModelGeneric<Scalar, IndexTraits>& well
                 auto& node = tree[name];
                 populateWellNode(node, name, schedule, wellState, groupState,
                                  guideRate, summaryState, reportStep,
-                                 fipnum, pvtreg, wellModel, limits);
+                                 fipnum, pvtreg, wellModel, limits, rateOverride);
             }
         } else {
             // Group node: populate and push children onto the stack
@@ -2247,7 +2256,8 @@ BalancedTree<Scalar> balanceGroupTree(BlackoilWellModelGeneric<Scalar, IndexTrai
                                       int reportStep,
                                       Scalar tol,
                                       const std::unordered_map<std::string, std::pair<int, Scalar>>& limits,
-                                      DeferredLogger& logger)
+                                      DeferredLogger& logger,
+                                      const WellRateMap<Scalar>* rateOverride)
 {
     // Make early return if limits is empty, which means no wells are active/has positive potentials.
     if (limits.empty()) {
@@ -2259,7 +2269,7 @@ BalancedTree<Scalar> balanceGroupTree(BlackoilWellModelGeneric<Scalar, IndexTrai
     }
     OPM_TIMEFUNCTION();
 
-    auto tree = buildTree(wellModel, summaryState, reportStep, limits);
+    auto tree = buildTree(wellModel, summaryState, reportStep, limits, rateOverride);
 
     const bool success = runBalancingAlgorithm(wellModel.guideRate(), wellModel.comm().rank(),
                                                tree, tol, logger);
@@ -2506,7 +2516,7 @@ template BalancedTree<double> balanceGroupTree<double, BlackOilDefaultFluidSyste
     BlackoilWellModelGeneric<double, BlackOilDefaultFluidSystemIndices>&,
     const SummaryState&, int, double,
     const std::unordered_map<std::string, std::pair<int, double>>&,
-    DeferredLogger&);
+    DeferredLogger&, const WellRateMap<double>*);
 
 template bool applyTreeToState<double, BlackOilDefaultFluidSystemIndices>(
     const Tree<double>&, BlackoilWellModelGeneric<double, BlackOilDefaultFluidSystemIndices>&,
@@ -2524,7 +2534,7 @@ template BalancedTree<float> balanceGroupTree<float, BlackOilDefaultFluidSystemI
     BlackoilWellModelGeneric<float, BlackOilDefaultFluidSystemIndices>&,
     const SummaryState&, int, float,
     const std::unordered_map<std::string, std::pair<int, float>>&,
-    DeferredLogger&);
+    DeferredLogger&, const WellRateMap<float>*);
 
 template bool applyTreeToState<float, BlackOilDefaultFluidSystemIndices>(
     const Tree<float>&, BlackoilWellModelGeneric<float, BlackOilDefaultFluidSystemIndices>&,

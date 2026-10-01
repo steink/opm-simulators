@@ -858,6 +858,23 @@ template<class Scalar> class WellContributions;
             std::unordered_map<std::string, std::pair<int, Scalar>>
             prepareWellsForBalancing_(DeferredLogger& deferred_logger);
 
+            /// @brief The balancer's candidates from the wells' potentials
+            ///   (WellInterface::estimateStrictestProductionLimitFromPotentials()):
+            ///   every open, predicting producer with positive potentials.
+            /// @return The globally consistent limits map, and the same wells'
+            ///   potentials as their rates (globally consistent too).
+            std::pair<std::unordered_map<std::string, std::pair<int, Scalar>>,
+                      ProdGroupTreeBalancer::WellRateMap<Scalar>>
+            prepareWellsForBalancingFromPotentials_();
+
+            /// @brief Start-of-timestep balance of the group tree on the wells'
+            ///   potentials, committed (categorization and targets, no rates)
+            ///   so that the wells' first solves of the timestep use the
+            ///   balancer's targets; the balancer owns production from here.
+            ///   Without candidates, the standard targets are kept.
+            void balanceGroupTreeFromPotentials_(const int reportStepIdx,
+                                                 DeferredLogger& deferred_logger);
+
             /// @brief True if \p well's control is currently the balancer's to
             ///   decide rather than standard switching's: a prediction-mode
             ///   producer while balancerOwnsProduction() is set. History-mode

@@ -46,6 +46,10 @@ namespace Opm::ProdGroupTreeBalancer {
 template<class Scalar>
 using Tree = std::map<std::string, ProdGroupTreeNode<Scalar>>;
 
+/// Per-well surface rates, [oil, water, gas], positive for production.
+template<class Scalar>
+using WellRateMap = std::unordered_map<std::string, std::array<Scalar, 3>>;
+
 /// A well tied directly to an Active node's own lambda: the *node's* own
 /// equation sees efficiency * guideRate * lambda (efficiency-scaled, like any
 /// other contribution to its sum), but the *well's* own rate -- what its own
@@ -200,14 +204,18 @@ struct BalancedTree
 /// runGroupTreeBalancer() does short of the final applyTreeToState() write-back.
 /// An empty \p limits (no active wells / no wells with positive potentials)
 /// short-circuits to an empty, trivially-valid result, same as
-/// runGroupTreeBalancer()'s own early return.
+/// runGroupTreeBalancer()'s own early return. A well in \p rateOverride
+/// enters the tree with those rates instead of its current ones (which fix
+/// its phase fractions), e.g. its potentials when the limits are taken from
+/// the potentials too.
 template<class Scalar, typename IndexTraits>
 BalancedTree<Scalar> balanceGroupTree(BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel,
                                       const SummaryState& summaryState,
                                       int reportStep,
                                       Scalar tol,
                                       const std::unordered_map<std::string, std::pair<int, Scalar>>& limits,
-                                      DeferredLogger& logger);
+                                      DeferredLogger& logger,
+                                      const WellRateMap<Scalar>* rateOverride = nullptr);
 
 /// Commit a balanced tree to WellState/GroupState: each producer's
 /// production_cmode (GRUP for a Group-category well, its own limiting mode for

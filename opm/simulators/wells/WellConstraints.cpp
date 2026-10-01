@@ -439,6 +439,22 @@ estimateStrictestRateConstraintFromRatesImpl_(const std::vector<Scalar>& pos_sur
 template<typename Scalar, typename IndexTraits>
 std::pair<Well::ProducerCMode, Scalar>
 WellConstraints<Scalar, IndexTraits>::
+estimateStrictestProductionRateConstraintFromRates(const std::vector<Scalar>& pos_surface_rates,
+                                                   const RateConvFunc& calcReservoirVoidageRates,
+                                                   const Well::ProductionControls& controls) const
+{
+    std::vector<Scalar> pos_reservoir_rates(pos_surface_rates.size(), Scalar(0));
+    if (controls.hasControl(Well::ProducerCMode::RESV)) {
+        calcReservoirVoidageRates(/*fipreg=*/0, well_.pvtRegionIdx(),
+                                  pos_surface_rates, pos_reservoir_rates);
+    }
+    return estimateStrictestRateConstraintFromRatesImpl_(pos_surface_rates, pos_reservoir_rates,
+                                                         calcReservoirVoidageRates, controls);
+}
+
+template<typename Scalar, typename IndexTraits>
+std::pair<Well::ProducerCMode, Scalar>
+WellConstraints<Scalar, IndexTraits>::
 estimateStrictestProductionConstraint(const SingleWellState<Scalar, IndexTraits>& ws,
                                       const RateConvFunc& calcReservoirVoidageRates,
                                       const Well::ProductionControls& controls,

@@ -188,6 +188,7 @@ struct GroupTreeIprTolerance { static constexpr Scalar value = 1e-2; };
 struct GroupTreeStopHold { static constexpr auto value = "iteration"; };
 struct LogWellAnchors { static constexpr bool value = false; };
 struct GroupTreeInitialization { static constexpr bool value = true; };
+struct GroupTreeInitialBalance { static constexpr bool value = true; };
 template<class Scalar>
 struct GroupTreeReopenThpMargin { static constexpr Scalar value = 0.0; };
 template<class Scalar>
@@ -440,6 +441,11 @@ public:
     /// rebalance, and no A1 in the first round of a timestep's first global
     /// iteration (timestep_initialization.md, 6.2a).
     bool group_tree_initialization_;
+
+    /// With the group-tree workflow: balance the group tree at the start of a
+    /// timestep with the wells' potentials as their limits, and commit its
+    /// targets before the wells are first solved.
+    bool group_tree_initial_balance_;
 
     /// A stopped producer is offered for reopening only if its maximum flowing
     /// THP exceeds its current THP limit (the node pressure) by this much [bar].

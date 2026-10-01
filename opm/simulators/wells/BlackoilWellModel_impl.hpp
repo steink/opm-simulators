@@ -513,6 +513,10 @@ namespace Opm {
         balancer_committed_cmodes_.clear();
         this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
         group_tree_initially_solved_.clear();
+        if (param_.group_tree_initial_balance_ && this->wellsActive()
+            && this->groupTreeModeActive_(reportStepIdx)) {
+            this->balanceGroupTreeFromPotentials_(reportStepIdx, local_deferredLogger);
+        }
         const bool group_tree_mode = param_.group_tree_initialization_
             && this->groupTreeModeActive_(reportStepIdx);
         const auto& production_network = this->schedule()[reportStepIdx].network();
@@ -2093,6 +2097,88 @@ namespace Opm {
         }
 
         return gatherWellLimits_(localLimits, allWellNames);
+    }
+
+    template<typename TypeTag>
+    std::pair<std::unordered_map<std::string, std::pair<int, typename BlackoilWellModel<TypeTag>::Scalar>>,
+              ProdGroupTreeBalancer::WellRateMap<typename BlackoilWellModel<TypeTag>::Scalar>>
+    BlackoilWellModel<TypeTag>::
+    prepareWellsForBalancingFromPotentials_()
+    {
+        OPM_TIMEFUNCTION();
+        const int reportStep = this->reportStepIndex();
+        const auto& allWellNames = this->schedule().wellNames(reportStep);
+        if (allWellNames.empty()) return {};  // globally empty -- safe collective exit
+
+        const int n_global = static_cast<int>(allWellNames.size());
+        std::unordered_map<std::string, int> globalIndex;
+        globalIndex.reserve(n_global);
+        for (int i = 0; i < n_global; ++i) {
+            globalIndex.emplace(allWellNames[i], i);
+        }
+
+        const auto& pu = this->phaseUsage();
+        constexpr std::array<int, 3> canonical = {IndexTraits::oilPhaseIdx,
+                                                  IndexTraits::waterPhaseIdx,
+                                                  IndexTraits::gasPhaseIdx};
+        std::unordered_map<std::string, std::pair<int, Scalar>> localLimits;
+        std::vector<Scalar> rates(n_global * 3, Scalar(0));
+        for (const auto& well : well_container_) {
+            const auto& ws = this->wellState().well(well->indexOfWell());
+            if (!well->isProducer() || !well->wellEcl().predictionMode()
+                || ws.status != WellStatus::OPEN || well->wellIsStopped()) {
+                continue;
+            }
+            const auto limit = well->estimateStrictestProductionLimitFromPotentials(
+                this->wellState(), this->summaryState());
+            if (!limit.has_value()) {
+                continue;
+            }
+            localLimits[well->name()] = {static_cast<int>(limit->first), limit->second};
+            const int gi = globalIndex.at(well->name());
+            for (int c = 0; c < 3; ++c) {
+                if (pu.phaseIsActive(canonical[c])) {
+                    rates[gi * 3 + c] = ws.well_potentials[pu.canonicalToActivePhaseIdx(canonical[c])];
+                }
+            }
+        }
+
+        auto limits = gatherWellLimits_(localLimits, allWellNames);
+        grid().comm().sum(rates.data(), static_cast<int>(rates.size()));
+        ProdGroupTreeBalancer::WellRateMap<Scalar> potentials;
+        for (const auto& [name, limit] : limits) {
+            const int gi = globalIndex.at(name);
+            potentials[name] = {rates[gi * 3], rates[gi * 3 + 1], rates[gi * 3 + 2]};
+        }
+        return {std::move(limits), std::move(potentials)};
+    }
+
+    template<typename TypeTag>
+    void
+    BlackoilWellModel<TypeTag>::
+    balanceGroupTreeFromPotentials_(const int reportStepIdx,
+                                    DeferredLogger& deferred_logger)
+    {
+        OPM_TIMEFUNCTION();
+        const auto [limits, potentials] = this->prepareWellsForBalancingFromPotentials_();
+        // Every rank sees the same limits, so they all return here together.
+        if (limits.empty()) {
+            return;
+        }
+        // Owned from here on, so the group-data update below leaves the
+        // committed targets alone.
+        this->setBalancerOwnsProduction(true);
+        const auto balanced = ProdGroupTreeBalancer::balanceGroupTree(
+            *this, this->summaryState(), reportStepIdx,
+            param_.group_tree_balancer_tolerance_, limits, deferred_logger, &potentials);
+        this->commitBalancedTree_(balanced.tree, /*commitRates=*/false, deferred_logger);
+        this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
+        if (this->terminal_output_) {
+            deferred_logger.debug(fmt::format("Group tree balanced on the potentials of {} wells "
+                                              "at the start of the timestep{}",
+                                              limits.size(),
+                                              balanced.success && balanced.valid ? "" : " (not converged/valid)"));
+        }
     }
 
     template<typename TypeTag>
