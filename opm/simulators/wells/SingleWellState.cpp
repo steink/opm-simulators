@@ -111,6 +111,7 @@ void SingleWellState<Scalar, IndexTraits>::shut()
     std::ranges::fill(this->implicit_ipr_b, 0);
     std::ranges::fill(this->stopped_ipr_a, 0);
     std::ranges::fill(this->stopped_ipr_b, 0);
+    this->stopped_ipr_bhp = 0;
 
     auto& connpi = this->perf_data.prod_index;
     connpi.assign(connpi.size(), 0);
@@ -407,6 +408,7 @@ bool SingleWellState<Scalar, IndexTraits>::operator==(const SingleWellState& rhs
            this->implicit_ipr_b == rhs.implicit_ipr_b &&
            this->stopped_ipr_a == rhs.stopped_ipr_a &&
            this->stopped_ipr_b == rhs.stopped_ipr_b &&
+           this->stopped_ipr_bhp == rhs.stopped_ipr_bhp &&
            this->surface_rates == rhs.surface_rates &&
            this->reservoir_rates == rhs.reservoir_rates &&
            this->prev_surface_rates == rhs.prev_surface_rates &&

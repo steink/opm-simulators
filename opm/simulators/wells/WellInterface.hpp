@@ -380,16 +380,17 @@ public:
                                    const GroupStateHelperType& groupStateHelper,
                                    WellStateType& well_state) = 0;
 
-    /// A physically-grounded flowing IPR for a stopped producer (persistently,
-    /// Well::Status::STOP, or dynamically, wellIsStopped(); not shut), whose real
-    /// implicit_ipr_a/b -- linearised at the well's own current, zero-rate state
-    /// by updateIPRImplicit() -- is not a trustworthy reference. Trial-solves a
-    /// scratch copy of well_state at the well's THP limit (the network's dynamic
-    /// one when set), with the well temporarily open and its status restored
-    /// afterwards, and on success stores the resulting linearisation in
-    /// well_state's own stopped_ipr_a/b; on failure (no crossing, or the trial
-    /// itself would stop again) leaves them zeroed. The group-tree network
-    /// solve offers such a well as a reopen candidate.
+    /// A flowing IPR for a stopped producer (persistently, Well::Status::STOP,
+    /// or dynamically, wellIsStopped(); not shut), whose real implicit_ipr_a/b
+    /// -- linearised at its zero-rate state -- is not a usable reference. With
+    /// a tubing table: the IPR at the well's maximum flowing THP
+    /// (computeAnchor(), started from a solve at the THP limit, i.e. the node
+    /// pressure in a network); no trial IPR if the well cannot flow, or if its
+    /// maximum flowing THP is below its current THP limit. Without one: a trial
+    /// solve at the well's own limits (estimateOperableBhp()). Stored in
+    /// well_state's stopped_ipr_a/b, zeroed when there is none; the well object
+    /// itself is left as it was. The group-tree network solve offers a well
+    /// with a trial IPR as a reopen candidate.
     void updateStoppedWellTrialIpr(const Simulator& simulator,
                                    const double dt,
                                    const GroupStateHelperType& groupStateHelper,

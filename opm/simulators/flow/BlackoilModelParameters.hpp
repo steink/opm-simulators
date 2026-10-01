@@ -188,6 +188,8 @@ struct GroupTreeIprTolerance { static constexpr Scalar value = 1e-2; };
 struct GroupTreeStopHold { static constexpr auto value = "iteration"; };
 struct LogWellAnchors { static constexpr bool value = false; };
 template<class Scalar>
+struct GroupTreeReopenThpMargin { static constexpr Scalar value = 0.0; };
+template<class Scalar>
 struct LocalToleranceScalingMb { static constexpr Scalar value = 1.0; };
 
 template<class Scalar>
@@ -431,6 +433,10 @@ public:
     /// Compute and log every predicting producer's anchor (maximum flowing
     /// THP) at the start of each timestep; diagnostic only.
     bool log_well_anchors_;
+
+    /// A stopped producer is offered for reopening only if its maximum flowing
+    /// THP exceeds its current THP limit (the node pressure) by this much [bar].
+    Scalar group_tree_reopen_thp_margin_;
 
     /// Nonlinear solver type: newton or nldd
     std::string nonlinear_solver_;

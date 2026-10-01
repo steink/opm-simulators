@@ -943,8 +943,9 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
 
     // Per candidate: present, usable ipr, three ipr_a, three ipr_b, efficiency
     // scaling, has a network-sourced (dynamic) thp limit, stopped, usable trial
-    // ipr, three trial ipr_a, three trial ipr_b, tubing-table datum correction.
-    constexpr int kEntries = 19;
+    // ipr, three trial ipr_a, three trial ipr_b, tubing-table datum correction,
+    // bhp the trial ipr was taken at.
+    constexpr int kEntries = 20;
     std::vector<Scalar> shared(candidates.size() * kEntries, Scalar{0});
     for (std::size_t i = 0; i < candidates.size(); ++i) {
         const auto it = local.find(candidates[i].name);
@@ -996,6 +997,7 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
                     e[12 + ph] = ws.stopped_ipr_a[pos[ph]];
                     e[15 + ph] = -ws.stopped_ipr_b[pos[ph]];
                 }
+                e[19] = ws.stopped_ipr_bhp;
             }
         }
     }
@@ -1036,6 +1038,7 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
             data.trial_ipr_a[ph] = e[12 + ph];
             data.trial_ipr_b[ph] = e[15 + ph];
         }
+        data.trial_bhp = e[19];
         result.emplace(candidates[i].name, std::move(data));
     }
     return result;

@@ -129,6 +129,11 @@ public:
         // see reopenOutcomes(). Never ranked by worstCliffViolation(): a
         // candidate on the flattened curve is simply not reopened.
         bool reopen_candidate = false;
+        // Reopen candidates only: where its trial IPR was taken (0 if unknown).
+        // The candidate starts there rather than at bhp_shutin: for a tubing
+        // curve with a minimum, the curve at zero rate needs more than the
+        // shut-in bhp, so a start at the cap would never leave it.
+        Scalar start_bhp = 0;
     };
 
     /// One Active node from ProdGroupTreeBalancer::extractFlatNetworkInput():
@@ -257,6 +262,7 @@ public:
         bool has_trial_ipr = false;
         std::array<Scalar, NP> trial_ipr_a{};
         std::array<Scalar, NP> trial_ipr_b{};
+        Scalar trial_bhp = 0;   // the bhp the trial IPR was taken at; 0 if unknown
     };
 
     /// Add a stopped well as a reopen candidate (Well::reopen_candidate): a Thp
@@ -280,6 +286,7 @@ public:
         well.kind = WellKind::Thp;
         well.ipr_slope_limit = iprSlopeLimit(well);
         well.reopen_candidate = true;
+        well.start_bhp = wd.trial_bhp;
         const int idx = addWell(std::move(well));
         if (active_node.has_value()) {
             activeNodes_[*active_node].member_wells.emplace_back(idx, efficiency);
@@ -663,10 +670,14 @@ public:
         }
         for (int w = 0; w < numWells(); ++w) {
             if (wells_[w].kind == WellKind::Thp) {
-                // A reopen candidate starts where it is: stopped, rate 0.
-                x[thpBhpIdx(w)] = wells_[w].reopen_candidate
-                    ? wells_[w].bhp_shutin
-                    : node_pressure_guess[wells_[w].node - 1];
+                // A reopen candidate starts where its trial IPR was taken (on
+                // the flowing side of a tubing curve with a minimum), or at
+                // shut-in (rate 0) if that is not known.
+                const auto& well = wells_[w];
+                x[thpBhpIdx(w)] = !well.reopen_candidate
+                    ? node_pressure_guess[well.node - 1]
+                    : (well.start_bhp > Scalar{0} ? std::min(well.start_bhp, well.bhp_shutin)
+                                                  : well.bhp_shutin);
             }
         }
         return x;

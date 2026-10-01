@@ -140,6 +140,7 @@ BlackoilModelParameters<Scalar>::BlackoilModelParameters()
     group_tree_ipr_tolerance_ = Parameters::Get<Parameters::GroupTreeIprTolerance<Scalar>>();
     group_tree_stop_hold_ = Parameters::Get<Parameters::GroupTreeStopHold>();
     log_well_anchors_ = Parameters::Get<Parameters::LogWellAnchors>();
+    group_tree_reopen_thp_margin_ = Parameters::Get<Parameters::GroupTreeReopenThpMargin<Scalar>>();
 }
 
 template<class Scalar>
@@ -396,6 +397,10 @@ void BlackoilModelParameters<Scalar>::registerParameters()
     Parameters::Register<Parameters::LogWellAnchors>
         ("Compute every predicting producer's maximum flowing THP (its anchor) at the start of "
          "each timestep and write it to the debug log; diagnostic only, no effect on the run");
+    Parameters::Register<Parameters::GroupTreeReopenThpMargin<Scalar>>
+        ("A stopped producer is offered to the group-tree network solve for reopening only if its "
+         "maximum flowing THP exceeds its current THP limit (the node pressure) by this margin "
+         "[bar]");
     // if openMP is available, use two threads per mpi rank by default
 #if _OPENMP
     Parameters::SetDefault<Parameters::ThreadsPerProcess>(2);

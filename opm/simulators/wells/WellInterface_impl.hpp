@@ -890,6 +890,7 @@ namespace Opm
         auto& ws = well_state.well(this->index_of_well_);
         std::fill(ws.stopped_ipr_a.begin(), ws.stopped_ipr_a.end(), Scalar{0});
         std::fill(ws.stopped_ipr_b.begin(), ws.stopped_ipr_b.end(), Scalar{0});
+        ws.stopped_ipr_bhp = Scalar{0};
 
         // Only meaningful for a producer that is stopped (still part of the
         // system, unlike shut): persistently (ws.status) or, far more often,
@@ -901,25 +902,59 @@ namespace Opm
             return;
         }
 
-        // A scratch copy of both well_state and the well's own operability
-        // flag: estimateOperableBhp()/solveWellWithBhp() never touch
-        // wellStatus_ themselves, but calculateMinimumBhpFromThp()'s explicit
-        // WFR/GFR fractions need use_vfpexplicit set, exactly as
-        // solveWellWithOperabilityCheck() does around its own call to
-        // estimateOperableBhp() -- restored unconditionally below, whatever
-        // the trial's outcome.
+        const auto& summary_state = simulator.vanguard().summaryState();
+        auto& deferred_logger = groupStateHelper.deferredLogger();
+        const Scalar thp_limit = this->getTHPConstraint(summary_state);
+
+        // With a tubing table: the well's maximum flowing THP, refined from a
+        // solve at its THP limit (the node pressure in a network), and the IPR
+        // there. It is linearised at the marginal point, where reopen decisions
+        // are made, and needs no meaningful THP to succeed, unlike a solve at
+        // the THP limit itself (estimateOperableBhp() below).
+        if (this->well_ecl_.productionControls(summary_state).vfp_table_number > 0) {
+            const auto anchor = this->computeAnchor(simulator, dt, groupStateHelper, well_state,
+                                                    thp_limit);
+            using Status = typename Anchor::Status;
+            if (anchor.status != Status::Flows && anchor.status != Status::Capped) {
+                deferred_logger.debug(fmt::format("Stopped well {}: no trial IPR ({})", this->name(),
+                                                  anchor.status == Status::NoFlow
+                                                  ? "cannot flow in the table's THP range"
+                                                  : "BHP-controlled solve failed"));
+                return;
+            }
+            // It cannot lift against the THP it would see now, with a margin
+            // so that a well right at its lift limit is not reopened only to
+            // stop again: not a reopen candidate.
+            const Scalar margin = this->param_.group_tree_reopen_thp_margin_ * unit::barsa;
+            if (anchor.thp < thp_limit + margin) {
+                deferred_logger.debug(fmt::format("Stopped well {}: no trial IPR (max flowing THP "
+                                                  "{:.3f} bar, THP limit {:.3f} bar, margin {:.3f} bar)",
+                                                  this->name(), anchor.thp / unit::barsa,
+                                                  thp_limit / unit::barsa, margin / unit::barsa));
+                return;
+            }
+            deferred_logger.debug(fmt::format("Stopped well {}: trial IPR at bhp {:.3f} bar, max flowing "
+                                              "THP {:.3f} bar{}, THP limit {:.3f} bar",
+                                              this->name(), anchor.bhp / unit::barsa,
+                                              anchor.thp / unit::barsa,
+                                              anchor.status == Status::Capped ? " (capped)" : "",
+                                              thp_limit / unit::barsa));
+            ws.stopped_ipr_a = anchor.ipr_a;
+            ws.stopped_ipr_b = anchor.ipr_b;
+            ws.stopped_ipr_bhp = anchor.bhp;
+            return;
+        }
+
+        // Without a tubing table: a trial solve at the well's own limits.
+        // Scratch copies of the well state and the well's own operability
+        // flag, restored whatever the outcome; the well is opened for the
+        // trial (estimateOperableBhp() reports a well that is stopped after
+        // its trial solve as having no operable bhp).
         WellStateType well_state_copy = well_state;
         GroupStateHelperType groupStateHelper_copy = groupStateHelper;
         auto well_guard = groupStateHelper_copy.pushWellState(well_state_copy);
-
-        // The trial is a solve of the well as if open (as
-        // solveWellWithOperabilityCheck() opens it before its own
-        // estimateOperableBhp()): estimateOperableBhp() reports a well that is
-        // stopped after its trial solve as having no operable bhp. The well's
-        // own status is restored afterwards, whatever the outcome.
         const auto status = this->wellStatus_;
         this->openWell();
-        const auto& summary_state = simulator.vanguard().summaryState();
         const bool use_vfpexplicit = this->operability_status_.use_vfpexplicit;
         this->operability_status_.use_vfpexplicit = true;
         const auto bhp_target = estimateOperableBhp(
@@ -928,19 +963,18 @@ namespace Opm
         this->operability_status_.use_vfpexplicit = use_vfpexplicit;
         this->wellStatus_ = status;
 
-        auto& deferred_logger = groupStateHelper.deferredLogger();
         if (!bhp_target.has_value()) {
-            deferred_logger.debug(fmt::format("Stopped well {}: no trial IPR (no operable bhp at "
-                                              "thp {:.3f} bar)", this->name(),
-                                              this->getTHPConstraint(summary_state) / unit::barsa));
-            return;   // no crossing, or the trial itself would shut again -- stays zero
+            deferred_logger.debug(fmt::format("Stopped well {}: no trial IPR (no operable bhp)",
+                                              this->name()));
+            return;
         }
         const auto& ws_copy = well_state_copy.well(this->index_of_well_);
-        deferred_logger.debug(fmt::format("Stopped well {}: trial IPR at bhp {:.3f} bar, thp {:.3f} bar",
-                                          this->name(), *bhp_target / unit::barsa,
-                                          this->getTHPConstraint(summary_state) / unit::barsa));
+        deferred_logger.debug(fmt::format("Stopped well {}: trial IPR at bhp {:.3f} bar",
+                                          this->name(), *bhp_target / unit::barsa));
         ws.stopped_ipr_a = ws_copy.implicit_ipr_a;
         ws.stopped_ipr_b = ws_copy.implicit_ipr_b;
+        ws.stopped_ipr_bhp = *bhp_target;
+        this->updatePrimaryVariables(groupStateHelper);
     }
 
     template<typename TypeTag>
