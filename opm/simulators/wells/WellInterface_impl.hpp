@@ -1023,7 +1023,8 @@ namespace Opm
     initialSolveForGroupTree(const Simulator& simulator,
                              const GroupStateHelperType& groupStateHelper,
                              WellStateType& well_state,
-                             const bool network_well)
+                             const bool network_well,
+                             const bool group_controlled)
     {
         OPM_TIMEFUNCTION();
         auto& deferred_logger = groupStateHelper.deferredLogger();
@@ -1035,36 +1036,49 @@ namespace Opm
 
         // 1. The strictest individual limit: the deck's controls without the
         //    THP limit and group control, started at the bhp limit under BHP
-        //    control (maximum drawdown, the most robust start).
-        auto prod_controls = deck_controls;
-        prod_controls.skipControl(Well::ProducerCMode::THP);
-        prod_controls.skipControl(Well::ProducerCMode::GRUP);
+        //    control (maximum drawdown, the most robust start). A well the
+        //    balancer has put on group control first keeps group control and
+        //    starts under it, at its target.
         const auto inj_controls = Well::InjectionControls(0);
         const WellBhpThpCalculator calc(*this);
         const Scalar bhp_limit = calc.mostStrictBhpFromBhpLimits(summary_state);
-        ws.production_cmode = Well::ProducerCMode::BHP;
-        ws.bhp = bhp_limit;
-        this->openWell();
-        this->updatePrimaryVariables(groupStateHelper);
-        bool converged = false;
-        try {
-            converged = this->iterateWellEqWithSwitching(simulator, dt, inj_controls, prod_controls,
-                                                         groupStateHelper, well_state,
-                                                         /*fixed_control=*/false,
-                                                         /*fixed_status=*/false,
-                                                         /*solving_with_zero_rate=*/false);
-        } catch (const std::exception& e) {
-            deferred_logger.debug(fmt::format("Initial solve of well {} threw: {}", this->name(), e.what()));
-        }
-        if (!converged || this->wellIsStopped()) {
-            deferred_logger.debug(fmt::format("Initial solve of well {}: {} at its individual limits",
-                                              this->name(), converged ? "no flow" : "not converged"));
+        auto solve = [&](const bool with_group) {
+            auto prod_controls = deck_controls;
+            prod_controls.skipControl(Well::ProducerCMode::THP);
+            if (with_group) {
+                ws.production_cmode = Well::ProducerCMode::GRUP;
+            } else {
+                prod_controls.skipControl(Well::ProducerCMode::GRUP);
+                ws.production_cmode = Well::ProducerCMode::BHP;
+                ws.bhp = bhp_limit;
+            }
+            this->openWell();
+            this->updatePrimaryVariables(groupStateHelper);
+            bool converged = false;
+            try {
+                converged = this->iterateWellEqWithSwitching(simulator, dt, inj_controls, prod_controls,
+                                                             groupStateHelper, well_state,
+                                                             /*fixed_control=*/false,
+                                                             /*fixed_status=*/false,
+                                                             /*solving_with_zero_rate=*/false);
+            } catch (const std::exception& e) {
+                deferred_logger.debug(fmt::format("Initial solve of well {} threw: {}", this->name(), e.what()));
+            }
+            const std::string limits = with_group ? "its group target" : "its individual limits";
+            if (!converged || this->wellIsStopped()) {
+                deferred_logger.debug(fmt::format("Initial solve of well {}: {} at {}", this->name(),
+                                                  converged ? "no flow" : "not converged", limits));
+                return false;
+            }
+            deferred_logger.debug(fmt::format("Initial solve of well {}: converged at {} under {} control, "
+                                              "bhp {:.3f} bar", this->name(), limits,
+                                              WellProducerCMode2String(ws.production_cmode),
+                                              ws.bhp / unit::barsa));
+            return true;
+        };
+        if (!(group_controlled && solve(/*with_group=*/true)) && !solve(/*with_group=*/false)) {
             return false;
         }
-        deferred_logger.debug(fmt::format("Initial solve of well {}: converged at its individual limits "
-                                          "under {} control, bhp {:.3f} bar",
-                                          this->name(), WellProducerCMode2String(ws.production_cmode),
-                                          ws.bhp / unit::barsa));
         if (!network_well || deck_controls.vfp_table_number <= 0) {
             return true;
         }

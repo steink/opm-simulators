@@ -544,8 +544,15 @@ namespace Opm {
                             well->updateWellStateWithTarget(simulator_, this->groupStateHelper(), this->wellState());
                             const bool network_well = production_network.active()
                                 && production_network.has_node(well->wellEcl().groupName());
+                            // Committed to group control by the start-of-step balance.
+                            const auto& ws = this->wellState().well(well->indexOfWell());
+                            const bool group_controlled = this->balancerOwnsProduction()
+                                && ws.production_cmode == Well::ProducerCMode::GRUP
+                                && (ws.use_group_target_fallback ? ws.group_target_fallback.has_value()
+                                                                 : ws.group_target.has_value());
                             if (well->initialSolveForGroupTree(simulator_, this->groupStateHelper(),
-                                                               this->wellState(), network_well)) {
+                                                               this->wellState(), network_well,
+                                                               group_controlled)) {
                                 group_tree_initially_solved_.insert(well->name());
                             }
                         } catch (const std::exception& e) {
