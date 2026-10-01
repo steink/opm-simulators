@@ -186,6 +186,7 @@ struct GroupTreeBalancerTolerance { static constexpr Scalar value = 1e-4; };
 template<class Scalar>
 struct GroupTreeIprTolerance { static constexpr Scalar value = 1e-2; };
 struct GroupTreeStopHold { static constexpr auto value = "iteration"; };
+struct LogWellAnchors { static constexpr bool value = false; };
 template<class Scalar>
 struct LocalToleranceScalingMb { static constexpr Scalar value = 1.0; };
 
@@ -426,6 +427,10 @@ public:
     /// in the wells' own solves: "iteration" (one global iteration),
     /// "timestep", or "nupcol" (while within NUPCOL).
     std::string group_tree_stop_hold_;
+
+    /// Compute and log every predicting producer's anchor (maximum flowing
+    /// THP) at the start of each timestep; diagnostic only.
+    bool log_well_anchors_;
 
     /// Nonlinear solver type: newton or nldd
     std::string nonlinear_solver_;

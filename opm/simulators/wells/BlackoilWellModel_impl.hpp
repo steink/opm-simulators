@@ -564,10 +564,81 @@ namespace Opm {
             local_deferredLogger.warning("WELL_INITIAL_SOLVE_FAILED", msg);
         }
 
+        if (param_.log_well_anchors_) {
+            this->logWellAnchors_(reportStepIdx, local_deferredLogger);
+        }
+
         const auto& comm = simulator_.vanguard().grid().comm();
         logAndCheckForExceptionsAndThrow(local_deferredLogger,
                                          exc_type, "beginTimeStep() failed: " + exc_msg, this->terminal_output_, comm);
 
+    }
+
+    template<typename TypeTag>
+    void
+    BlackoilWellModel<TypeTag>::
+    logWellAnchors_(const int reportStepIdx, DeferredLogger& deferred_logger)
+    {
+        using Status = typename WellInterface<TypeTag>::Anchor::Status;
+        const auto statusName = [](const Status s) {
+            switch (s) {
+            case Status::Flows:       return "flows";
+            case Status::Capped:      return "capped at the table's highest THP";
+            case Status::NoFlow:      return "cannot flow in the table's THP range";
+            case Status::SolveFailed: return "BHP-controlled solve failed";
+            }
+            return "?";
+        };
+        const auto& pu = this->phaseUsage();
+        const auto phaseRate = [&pu](const std::vector<Scalar>& rates, const int canonical) {
+            const int a = pu.phaseIsActive(canonical) ? pu.canonicalToActivePhaseIdx(canonical) : -1;
+            return (a >= 0 && a < static_cast<int>(rates.size())) ? -rates[a] * unit::day : Scalar{0};
+        };
+        for (const auto& well : well_container_) {
+            if (!well->isProducer() || !well->wellEcl().predictionMode()
+                || well->wellEcl().productionControls(this->summaryState()).vfp_table_number <= 0) {
+                continue;
+            }
+            // Every rank holding part of a distributed well takes part in its
+            // solves; only the owner reports.
+            // The THP the well currently sees (the node pressure, or its deck
+            // limit) is the start for a well that is not flowing.
+            std::optional<Scalar> start_thp;
+            if (well->wellHasTHPConstraints(this->summaryState())) {
+                start_thp = well->getTHPConstraint(this->summaryState());
+            }
+            const auto anchor = well->computeAnchor(simulator_, simulator_.timeStepSize(),
+                                                    this->groupStateHelper(), this->wellState(),
+                                                    start_thp);
+            if (!well->parallelWellInfo().isOwner()) {
+                continue;
+            }
+            const Scalar thp_limit = well->getTHPConstraint(this->summaryState());
+            std::string where = anchor.final_failure.empty()
+                ? std::string("no anchor") : "no anchor (" + anchor.final_failure + ")";
+            if (anchor.status == Status::Flows || anchor.status == Status::Capped) {
+                const std::string final_solve = anchor.final_solved
+                    ? fmt::format("final solve: THP {:.3f} bar", anchor.final_thp / unit::barsa)
+                    : "final solve failed (" + anchor.final_failure + "), rates from the IPR";
+                where = fmt::format("max flowing THP {:.3f} bar; {}; bhp {:.3f} bar, oil {:.4g} / "
+                                    "gas {:.4g} / water {:.4g} m3/day; THP limit {:.3f} bar ({}), "
+                                    "margin {:.3f} bar",
+                                    anchor.thp / unit::barsa, final_solve, anchor.bhp / unit::barsa,
+                                    phaseRate(anchor.rates, IndexTraits::oilPhaseIdx),
+                                    phaseRate(anchor.rates, IndexTraits::gasPhaseIdx),
+                                    phaseRate(anchor.rates, IndexTraits::waterPhaseIdx),
+                                    thp_limit / unit::barsa,
+                                    well->getDynamicThpLimit().has_value() ? "network" : "deck",
+                                    (anchor.thp - thp_limit) / unit::barsa);
+            }
+            using Start = typename WellInterface<TypeTag>::Anchor::Start;
+            const char* start = anchor.start == Start::CurrentState ? "current state"
+                : (anchor.start == Start::GivenThp ? "THP limit" : "table's lowest THP");
+            deferred_logger.debug(fmt::format("Anchor: well {} at report step {}: {} after {} round(s) "
+                                              "from the {}; {}",
+                                              well->name(), reportStepIdx, statusName(anchor.status),
+                                              anchor.rounds, start, where));
+        }
     }
 
     template<typename TypeTag>

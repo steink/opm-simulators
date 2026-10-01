@@ -24,6 +24,8 @@
 #ifndef OPM_WELL_BPH_THP_CALCULATOR_HEADER_INCLUDED
 #define OPM_WELL_BPH_THP_CALCULATOR_HEADER_INCLUDED
 
+#include <opm/simulators/wells/VFPHelpers.hpp>
+
 #include <functional>
 #include <optional>
 #include <vector>
@@ -99,6 +101,27 @@ public:
                                       const Well& well,
                                       const SummaryState& summaryState,
                                       const Scalar rho) const;
+
+    //! \brief calculateMinimumBhpFromThp() at a given \p thp rather than the
+    //! well's own THP limit: the lowest bhp on the tubing curve at that THP
+    //! (explicit fractions), as an actual bhp (datum and WVFPDP adjusted).
+    Scalar calculateMinimumBhpAtThp(const WellState<Scalar, IndexTraits>& well_state,
+                                    const Well& well,
+                                    const SummaryState& summaryState,
+                                    const Scalar rho,
+                                    const Scalar thp) const;
+
+    //! \brief The highest THP at which the well, with the implicit IPR in
+    //! \p well_state, can flow above its bhp limit: VFPHelpers::maxFlowingThp()
+    //! on the IPR projected onto the table's FLO, with the fractions chosen as
+    //! in estimateStableBhp() (explicit, or from \p rates) and the datum and
+    //! WVFPDP adjustments applied to the table's bhp.
+    detail::MaxFlowingThp<Scalar>
+    maxFlowingThp(const WellState<Scalar, IndexTraits>& well_state,
+                  const Well& well,
+                  const std::vector<Scalar>& rates,
+                  const Scalar rho,
+                  const SummaryState& summaryState) const;
 
   bool isStableSolution(const WellState<Scalar, IndexTraits>& well_state,
                         const Well& well,

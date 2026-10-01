@@ -415,21 +415,70 @@ calculateMinimumBhpFromThp(const WellState<Scalar, IndexTraits>& well_state,
 {
     assert(well_.isProducer()); // only producers can go here for now
 
-    const Scalar thp_limit = well_.getTHPConstraint(summaryState);
+    return calculateMinimumBhpAtThp(well_state, well, summaryState, rho,
+                                    well_.getTHPConstraint(summaryState));
+}
+
+template<typename Scalar, typename IndexTraits>
+Scalar WellBhpThpCalculator<Scalar, IndexTraits>::
+calculateMinimumBhpAtThp(const WellState<Scalar, IndexTraits>& well_state,
+                         const Well& well,
+                         const SummaryState& summaryState,
+                         const Scalar rho,
+                         const Scalar thp) const
+{
+    assert(well_.isProducer()); // only producers can go here for now
 
     const auto& controls = well.productionControls(summaryState);
     const auto& wfr =  well_.vfpProperties()->getExplicitWFR(controls.vfp_table_number, well_.indexOfWell());
     const auto& gfr = well_.vfpProperties()->getExplicitGFR(controls.vfp_table_number, well_.indexOfWell());
 
     const Scalar bhp_min = well_.vfpProperties()->getProd()->minimumBHP(controls.vfp_table_number,
-                                                                        thp_limit, wfr, gfr,
+                                                                        thp, wfr, gfr,
                                                                         well_.getALQ(well_state));
 
     const Scalar vfp_ref_depth = well_.vfpProperties()->getProd()->getTable(controls.vfp_table_number).getDatumDepth();
-    const auto bhp_adjustment = getVfpBhpAdjustment(bhp_min, thp_limit);
+    const auto bhp_adjustment = getVfpBhpAdjustment(bhp_min, thp);
     const Scalar dp_hydro = wellhelpers::computeHydrostaticCorrection(well_.refDepth(), vfp_ref_depth,
                                                                       rho, well_.gravity());
     return bhp_min - dp_hydro + bhp_adjustment;
+}
+
+template<typename Scalar, typename IndexTraits>
+detail::MaxFlowingThp<Scalar> WellBhpThpCalculator<Scalar, IndexTraits>::
+maxFlowingThp(const WellState<Scalar, IndexTraits>& well_state,
+              const Well& well,
+              const std::vector<Scalar>& rates,
+              const Scalar rho,
+              const SummaryState& summaryState) const
+{
+    // Same set-up as estimateStableBhp(), with the THP left free.
+    const auto& controls = well.productionControls(summaryState);
+    const auto& table = well_.vfpProperties()->getProd()->getTable(controls.vfp_table_number);
+
+    const Scalar aqua = rates[IndexTraits::waterPhaseIdx];
+    const Scalar liquid = rates[IndexTraits::oilPhaseIdx];
+    const Scalar vapour = rates[IndexTraits::gasPhaseIdx];
+    const Scalar flo = detail::getFlo(table, aqua, liquid, vapour);
+    Scalar wfr, gfr;
+    if (well_.useVfpExplicit() || -flo < table.getFloAxis().front()) {
+        wfr = well_.vfpProperties()->getExplicitWFR(controls.vfp_table_number, well_.indexOfWell());
+        gfr = well_.vfpProperties()->getExplicitGFR(controls.vfp_table_number, well_.indexOfWell());
+    } else {
+        wfr = detail::getWFR(table, aqua, liquid, vapour);
+        gfr = detail::getGFR(table, aqua, liquid, vapour);
+    }
+
+    const auto ipr = getFloIPR(well_state, well, summaryState);
+    const Scalar dp_hydro = wellhelpers::computeHydrostaticCorrection(well_.refDepth(), table.getDatumDepth(),
+                                                                      rho, well_.gravity());
+    auto bhp_adjusted = [this, dp_hydro](const Scalar bhp, const Scalar thp) {
+        return bhp - dp_hydro + getVfpBhpAdjustment(bhp, thp);
+    };
+    return VFPHelpers<Scalar>::maxFlowingThp(table, wfr, gfr, well_.getALQ(well_state),
+                                             ipr.first, ipr.second,
+                                             mostStrictBhpFromBhpLimits(summaryState),
+                                             bhp_adjusted);
 }
 
 template<typename Scalar, typename IndexTraits>

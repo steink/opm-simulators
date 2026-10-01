@@ -395,6 +395,63 @@ public:
                                    const GroupStateHelperType& groupStateHelper,
                                    WellStateType& well_state);
 
+    /// The well's anchor (timestep_initialization.md, section 6.2): the
+    /// highest THP it can flow against, and its IPR and operating point there.
+    struct Anchor
+    {
+        enum class Status
+        {
+            Flows,        ///< found; thp is the maximum flowing THP
+            Capped,       ///< still flows at the table's highest THP: thp is a lower bound
+            NoFlow,       ///< cannot flow anywhere in the table's THP range (physical)
+            SolveFailed,  ///< a BHP-controlled solve did not converge (numerical)
+        };
+        enum class Start
+        {
+            CurrentState,     ///< from a solve at the well's own bhp
+            GivenThp,         ///< from a solve at the start THP passed in
+            TableLowestThp,   ///< from a solve at the table's lowest THP
+        };
+        Status status{Status::SolveFailed};
+        Start start{Start::TableLowestThp};
+        Scalar thp{0};               ///< maximum flowing THP from the search
+        Scalar bhp{0};               ///< on the IPR, where it touches the tubing curve
+        /// A final BHP-controlled solve at bhp: whether it converged with the
+        /// well flowing, and then the THP the tubing table gives for its rates
+        /// and bhp. rates and ipr_a/b below are that solve's when it did, and
+        /// the search's IPR evaluated at bhp otherwise.
+        bool final_solved{false};
+        std::string final_failure;   ///< why the final solve did not count, if it did not
+        Scalar final_thp{0};
+        std::vector<Scalar> rates;   ///< surface rates (active phases, production negative)
+        std::vector<Scalar> ipr_a;   ///< implicit IPR (q = b*bhp - a)
+        std::vector<Scalar> ipr_b;
+        int rounds{0};
+    };
+
+    /// The well's maximum flowing THP, with its operating point and IPR
+    /// there, refined from the best available starting point, on a scratch
+    /// copy of \p well_state:
+    ///  - the well's own bhp, if it is flowing in \p well_state with a usable
+    ///    IPR (one solve there: the well's equations need not be assembled);
+    ///  - otherwise a solve on the tubing curve at \p start_thp (its lowest bhp
+    ///    there, not below the bhp limit), e.g. the node pressure;
+    ///  - otherwise the table's lowest THP (last resort).
+    /// From there: take the IPR, find the highest THP at which it still
+    /// reaches the tubing curve (WellBhpThpCalculator::maxFlowingThp()), solve
+    /// at the bhp where it touches, and repeat until the touching point is
+    /// where the IPR was taken. A bracket of bhps where the well was seen to
+    /// flow and to stop keeps the steps safe. A final solve gives the rates,
+    /// IPR and THP the well actually has there. Only BHP-controlled solves are
+    /// used. The well object's status, operability flags and primary
+    /// variables are restored afterwards; \p well_state is not touched.
+    /// Producers in prediction mode with a tubing table only.
+    Anchor computeAnchor(const Simulator& simulator,
+                         const double dt,
+                         const GroupStateHelperType& groupStateHelper,
+                         const WellStateType& well_state,
+                         const std::optional<Scalar> start_thp = std::nullopt);
+
     static constexpr int numResDofs = Indices::numEq;
     static constexpr int numWellDofs = numResDofs + 1;  // NB will fail for for thermal for now
     using BMatrix = Dune::BCRSMatrix<Dune::FieldMatrix<Scalar, numWellDofs, numResDofs>>;

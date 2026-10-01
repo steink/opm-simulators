@@ -627,6 +627,10 @@ template<class Scalar> class WellContributions;
                                                                         const double dt,
                                                                         DeferredLogger& local_deferredLogger);
 
+            /// Compute and debug-log every local predicting producer's anchor
+            /// (WellInterface::computeAnchor()); --log-well-anchors only.
+            void logWellAnchors_(const int reportStepIdx, DeferredLogger& deferred_logger);
+
             /// True if this global iteration's well/network update uses the
             /// group-tree workflow (timestep_workflow.md, section 3) rather than
             /// updateWellControlsAndNetworkIteration(): group-tree balancer and
