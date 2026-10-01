@@ -189,6 +189,7 @@ struct GroupTreeStopHold { static constexpr auto value = "iteration"; };
 struct LogWellAnchors { static constexpr bool value = false; };
 struct GroupTreeInitialization { static constexpr bool value = true; };
 struct GroupTreeInitialBalance { static constexpr bool value = true; };
+struct GroupTreeMaxInitialSolveFailures { static constexpr int value = 3; };
 template<class Scalar>
 struct GroupTreeReopenThpMargin { static constexpr Scalar value = 0.0; };
 template<class Scalar>
@@ -446,6 +447,10 @@ public:
     /// timestep with the wells' potentials as their limits, and commit its
     /// targets before the wells are first solved.
     bool group_tree_initial_balance_;
+
+    /// With the group-tree workflow: a well whose initial solve fails to
+    /// converge at this many consecutive timesteps is shut.
+    int group_tree_max_initial_solve_failures_;
 
     /// A stopped producer is offered for reopening only if its maximum flowing
     /// THP exceeds its current THP limit (the node pressure) by this much [bar].

@@ -941,6 +941,10 @@ namespace Opm
             || (ws.status != WellStatus::STOP && !this->wellIsStopped())) {
             return;
         }
+        // Its initial solve failed: no IPR to offer for the rest of the step.
+        if (this->isHeldStoppedForTimestep()) {
+            return;
+        }
 
         const auto& summary_state = simulator.vanguard().summaryState();
         auto& deferred_logger = groupStateHelper.deferredLogger();
@@ -1018,7 +1022,7 @@ namespace Opm
     }
 
     template<typename TypeTag>
-    bool
+    typename WellInterface<TypeTag>::InitialSolveResult
     WellInterface<TypeTag>::
     initialSolveForGroupTree(const Simulator& simulator,
                              const GroupStateHelperType& groupStateHelper,
@@ -1042,6 +1046,7 @@ namespace Opm
         const auto inj_controls = Well::InjectionControls(0);
         const WellBhpThpCalculator calc(*this);
         const Scalar bhp_limit = calc.mostStrictBhpFromBhpLimits(summary_state);
+        auto result = InitialSolveResult::NotConverged;
         auto solve = [&](const bool with_group) {
             auto prod_controls = deck_controls;
             prod_controls.skipControl(Well::ProducerCMode::THP);
@@ -1065,6 +1070,8 @@ namespace Opm
                 deferred_logger.debug(fmt::format("Initial solve of well {} threw: {}", this->name(), e.what()));
             }
             const std::string limits = with_group ? "its group target" : "its individual limits";
+            result = !converged ? InitialSolveResult::NotConverged
+                : (this->wellIsStopped() ? InitialSolveResult::NoFlow : InitialSolveResult::Flows);
             if (!converged || this->wellIsStopped()) {
                 deferred_logger.debug(fmt::format("Initial solve of well {}: {} at {}", this->name(),
                                                   converged ? "no flow" : "not converged", limits));
@@ -1077,10 +1084,20 @@ namespace Opm
             return true;
         };
         if (!(group_controlled && solve(/*with_group=*/true)) && !solve(/*with_group=*/false)) {
-            return false;
+            // Failed, physically or numerically: stopped at zero rate and held
+            // for the rest of the timestep (timestep_initialization.md, 6.6).
+            this->stopWell();
+            this->holdStoppedForTimestep();
+            try {
+                this->solveWellWithZeroRate(simulator, dt, groupStateHelper, well_state);
+            } catch (const std::exception& e) {
+                deferred_logger.debug(fmt::format("Initial solve of well {}: zero-rate solve threw: {}",
+                                                  this->name(), e.what()));
+            }
+            return result;
         }
         if (!network_well || deck_controls.vfp_table_number <= 0) {
-            return true;
+            return InitialSolveResult::Flows;
         }
 
         // 2. A network well: a THP guess, never above what the well can lift.
@@ -1138,7 +1155,7 @@ namespace Opm
                                               "until the network is solved", this->name(),
                                               thp_guess / unit::barsa));
         }
-        return true;
+        return InitialSolveResult::Flows;
     }
 
     template<typename TypeTag>

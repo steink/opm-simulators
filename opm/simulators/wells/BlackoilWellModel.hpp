@@ -643,6 +643,21 @@ template<class Scalar> class WellContributions;
             /// does not reset their state to targets.
             std::unordered_set<std::string> group_tree_initially_solved_;
 
+            /// Producers whose initial solve did not converge (numerical
+            /// failure) in this timestep's beginTimeStep(): held stopped for the
+            /// step, kept out of the well-test state, retried next step.
+            std::unordered_set<std::string> group_tree_initial_solve_failed_;
+
+            /// Consecutive timesteps each well's initial solve has failed
+            /// numerically (globally consistent); at
+            /// --group-tree-max-initial-solve-failures the well is shut.
+            std::unordered_map<std::string, int> group_tree_initial_solve_failures_;
+
+            /// End of a timestep: count the numerical initial-solve failures and
+            /// shut wells that have reached the limit.
+            void updateInitialSolveFailures_(const double simulation_time,
+                                             DeferredLogger& deferred_logger);
+
             /// Set by assemble() while prepareTimeStep() has just solved every
             /// well at this reservoir state: the first round of the group-tree
             /// workflow then skips A1.

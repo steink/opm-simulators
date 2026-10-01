@@ -445,18 +445,21 @@ public:
     /// pressure yet, set its dynamic THP limit to the THP it now has, so the
     /// deck THP limit no longer applies and later solves start from this
     /// solution under the same constraint. \p well_state is updated. Returns
-    /// whether the solve at the individual limit converged with the well
-    /// flowing. With \p group_controlled (the balancer has put the well on
+    /// whether the solve at the individual limits converged with the well
+    /// flowing (Flows), converged with no flow (NoFlow: a physical result)
+    /// or did not converge (NotConverged: numerical); a well that does not
+    /// flow is stopped at zero rate and held stopped for the timestep. With \p group_controlled (the balancer has put the well on
     /// group control and committed its target), the first solve keeps group
     /// control and starts under it from \p well_state (set for the target by
     /// updateWellStateWithTarget()), switching to an individual limit only if
     /// the target can't be met; if that solve fails, the solve at the
     /// individual limits above is the fallback.
-    bool initialSolveForGroupTree(const Simulator& simulator,
-                                  const GroupStateHelperType& groupStateHelper,
-                                  WellStateType& well_state,
-                                  const bool network_well,
-                                  const bool group_controlled);
+    enum class InitialSolveResult { Flows, NoFlow, NotConverged };
+    InitialSolveResult initialSolveForGroupTree(const Simulator& simulator,
+                                                const GroupStateHelperType& groupStateHelper,
+                                                WellStateType& well_state,
+                                                const bool network_well,
+                                                const bool group_controlled);
 
     /// The well's maximum flowing THP, with its operating point and IPR
     /// there, refined from the best available starting point, on a scratch

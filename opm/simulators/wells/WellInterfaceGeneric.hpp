@@ -133,7 +133,13 @@ public:
     /// Cleared by the well model at the start of each global iteration's
     /// well/network update.
     void holdStopped(const bool on) { this->hold_stopped_ = on; }
-    bool isHeldStopped() const { return this->hold_stopped_; }
+    bool isHeldStopped() const { return this->hold_stopped_ || this->hold_stopped_for_timestep_; }
+
+    /// Hold the well stopped for the rest of the timestep, whatever
+    /// holdStopped() is set to: its initial solve failed (the well objects are
+    /// recreated every timestep, so this ends with it).
+    void holdStoppedForTimestep() { this->hold_stopped_for_timestep_ = true; }
+    bool isHeldStoppedForTimestep() const { return this->hold_stopped_for_timestep_; }
 
     int currentStep() const { return this->current_step_; }
 
@@ -449,6 +455,7 @@ protected:
 
     Well::Status wellStatus_;
     bool hold_stopped_{false};
+    bool hold_stopped_for_timestep_{false};
 
     Scalar gravity_;
     Scalar wsolvent_;

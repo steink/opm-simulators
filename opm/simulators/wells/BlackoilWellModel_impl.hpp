@@ -513,6 +513,7 @@ namespace Opm {
         balancer_committed_cmodes_.clear();
         this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
         group_tree_initially_solved_.clear();
+        group_tree_initial_solve_failed_.clear();
         if (param_.group_tree_initial_balance_ && this->wellsActive()
             && this->groupTreeModeActive_(reportStepIdx)) {
             this->balanceGroupTreeFromPotentials_(reportStepIdx, local_deferredLogger);
@@ -533,7 +534,12 @@ namespace Opm {
                 const bool dyn_status_change = this->wellState().well(well->name()).status
                         != this->prevWellState().well(well->name()).status;
 
-                if (event || dyn_status_change || slave_needs_well_solution) {
+                // A well whose initial solve failed numerically at the previous
+                // step still has no valid solution: try again.
+                const bool retry = group_tree_mode
+                    && group_tree_initial_solve_failures_.count(well->name()) > 0;
+
+                if (event || dyn_status_change || slave_needs_well_solution || retry) {
                     // Group-tree workflow: a producer without a valid previous
                     // solution gets the initial solve of
                     // timestep_initialization.md, 6.2, instead.
@@ -550,14 +556,28 @@ namespace Opm {
                                 && ws.production_cmode == Well::ProducerCMode::GRUP
                                 && (ws.use_group_target_fallback ? ws.group_target_fallback.has_value()
                                                                  : ws.group_target.has_value());
-                            if (well->initialSolveForGroupTree(simulator_, this->groupStateHelper(),
-                                                               this->wellState(), network_well,
-                                                               group_controlled)) {
+                            using Result = typename WellInterface<TypeTag>::InitialSolveResult;
+                            const auto result = well->initialSolveForGroupTree(
+                                simulator_, this->groupStateHelper(), this->wellState(),
+                                network_well, group_controlled);
+                            if (result == Result::Flows) {
                                 group_tree_initially_solved_.insert(well->name());
+                            } else if (result == Result::NotConverged) {
+                                group_tree_initial_solve_failed_.insert(well->name());
+                                local_deferredLogger.warning("WELL_INITIAL_SOLVE_FAILED",
+                                    "Initial solve of well " + well->name() + " did not converge; "
+                                    "the well is stopped for this timestep");
+                            } else {
+                                local_deferredLogger.info("Well " + well->name() + " cannot flow at "
+                                    "its limits at the start of this timestep; it is stopped");
                             }
                         } catch (const std::exception& e) {
+                            well->stopWell();
+                            well->holdStoppedForTimestep();
+                            group_tree_initial_solve_failed_.insert(well->name());
                             local_deferredLogger.warning("WELL_INITIAL_SOLVE_FAILED",
-                                "Initial solve of well " + well->name() + " failed: " + e.what());
+                                "Initial solve of well " + well->name() + " failed: " + e.what()
+                                + "; the well is stopped for this timestep");
                         }
                         continue;
                     }
@@ -822,6 +842,7 @@ namespace Opm {
         const double closure_time = simulationTime + dt;
 
         updateWellTestState(closure_time, this->wellTestState());
+        this->updateInitialSolveFailures_(closure_time, local_deferredLogger);
 
         // check group sales limits at the end of the timestep
         const Group& fieldGroup = this->schedule_.getGroup("FIELD", reportStepIdx);
@@ -2163,6 +2184,50 @@ namespace Opm {
     template<typename TypeTag>
     void
     BlackoilWellModel<TypeTag>::
+    updateInitialSolveFailures_(const double simulation_time,
+                                DeferredLogger& deferred_logger)
+    {
+        // Globally consistent: which wells failed numerically this step, and
+        // which were solved, so that every rank keeps the same counts and
+        // reaches forceShutWellByName() (collective) for the same wells.
+        const auto& names = this->schedule().wellNames(simulator_.episodeIndex());
+        std::vector<int> failed(names.size(), 0);
+        std::vector<int> solved(names.size(), 0);
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            failed[i] = group_tree_initial_solve_failed_.count(names[i]) > 0;
+            solved[i] = group_tree_initially_solved_.count(names[i]) > 0;
+        }
+        const auto& comm = grid().comm();
+        if (!names.empty()) {
+            comm.max(failed.data(), static_cast<int>(failed.size()));
+            comm.max(solved.data(), static_cast<int>(solved.size()));
+        }
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            if (solved[i]) {
+                group_tree_initial_solve_failures_.erase(names[i]);
+            }
+            if (!failed[i]) {
+                continue;
+            }
+            const int count = ++group_tree_initial_solve_failures_[names[i]];
+            if (count < param_.group_tree_max_initial_solve_failures_) {
+                continue;
+            }
+            group_tree_initial_solve_failures_.erase(names[i]);
+            if (!param_.shut_unsolvable_wells_) {
+                continue;
+            }
+            if (this->forceShutWellByName(names[i], simulation_time, /*dont_shut_grup_wells=*/false)) {
+                deferred_logger.warning("WELL_INITIAL_SOLVE_FAILED",
+                    fmt::format("Initial solve of well {} did not converge at {} consecutive "
+                                "timesteps; the well is shut", names[i], count));
+            }
+        }
+    }
+
+    template<typename TypeTag>
+    void
+    BlackoilWellModel<TypeTag>::
     balanceGroupTreeFromPotentials_(const int reportStepIdx,
                                     DeferredLogger& deferred_logger)
     {
@@ -2674,6 +2739,11 @@ namespace Opm {
         auto& local_deferredLogger = this->groupStateHelper().deferredLogger();
         for (const auto& well : well_container_) {
             const auto& wname = well->name();
+            // A numerical failure of the initial solve is not a reason to
+            // close the well: it is retried at the next timestep.
+            if (group_tree_initial_solve_failed_.count(wname) > 0) {
+                continue;
+            }
             const auto wasClosed = wellTestState.well_is_closed(wname);
             well->checkWellOperability(simulator_,
                                        this->wellState(),
@@ -2861,7 +2931,9 @@ namespace Opm {
                 events.clearEvent(ScheduleEvents::REQUEST_OPEN_WELL);
             }
             // solve the well equation initially to improve the initial solution of the well model
-            if (param_.solve_welleq_initially_ && well->isOperableAndSolvable()) {
+            // (not a well held stopped since its initial solve failed: it stays at zero rate)
+            if (param_.solve_welleq_initially_ && well->isOperableAndSolvable()
+                && !well->isHeldStoppedForTimestep()) {
                 try {
                     well->solveWellEquation(
                         simulator_, this->groupStateHelper(), this->wellState()
