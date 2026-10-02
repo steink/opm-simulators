@@ -122,7 +122,7 @@ WellInterfaceGeneric(const Well& well,
 
     this->wellStatus_ = Well::Status::OPEN;
     if (well.getStatus() == Well::Status::STOP) {
-        this->wellStatus_ = Well::Status::STOP;
+        this->stopWell(StopReason::Schedule);
     }
 
     wsolvent_ = 0.0;
@@ -370,6 +370,17 @@ updateWellTestState(const SingleWellState<Scalar, IndexTraits>& ws,
     }
 
     // TODO: well can be shut/closed due to other reasons
+}
+
+template<typename Scalar, typename IndexTraits>
+void WellInterfaceGeneric<Scalar, IndexTraits>::
+closeStoppedWellPhysically(const double simulationTime,
+                           WellTestState& wellTestState,
+                           DeferredLogger& deferred_logger) const
+{
+    WellTest<Scalar, IndexTraits>(*this).updateWellTestStatePhysical(simulationTime,
+                                                                     /*write_message_to_opmlog=*/true,
+                                                                     wellTestState, deferred_logger);
 }
 
 template<typename Scalar, typename IndexTraits>

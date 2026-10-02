@@ -572,7 +572,7 @@ namespace Opm {
                                     "its limits at the start of this timestep; it is stopped");
                             }
                         } catch (const std::exception& e) {
-                            well->stopWell();
+                            well->stopWell(WellInterface<TypeTag>::StopReason::Numerical);
                             well->holdStoppedForTimestep();
                             group_tree_initial_solve_failed_.insert(well->name());
                             local_deferredLogger.warning("WELL_INITIAL_SOLVE_FAILED",
@@ -1164,7 +1164,7 @@ namespace Opm {
                 well_container_.emplace_back(this->createWellPointer(w, report_step));
 
                 if (ws.status == Well::Status::STOP) {
-                    well_container_.back()->stopWell();
+                    well_container_.back()->stopWell(WellInterface<TypeTag>::StopReason::Schedule);
                     this->well_close_times_.erase(well_name);
                     this->well_open_times_.erase(well_name);
                 }
@@ -2745,20 +2745,31 @@ namespace Opm {
                 continue;
             }
             const auto wasClosed = wellTestState.well_is_closed(wname);
-            well->checkWellOperability(simulator_,
-                                       this->wellState(),
-                                       this->groupStateHelper());
             const bool under_zero_target =
                 well->wellUnderZeroGroupRateTarget(this->groupStateHelper());
-            well->updateWellTestState(this->wellState().well(wname),
-                                      simulationTime,
-                                      /*writeMessageToOPMLog=*/ true,
-                                      /*during_well_test=*/ false,
-                                      under_zero_target,
-                                      wellTestState,
-                                      this->eclipseState().getUnits(),
-                                      this->schedule().getStartTime(),
-                                      local_deferredLogger);
+            // Accepting the timestep accepts that a well stopped cleanly
+            // during it (it cannot flow at its constraints) is still stopped:
+            // close it, without re-checking its operability.
+            if (param_.close_stopped_wells_ && well->stoppedCleanly() && !under_zero_target
+                && this->wellState().well(wname).status == WellStatus::OPEN) {
+                local_deferredLogger.debug(fmt::format("Well {} is stopped at the end of the timestep "
+                                                       "(reason: {}); closing it",
+                                                       wname, well->stopReasonToString(well->stopReason())));
+                well->closeStoppedWellPhysically(simulationTime, wellTestState, local_deferredLogger);
+            } else {
+                well->checkWellOperability(simulator_,
+                                           this->wellState(),
+                                           this->groupStateHelper());
+                well->updateWellTestState(this->wellState().well(wname),
+                                          simulationTime,
+                                          /*writeMessageToOPMLog=*/ true,
+                                          /*during_well_test=*/ false,
+                                          under_zero_target,
+                                          wellTestState,
+                                          this->eclipseState().getUnits(),
+                                          this->schedule().getStartTime(),
+                                          local_deferredLogger);
+            }
 
             if (!wasClosed && wellTestState.well_is_closed(wname)) {
                 this->closed_this_step_.insert(wname);

@@ -121,8 +121,48 @@ public:
     /// Returns true if the well has one or more THP limits/constraints.
     bool wellHasTHPConstraints(const SummaryState& summaryState) const;
 
-    void stopWell() { this->wellStatus_ = Well::Status::STOP; }
+    /// Why a well was last stopped dynamically (see stopWell()). Clean
+    /// reasons -- NoFlow, Physical, ReopenLimit, Network -- mean the well
+    /// cannot flow at its current constraints; see closesCleanly().
+    enum class StopReason {
+        Unspecified, ///< stopped by a path that does not record a reason
+        Schedule,    ///< STOP from the schedule
+        NoFlow,      ///< a converged solve ended at zero (or reversed) rate
+        Physical,    ///< not operable at its limits
+        ReopenLimit, ///< kept stopped after too many re-openings
+        Network,     ///< stopped or held stopped by the group-tree network workflow
+        Numerical    ///< could not be solved
+    };
+
+    void stopWell(const StopReason reason = StopReason::Unspecified)
+    {
+        this->wellStatus_ = Well::Status::STOP;
+        this->stop_reason_ = reason;
+    }
     void openWell() { this->wellStatus_ = Well::Status::OPEN; }
+    StopReason stopReason() const { return this->stop_reason_; }
+    static std::string stopReasonToString(const StopReason reason)
+    {
+        switch (reason) {
+        case StopReason::Schedule: return "schedule";
+        case StopReason::NoFlow: return "no flow";
+        case StopReason::Physical: return "not operable";
+        case StopReason::ReopenLimit: return "re-open limit";
+        case StopReason::Network: return "network";
+        case StopReason::Numerical: return "numerical";
+        default: return "unspecified";
+        }
+    }
+
+    /// A stopped well whose stop reason says it cannot flow at its current
+    /// constraints.
+    bool stoppedCleanly() const
+    {
+        return this->wellIsStopped()
+            && (this->stop_reason_ == StopReason::NoFlow || this->stop_reason_ == StopReason::Physical
+                || this->stop_reason_ == StopReason::ReopenLimit
+                || this->stop_reason_ == StopReason::Network);
+    }
     Well::Status wellStatus() { return this->wellStatus_;}
 
     bool wellIsStopped() const { return this->wellStatus_ == Well::Status::STOP; }
@@ -179,6 +219,13 @@ public:
     Scalar getALQ(const WellStateType& well_state) const;
     Scalar wsolvent() const;
     Scalar rsRvInj() const;
+
+    /// Close the well in the well-test state for physical reasons (shut or
+    /// stopped per its auto shut-in setting, re-opened only by WTEST or a
+    /// schedule event), without checking its operability first.
+    void closeStoppedWellPhysically(const double simulationTime,
+                                    WellTestState& wellTestState,
+                                    DeferredLogger& deferred_logger) const;
 
     // at the beginning of the time step, we check what inj_multiplier from the previous running
     void initInjMult(const std::vector<Scalar>& max_inj_mult);
@@ -454,6 +501,7 @@ protected:
     std::vector<int> saturation_table_number_;
 
     Well::Status wellStatus_;
+    StopReason stop_reason_{StopReason::Unspecified};
     bool hold_stopped_{false};
     bool hold_stopped_for_timestep_{false};
 

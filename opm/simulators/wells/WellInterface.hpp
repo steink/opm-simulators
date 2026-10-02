@@ -85,6 +85,7 @@ public:
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
     using IndexTraits = typename FluidSystem::IndexTraitsType;
     using Indices = GetPropType<TypeTag, Properties::Indices>;
+    using StopReason = typename WellInterfaceGeneric<Scalar, IndexTraits>::StopReason;
     using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
     using MaterialLaw = GetPropType<TypeTag, Properties::MaterialLaw>;
     using SparseMatrixAdapter = GetPropType<TypeTag, Properties::SparseMatrixAdapter>;

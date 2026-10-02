@@ -442,7 +442,7 @@ namespace Opm
         const Scalar sgn = this->isInjector() ? 1.0 : -1.0;
         if (!this->wellIsStopped()){
             if (wqTotal*sgn <= 0.0 && !fixed_status){
-                this->stopWell();
+                this->stopWell(StopReason::NoFlow);
                 return true;
             } else {
                 bool changed = false;
@@ -791,7 +791,7 @@ namespace Opm
                 // well can't operate using explicit fractions stop the well
                 // solve with zero rates
                 converged = solveWellWithZeroRate(simulator, dt, groupStateHelper, well_state);
-                this->stopWell();
+                this->stopWell(StopReason::Physical);
                 this->operability_status_.can_obtain_bhp_with_thp_limit = false;
                 this->operability_status_.obey_thp_limit_under_bhp_limit = false;
                 return converged;
@@ -852,7 +852,7 @@ namespace Opm
                 // solve with zero rate
                 // well can't operate using explicit fractions stop the well
                 converged = solveWellWithZeroRate(simulator, dt, groupStateHelper, well_state);
-                this->stopWell();
+                this->stopWell(StopReason::Physical);
                 this->operability_status_.can_obtain_bhp_with_thp_limit = false;
                 this->operability_status_.obey_thp_limit_under_bhp_limit = false;
                 return converged;
@@ -998,6 +998,7 @@ namespace Opm
         GroupStateHelperType groupStateHelper_copy = groupStateHelper;
         auto well_guard = groupStateHelper_copy.pushWellState(well_state_copy);
         const auto status = this->wellStatus_;
+        const auto stop_reason = this->stop_reason_;
         this->openWell();
         const bool use_vfpexplicit = this->operability_status_.use_vfpexplicit;
         this->operability_status_.use_vfpexplicit = true;
@@ -1006,6 +1007,7 @@ namespace Opm
         );
         this->operability_status_.use_vfpexplicit = use_vfpexplicit;
         this->wellStatus_ = status;
+        this->stop_reason_ = stop_reason;
 
         if (!bhp_target.has_value()) {
             deferred_logger.debug(fmt::format("Stopped well {}: no trial IPR (no operable bhp)",
@@ -1086,7 +1088,9 @@ namespace Opm
         if (!(group_controlled && solve(/*with_group=*/true)) && !solve(/*with_group=*/false)) {
             // Failed, physically or numerically: stopped at zero rate and held
             // for the rest of the timestep (timestep_initialization.md, 6.6).
-            this->stopWell();
+            this->stopWell(result == InitialSolveResult::NoFlow
+                           ? StopReason::NoFlow
+                           : StopReason::Numerical);
             this->holdStoppedForTimestep();
             try {
                 this->solveWellWithZeroRate(simulator, dt, groupStateHelper, well_state);
@@ -1198,6 +1202,7 @@ namespace Opm
         GroupStateHelperType groupStateHelper_copy = groupStateHelper;
         auto well_guard = groupStateHelper_copy.pushWellState(well_state_copy);
         const auto status = this->wellStatus_;
+        const auto stop_reason = this->stop_reason_;
         const auto operability = this->operability_status_;
         this->openWell();
         this->operability_status_.use_vfpexplicit = true;
@@ -1386,6 +1391,7 @@ namespace Opm
         }
 
         this->wellStatus_ = status;
+        this->stop_reason_ = stop_reason;
         this->operability_status_ = operability;
         this->updatePrimaryVariables(groupStateHelper);
         return out;
@@ -1451,9 +1457,10 @@ namespace Opm
     {
         OPM_TIMEFUNCTION();
 
-        // Solve a well as stopped with isolation (empty group state for assembly)
+        // Solve a well as stopped with isolation (empty group state for assembly).
+        // Only the status changes here: the stop reason is left as it is.
         const auto well_status_orig = this->wellStatus_;
-        this->stopWell();
+        this->wellStatus_ = Well::Status::STOP;
 
         auto inj_controls = Well::InjectionControls(0);
         auto prod_controls = Well::ProductionControls(0);
@@ -1658,7 +1665,9 @@ namespace Opm
         // global iteration, same treatment as a well kept stopped for too many
         // re-openings below, but not counted as one.
         if (this->isHeldStopped()) {
-            this->stopWell();
+            if (!this->wellIsStopped()) {
+                this->stopWell(StopReason::Network);
+            }
             this->solveWellWithZeroRate(simulator, dt, groupStateHelper, well_state);
             this->changed_to_open_this_step_ = false;
             changed_to_stopped_this_step_ = false;
@@ -1690,7 +1699,7 @@ namespace Opm
                 } else {
                     changed_to_stopped_this_step_ = false;
                 }
-                this->stopWell();
+                this->stopWell(StopReason::ReopenLimit);
                 bool converged_zero_rate = this->solveWellWithZeroRate(
                     simulator, dt, groupStateHelper, well_state
                 );
@@ -1749,7 +1758,8 @@ namespace Opm
 
         const bool well_operable = this->operability_status_.isOperableAndSolvable();
         if (!well_operable) {
-            this->stopWell();
+            this->stopWell(this->operability_status_.solvable ? StopReason::Physical
+                                                              : StopReason::Numerical);
             try {
                 this->solveWellWithZeroRate(
                     simulator, dt, groupStateHelper, well_state

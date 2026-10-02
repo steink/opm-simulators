@@ -1373,7 +1373,7 @@ updateGroupTreeOpenSet(const Network::ExtNetwork& network,
     if (const auto worst = solved->system.worstCliffViolation(solved->result)) {
         changed = true;
         if (auto* well = findWell(*worst)) {
-            well->stopWell();
+            well->stopWell(WellInterfaceGeneric<Scalar, IndexTraits>::StopReason::Network);
         }
         if (report) {
             deferred_logger.info(fmt::format(

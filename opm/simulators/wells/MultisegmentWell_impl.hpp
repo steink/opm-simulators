@@ -1723,6 +1723,7 @@ namespace Opm
         int status_switch_count = 0;
         // if we fail to solve eqs, we reset status/operability before leaving
         const auto well_status_orig = this->wellStatus_;
+        const auto stop_reason_orig = this->stop_reason_;
         const auto operability_orig = this->operability_status_;
         auto well_status_cur = well_status_orig;
         // don't allow opening wells that has a stopped well status
@@ -1766,6 +1767,7 @@ namespace Opm
                 }
                 if (status_switch_count == max_status_switch) {
                     this->wellStatus_ = well_status_orig;
+                    this->stop_reason_ = stop_reason_orig;
                 }
             }
 
@@ -1856,6 +1858,7 @@ namespace Opm
             deferred_logger.debug(message, OpmLog::defaultDebugVerbosityLevel + ((it == 0) && (switch_count == 0)));
         } else {
             this->wellStatus_ = well_status_orig;
+            this->stop_reason_ = stop_reason_orig;
             this->operability_status_ = operability_orig;
             const std::string message = fmt::format("   Well {} did not converge in {} inner iterations ("
                 "{} switches, {} status changes).", this->name(), it, switch_count, status_switch_count);
