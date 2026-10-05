@@ -1328,6 +1328,13 @@ namespace Opm
                     "FLO {:.4g} m3/day", this->name(), round,
                     max_thp.flows ? (max_thp.capped ? "capped, " : "") : "cannot flow; ",
                     max_thp.thp / unit::barsa, max_thp.bhp / unit::barsa, max_thp.flo * unit::day));
+                // TEMPORARY: how that touching point comes about.
+                for (const auto& line : calc.describeMaxFlowingThp(well_state_copy, this->well_ecl_, rates, rho,
+                                                                  summary_state,
+                                                                  max_thp.flows ? max_thp.thp
+                                                                  : static_cast<Scalar>(table.getTHPAxis().front()))) {
+                    deferred_logger.debug(line);
+                }
                 if (!max_thp.flows) {
                     if (!found) {
                         out.status = Anchor::Status::NoFlow;

@@ -769,6 +769,42 @@ liftMargin(const VFPProdTable& table,
 }
 
 template<class Scalar>
+std::vector<std::array<Scalar, 3>> VFPHelpers<Scalar>::
+liftMarginRows(const VFPProdTable& table,
+               const Scalar thp,
+               const Scalar wfr,
+               const Scalar gfr,
+               const Scalar alq,
+               const Scalar ipr_a,
+               const Scalar ipr_b,
+               const Scalar bhp_limit,
+               const std::function<Scalar(const Scalar, const Scalar)>& adjust_bhp)
+{
+    std::vector<std::array<Scalar, 3>> rows;
+    const Scalar flo_max = ipr_a - ipr_b * bhp_limit;
+    if (!(ipr_b > Scalar{0}) || !(flo_max > Scalar{0})) {
+        return rows;
+    }
+    const auto thp_i = findInterpData(thp, table.getTHPAxis());
+    const auto wfr_i = findInterpData(wfr, table.getWFRAxis());
+    const auto gfr_i = findInterpData(gfr, table.getGFRAxis());
+    const auto alq_i = findInterpData(alq, table.getALQAxis());
+    auto row = [&](const Scalar flo) {
+        const auto flo_i = findInterpData(flo, table.getFloAxis());
+        const Scalar required = adjust_bhp(interpolate(table, flo_i, thp_i, wfr_i, gfr_i, alq_i).value, thp);
+        rows.push_back({flo, required, (ipr_a - flo) / ipr_b});
+    };
+    row(Scalar{0});
+    for (const double flo : table.getFloAxis()) {
+        if (flo > 0.0 && flo < flo_max) {
+            row(static_cast<Scalar>(flo));
+        }
+    }
+    row(flo_max);
+    return rows;
+}
+
+template<class Scalar>
 detail::MaxFlowingThp<Scalar> VFPHelpers<Scalar>::
 maxFlowingThp(const VFPProdTable& table,
               const Scalar wfr,

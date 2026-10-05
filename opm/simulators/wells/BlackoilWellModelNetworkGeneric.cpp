@@ -1264,6 +1264,14 @@ solveGroupTree(const Network::ExtNetwork& network,
 
     auto result = NetworkSolve::solve(system, guess, kNetworkSolveParams<Scalar>, NetworkSolve::FullStep{});
     if (!result.converged) {
+        // TEMPORARY diagnostics of the last iterations (NetworkSolve::kDiagnosticIterations).
+        log(fmt::format("Network diag: group-tree solve under {} at report step {} failed; "
+                        "{} nodes, {} wells, {} unknowns{}",
+                        root.name(), reportStepIdx, system.numNodes(), system.numWells(),
+                        system.size(), system.usesAnalyticJacobian() ? ", analytic Jacobian" : ""));
+        for (const auto& line : result.diagnostics) {
+            log(line);
+        }
         // A failure with reopen candidates: solve once more without them, so
         // that they stay stopped this round rather than the whole tree going
         // to the relaxed update.

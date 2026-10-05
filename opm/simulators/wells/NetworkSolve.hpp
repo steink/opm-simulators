@@ -21,6 +21,8 @@
 
 #include <opm/input/eclipse/Units/Units.hpp>
 
+#include <fmt/format.h>
+
 #include <dune/common/dynmatrix.hh>
 #include <dune/common/dynvector.hh>
 #include <dune/common/fmatrix.hh>
@@ -72,7 +74,14 @@ struct Result
     /// Production only: every well's water/oil/gas and bhp at the solution.
     std::vector<std::array<Scalar, 3>> well_phase_rates;
     std::vector<Scalar> well_bhp;
+    /// TEMPORARY diagnostics of a solve that did not converge: what the
+    /// system reports on its last kDiagnosticIterations iterations and its
+    /// final state (SystemBase::describeIteration(), describeState()).
+    std::vector<std::string> diagnostics;
 };
+
+/// TEMPORARY: how many of the last iterations of a failing solve are described.
+inline constexpr int kDiagnosticIterations = 10;
 
 /// Dense square system, solved by Dune. The networks this solves have tens of
 /// unknowns, so a dense direct solve is the whole story. Wrapped only to keep
@@ -145,6 +154,20 @@ public:
     /// Only an injection network places a group's split itself, and only it parks a
     /// well above its own rate limit while the solve is still moving. The defaults
     /// are what a system that does neither wants.
+    /// TEMPORARY diagnostics, for a solve close to its iteration limit: lines
+    /// describing iteration \p it -- its worst residual rows and its Newton
+    /// step, before (\p dx_raw) and after (\p dx_limited) limitStep() -- and
+    /// the final state. Empty by default.
+    virtual std::vector<std::string> describeIteration(const int /*it*/, const State& /*x*/,
+                                                       const State& /*r*/,
+                                                       const State& /*dx_raw*/,
+                                                       const State& /*dx_limited*/,
+                                                       const bool /*controls_moved*/) const
+    {
+        return {};
+    }
+    virtual std::vector<std::string> describeState(const State& /*x*/) const { return {}; }
+
     virtual Scalar refreshGuides(const State&) { return Scalar{0}; }
     virtual void setEnforceRateLimits(const bool) {}
     virtual bool rateLimitsViolated(const State&) const { return false; }
@@ -307,6 +330,17 @@ solve(Sys& system,
 
     int switches = 0;
     bool enforcing = false;
+    // TEMPORARY: described iterations of a solve that may be about to fail.
+    std::vector<std::string> diagnostics;
+    const int describe_from = max_iterations - kDiagnosticIterations + 1;
+    auto describe = [&](const int it, const auto& x_it, const auto& r_it, const auto& dx_raw,
+                        const auto& dx_limited, const bool moved) {
+        if (it < describe_from) {
+            return;
+        }
+        auto lines = system.describeIteration(it, x_it, r_it, dx_raw, dx_limited, moved);
+        diagnostics.insert(diagnostics.end(), lines.begin(), lines.end());
+    };
     for (int it = 1; it <= max_iterations; ++it) {
         const bool controls_moved = system.updateControls(x);
         switches += controls_moved ? 1 : 0;
@@ -400,12 +434,19 @@ solve(Sys& system,
             negative[i] = -r[i];
         }
         if (!J.solve(negative, dx)) {
+            describe(describe_from, x, r, std::vector<Scalar>{}, std::vector<Scalar>{}, controls_moved);
             last.node_pressure = system.pressures(x);
             last.well_rate = system.wellRates(x);
+            last.diagnostics = std::move(diagnostics);
+            last.diagnostics.push_back(fmt::format("iteration {}: singular Jacobian", it));
+            const auto state = system.describeState(x);
+            last.diagnostics.insert(last.diagnostics.end(), state.begin(), state.end());
             return last;
         }
 
+        const auto dx_raw = dx;
         dx = system.limitStep(x, dx);
+        describe(it, x, r, dx_raw, dx, controls_moved);
         // The residual jumps when a control switches, and that jump is not a
         // failure to make progress. Letting a globalisation veto it stalls the
         // active set instead of resolving it.
@@ -420,6 +461,9 @@ solve(Sys& system,
     last.iterations = max_iterations + 1;
     last.node_pressure = system.pressures(x);
     last.well_rate = system.wellRates(x);
+    last.diagnostics = std::move(diagnostics);
+    const auto state = system.describeState(x);
+    last.diagnostics.insert(last.diagnostics.end(), state.begin(), state.end());
     return last;
 }
 
