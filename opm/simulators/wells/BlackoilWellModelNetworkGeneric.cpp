@@ -1264,7 +1264,25 @@ solveGroupTree(const Network::ExtNetwork& network,
 
     auto result = NetworkSolve::solve(system, guess, kNetworkSolveParams<Scalar>, NetworkSolve::FullStep{});
     if (!result.converged) {
-        return giveUp(fmt::format("it did not converge in {} iterations", result.iterations - 1));
+        // A failure with reopen candidates: solve once more without them, so
+        // that they stay stopped this round rather than the whole tree going
+        // to the relaxed update.
+        if (num_candidates > 0) {
+            log(fmt::format("Network: the group-tree solve under {} at report step {} did not converge "
+                            "with {} reopen candidates (max residual {:.3e}{}); solving again without them.",
+                            root.name(), reportStepIdx, num_candidates, result.residual,
+                            result.control_trace.empty()
+                                ? std::string{}
+                                : fmt::format(", controls {}", result.control_trace)));
+            return solveGroupTree(network, reportStepIdx, root, balancedTree,
+                                  /*offerReopenCandidates=*/false);
+        }
+        return giveUp(fmt::format("it did not converge in {} iterations; max residual {:.3e}, "
+                                  "{} control switches{}",
+                                  result.iterations - 1, result.residual, result.switches,
+                                  result.control_trace.empty()
+                                      ? std::string{}
+                                      : fmt::format(", controls {}", result.control_trace)));
     }
     log(fmt::format("Network: solved the production network under {} via the group-tree "
                     "balancer at report step {} in {} iterations{}.",

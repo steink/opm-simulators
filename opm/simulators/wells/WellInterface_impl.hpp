@@ -977,6 +977,31 @@ namespace Opm
                                                   thp_limit / unit::barsa, margin / unit::barsa));
                 return;
             }
+            // The anchor's IPR is the right one where the well has a lift
+            // cliff (it touches at a positive FLO): reopened near its node
+            // pressure, it runs close to that point. Touching at zero rate,
+            // the touching point is the shut-in point -- never an operating
+            // point, and a candidate there would start on its own cap in the
+            // network solve -- so the IPR comes from the first solve instead,
+            // at the THP limit, where the well would actually run.
+            if (!(anchor.flo > Scalar{0})) {
+                if (anchor.start != Anchor::Start::GivenThp || !anchor.start_flows) {
+                    deferred_logger.debug(fmt::format("Stopped well {}: no trial IPR (max flowing THP {:.3f} bar "
+                                                      "at zero rate, and no flow at the THP limit {:.3f} bar)",
+                                                      this->name(), anchor.thp / unit::barsa,
+                                                      thp_limit / unit::barsa));
+                    return;
+                }
+                deferred_logger.debug(fmt::format("Stopped well {}: trial IPR at bhp {:.3f} bar from the solve "
+                                                  "at the THP limit {:.3f} bar (max flowing THP {:.3f} bar, "
+                                                  "reached at zero rate)",
+                                                  this->name(), anchor.start_bhp / unit::barsa,
+                                                  thp_limit / unit::barsa, anchor.thp / unit::barsa));
+                ws.stopped_ipr_a = anchor.start_ipr_a;
+                ws.stopped_ipr_b = anchor.start_ipr_b;
+                ws.stopped_ipr_bhp = anchor.start_bhp;
+                return;
+            }
             deferred_logger.debug(fmt::format("Stopped well {}: trial IPR at bhp {:.3f} bar, max flowing "
                                               "THP {:.3f} bar{}, THP limit {:.3f} bar",
                                               this->name(), anchor.bhp / unit::barsa,
@@ -1288,6 +1313,12 @@ namespace Opm
 
                 this->updateIPRImplicit(simulator, groupStateHelper_copy, well_state_copy);
                 const auto& ws = well_state_copy.well(this->index_of_well_);
+                if (round == 1) {
+                    out.start_flows = true;
+                    out.start_bhp = bhp;
+                    out.start_ipr_a = ws.implicit_ipr_a;
+                    out.start_ipr_b = ws.implicit_ipr_b;
+                }
                 auto rates = ws.surface_rates;
                 this->adaptRatesForVFP(rates);
                 const auto max_thp = calc.maxFlowingThp(well_state_copy, this->well_ecl_,
@@ -1309,6 +1340,7 @@ namespace Opm
                 out.status = max_thp.capped ? Anchor::Status::Capped : Anchor::Status::Flows;
                 out.thp = max_thp.thp;
                 out.bhp = max_thp.bhp;
+                out.flo = max_thp.flo;
                 out.ipr_a = ws.implicit_ipr_a;
                 out.ipr_b = ws.implicit_ipr_b;
                 out.rates.resize(ws.surface_rates.size());

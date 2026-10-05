@@ -422,6 +422,16 @@ public:
         Start start{Start::TableLowestThp};
         Scalar thp{0};               ///< maximum flowing THP from the search
         Scalar bhp{0};               ///< on the IPR, where it touches the tubing curve
+        /// The FLO where it touches; zero when the maximum THP is reached at
+        /// zero rate (no lift cliff: the touching point is the shut-in point).
+        Scalar flo{0};
+        /// The first solve, at the start bhp (for Start::GivenThp the bhp on
+        /// the tubing curve at the given THP): whether the well flowed there,
+        /// and then that bhp and the IPR there.
+        bool start_flows{false};
+        Scalar start_bhp{0};
+        std::vector<Scalar> start_ipr_a;
+        std::vector<Scalar> start_ipr_b;
         /// A final BHP-controlled solve at bhp: whether it converged with the
         /// well flowing, and then the THP the tubing table gives for its rates
         /// and bhp. rates and ipr_a/b below are that solve's when it did, and

@@ -68,6 +68,21 @@ With margin 0, FLOW-CGC's PROD2 is reopened about 2 bar inside its lift limit
 (18 times) and then cycles in its local solves. Runs with the iteration hold
 are unaffected: there, A1 reopens wells before B gets the chance.
 
+Revised after the large model (uncommitted): where the anchor touches at
+zero rate (the maximum THP is reached at shut-in: no lift cliff, e.g. the left
+branch of a U-shaped curve, typical for wet gas wells), its IPR is the shut-in
+linearisation -- never an operating point, possibly far off the well's
+productivity where it would run, and the network candidate starts on its own
+cap. Seen as T/C 2-cycles in the network solve (B14) and a trial IPR ~8x too
+weak (A11). The anchor still decides (max flowing THP vs THP limit + margin),
+but the trial IPR is then taken from the first anchor solve, at the THP limit;
+no trial IPR if that solve does not flow. Anchors touching at a positive FLO
+(a real lift cliff, PROD2) keep the anchor's IPR. Also: a group-tree solve
+with reopen candidates that does not converge is retried once without them.
+Neither path triggers on the opm-tests decks or FLOW-CGC (identical results).
+Note: the IPR is only as good as the well solve it comes from (A11's problem
+went away with a tighter well-solve tolerance).
+
 Remaining:
 1. **The reopen margin:** default kept at 0; 3 bar worked best on these decks
    but is model dependent. Experiment further (the large model; a relative
