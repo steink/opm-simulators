@@ -136,6 +136,18 @@ public:
         // curve with a minimum, the curve at zero rate needs more than the
         // shut-in bhp, so a start at the cap would never leave it.
         Scalar start_bhp = 0;
+
+        // Set by applyPhaseShare(): the water and gas fractions (the table's
+        // WFR and GFR) of the well's fixed phase proportions, which its tubing
+        // lookups use at every FLO. Unset: the fractions of the iterate's own
+        // rates, and explicit_fractions below the table's first FLO value (as
+        // in the well's own solve).
+        std::optional<std::array<Scalar, 2>> fractions;
+        std::array<Scalar, 2> explicit_fractions{};
+
+        // Rates (positive, [oil, water, gas]) that stand for this well when a
+        // node's fallback fractions are mixed from its wells -- see finalize().
+        std::array<Scalar, NP> reference_q{};
     };
 
     /// One Active node from ProdGroupTreeBalancer::extractFlatNetworkInput():
@@ -184,6 +196,7 @@ public:
         nodes_.push_back(std::move(n));
         node_alq_.push_back(alq);
         fixed_pressure_.push_back(std::nullopt);
+        node_explicit_fractions_.push_back(std::nullopt);
         return static_cast<int>(nodes_.size()) - 1;
     }
 
@@ -195,6 +208,61 @@ public:
     void setFixedPressure(const int node, const Scalar pressure)
     {
         fixed_pressure_[node] = pressure;
+    }
+
+    /// The water and gas fractions (WFR, GFR) node \p node's table is looked
+    /// up with when its flow is below the table's first FLO value -- e.g. the
+    /// node's fractions at the previous converged solve. Above it the
+    /// fractions of the node's own flow apply. A node left unset gets the
+    /// fractions of its wells' reference rates (Well::reference_q) in
+    /// finalize(), if they have any.
+    void setNodeExplicitFractions(const int node, const Scalar wfr, const Scalar gfr)
+    {
+        node_explicit_fractions_[node] = std::array<Scalar, 2>{wfr, gfr};
+    }
+
+    /// Each node's (WFR, GFR) for the given well rates (e.g. a converged
+    /// result's well_phase_rates), for nodes with a table whose flow is at
+    /// least the table's first FLO value; nullopt for the others and the
+    /// terminal. What setNodeExplicitFractions() takes at the next solve.
+    std::vector<std::optional<std::array<Scalar, 2>>>
+    nodeFractions(const std::vector<std::array<Scalar, NP>>& well_q) const
+    {
+        const auto flows = nodeFlowsFromWellRates(well_q);
+        std::vector<std::optional<std::array<Scalar, 2>>> out(nodes_.size());
+        for (int i = 1; i <= numNodes(); ++i) {
+            if (!hasTable(nodes_[i])) {
+                continue;
+            }
+            const auto& table = props_->getTable(nodes_[i].vfp_table);
+            const auto& q = flows[i];
+            if (detail::getFlo(table, q[kWater], q[kOil], q[kGas]) >= table.getFloAxis().front()) {
+                // getWFR()/getGFR() take opm's production-negative rates.
+                out[i] = std::array<Scalar, 2>{detail::getWFR(table, -q[kWater], -q[kOil], -q[kGas]),
+                                               detail::getGFR(table, -q[kWater], -q[kOil], -q[kGas])};
+            }
+        }
+        return out;
+    }
+
+    /// Every node's flow (efficiency-scaled, [oil, water, gas], index 0
+    /// unused) for the given well rates, e.g. a converged result's
+    /// well_phase_rates.
+    std::vector<std::array<Scalar, NP>>
+    nodeFlowsFromWellRates(const std::vector<std::array<Scalar, NP>>& well_q) const
+    {
+        std::vector<std::array<Scalar, NP>> q(nodes_.size());
+        for (int i = numNodes(); i >= 1; --i) {
+            std::array<Scalar, NP> qi{};
+            for (const int w : wells_at_[i]) {
+                for (int p = 0; p < NP; ++p) { qi[p] += wells_[w].efficiency * well_q[w][p]; }
+            }
+            for (const int c : children_[i]) {
+                for (int p = 0; p < NP; ++p) { qi[p] += nodes_[c].efficiency * q[c][p]; }
+            }
+            q[i] = qi;
+        }
+        return q;
     }
     int addWell(Well w) { wells_.push_back(std::move(w)); return static_cast<int>(wells_.size()) - 1; }
     int addActiveNode(ActiveNode a) { activeNodes_.push_back(std::move(a)); return static_cast<int>(activeNodes_.size()) - 1; }
@@ -265,6 +333,14 @@ public:
         std::array<Scalar, NP> trial_ipr_a{};
         std::array<Scalar, NP> trial_ipr_b{};
         Scalar trial_bhp = 0;   // the bhp the trial IPR was taken at; 0 if unknown
+
+        // The well's phase rates per unit of the table's FLO ([oil, water,
+        // gas], production positive), fixed for the solve: see
+        // applyPhaseShare(). Unset: per-phase IPRs as given.
+        std::optional<std::array<Scalar, NP>> phase_share;
+        // See Well::explicit_fractions, Well::reference_q.
+        std::array<Scalar, 2> explicit_fractions{};
+        std::array<Scalar, NP> reference_q{};
     };
 
     /// Add a stopped well as a reopen candidate (Well::reopen_candidate): a Thp
@@ -285,6 +361,11 @@ public:
         well.vfp_dp = wd.vfp_dp;
         well.ipr_a = wd.trial_ipr_a;
         well.ipr_b = wd.trial_ipr_b;
+        well.explicit_fractions = wd.explicit_fractions;
+        well.reference_q = wd.reference_q;
+        if (wd.phase_share.has_value()) {
+            applyPhaseShare(well, *wd.phase_share);
+        }
         well.kind = WellKind::Thp;
         well.ipr_slope_limit = iprSlopeLimit(well);
         well.reopen_candidate = true;
@@ -390,6 +471,11 @@ public:
             well.vfp_dp = wd.vfp_dp;
             well.ipr_a = wd.ipr_a;
             well.ipr_b = wd.ipr_b;
+            well.explicit_fractions = wd.explicit_fractions;
+            well.reference_q = wd.reference_q;
+            if (wd.phase_share.has_value()) {
+                applyPhaseShare(well, *wd.phase_share);
+            }
             return well;
         };
 
@@ -550,6 +636,27 @@ public:
                 children_[nodes_[c].parent].push_back(static_cast<int>(c));
             }
         }
+
+        // Nodes without fallback fractions: those of their wells' reference
+        // rates, mixed as the node would carry them.
+        std::vector<std::array<Scalar, NP>> reference(wells_.size());
+        for (int w = 0; w < numWells(); ++w) {
+            reference[w] = wells_[w].reference_q;
+        }
+        const auto mixed = nodeFlowsFromWellRates(reference);
+        for (int i = 1; i <= numNodes(); ++i) {
+            if (node_explicit_fractions_[i].has_value() || !hasTable(nodes_[i])) {
+                continue;
+            }
+            const auto& table = props_->getTable(nodes_[i].vfp_table);
+            const auto& q = mixed[i];
+            if (detail::getFlo(table, q[kWater], q[kOil], q[kGas]) > Scalar{0}) {
+                // getWFR()/getGFR() take opm's production-negative rates.
+                node_explicit_fractions_[i] = std::array<Scalar, 2>{
+                    detail::getWFR(table, -q[kWater], -q[kOil], -q[kGas]),
+                    detail::getGFR(table, -q[kWater], -q[kOil], -q[kGas])};
+            }
+        }
         buildRateDerivatives();
     }
 
@@ -583,6 +690,30 @@ public:
     /// populateFromFlatNetwork() sets Well::ipr_slope_limit from this for
     /// every Thp well it builds; it is public so that a hand-built well (the
     /// tests) can be given the same limit the real path would compute.
+    /// Give \p well one IPR in its table's FLO with fixed phase proportions:
+    /// FLO = a_FLO + b_FLO * bhp (the per-phase coefficients combined as the
+    /// table's FLO combines rates) and q_p = share[p] * FLO, with share the
+    /// phase rates per unit of FLO. Its rates, its node's flow and its tubing
+    /// lookups (Well::fractions) then all have one composition at every bhp,
+    /// so the FLO-based slope limit keeps its row monotone, and all phases
+    /// reach zero at one shut-in bhp. The price is that the composition does
+    /// not change with the rate, as the well's own inflow can -- the outer
+    /// rounds correct it from a new start point.
+    void applyPhaseShare(Well& well, const std::array<Scalar, NP>& share) const
+    {
+        const auto& table = props_->getTable(well.vfp_table);
+        const Scalar a_flo = detail::getFlo(table, well.ipr_a[kWater], well.ipr_a[kOil], well.ipr_a[kGas]);
+        const Scalar b_flo = detail::getFlo(table, well.ipr_b[kWater], well.ipr_b[kOil], well.ipr_b[kGas]);
+        for (int p = 0; p < NP; ++p) {
+            well.ipr_a[p] = share[p] * a_flo;
+            well.ipr_b[p] = share[p] * b_flo;
+        }
+        // getWFR()/getGFR() take opm's production-negative rates.
+        well.fractions = std::array<Scalar, 2>{
+            detail::getWFR(table, -share[kWater], -share[kOil], -share[kGas]),
+            detail::getGFR(table, -share[kWater], -share[kOil], -share[kGas])};
+    }
+
     std::optional<Scalar> iprSlopeLimit(const Well& well) const
     {
         const auto& table = props_->getTable(well.vfp_table);
@@ -629,7 +760,8 @@ public:
                 continue;
             }
             const Scalar gap = std::abs(limited.evaluation.value
-                                        - tableBhp(well.vfp_table, thp, q, well.alq));
+                                        - tableBhp(well.vfp_table, thp, q, well.alq,
+                                                   wellFractions(well, q)));
             if (!worst.has_value() || gap > worst_gap) {
                 worst_gap = gap;
                 worst = well.name;
@@ -755,7 +887,8 @@ public:
             }
             const Scalar upstream = (nodes_[i].parent == 0) ? terminal_pressure_ : x[pIdx(nodes_[i].parent)];
             const Scalar computed = hasTable(nodes_[i])
-                ? tableBhp(nodes_[i].vfp_table, upstream, q[i], node_alq_[i]) : upstream;
+                ? tableBhp(nodes_[i].vfp_table, upstream, q[i], node_alq_[i], nodeFractions(i))
+                : upstream;
             r[pIdx(i)] = (x[pIdx(i)] - computed) / unit::barsa;
         }
 
@@ -818,11 +951,12 @@ public:
         // the same two conversions tableBhp() makes, at the same one place.
         if (!well.ipr_slope_limit.has_value()) {
             detail::SlopeLimitedEvaluation<Scalar> plain;
-            plain.evaluation.value = tableBhp(well.vfp_table, thp, q, well.alq);
+            plain.evaluation.value = tableBhp(well.vfp_table, thp, q, well.alq, wellFractions(well, q));
             return plain;
         }
+        const auto f = wellFractions(well, q);
         return props_->bhp_with_slope_limit(well.vfp_table, -q[kWater], -q[kOil], -q[kGas],
-                                            thp, well.alq, Scalar{0}, Scalar{0}, false,
+                                            thp, well.alq, f.wfr, f.gfr, f.fixed,
                                             *well.ipr_slope_limit);
     }
 
@@ -850,7 +984,7 @@ public:
             if (hasTable(nodes_[i])) {
                 const Scalar upstream = (parent == 0) ? terminal_pressure_ : x[pIdx(parent)];
                 const auto t = tableLookup(nodes_[i].vfp_table, upstream, q[i], node_alq_[i],
-                                           std::nullopt);
+                                           std::nullopt, nodeFractions(i));
                 if (parent != 0) {
                     J(row, pIdx(parent)) -= t.dthp / bar;
                 }
@@ -886,8 +1020,9 @@ public:
                 continue;
             }
             const Scalar thp = x[pIdx(well.node)];
-            const auto t = tableLookup(well.vfp_table, thp, wellPhaseRatesOwn(w, x), well.alq,
-                                       well.ipr_slope_limit);
+            const auto qw = wellPhaseRatesOwn(w, x);
+            const auto t = tableLookup(well.vfp_table, thp, qw, well.alq, well.ipr_slope_limit,
+                                       wellFractions(well, qw));
             const Scalar dtable_dbhp = t.dq[kOil] * well.ipr_b[kOil]
                 + t.dq[kWater] * well.ipr_b[kWater] + t.dq[kGas] * well.ipr_b[kGas];
             J(row, row) += (Scalar{1} - dtable_dbhp) / bar;
@@ -1036,7 +1171,7 @@ public:
                                                                : x[pIdx(nodes_[node].parent)];
             const Scalar computed = fixed_pressure_[node].has_value() ? *fixed_pressure_[node]
                 : (hasTable(nodes_[node]) ? tableBhp(nodes_[node].vfp_table, upstream, flows[node],
-                                                     node_alq_[node])
+                                                     node_alq_[node], nodeFractions(node))
                                           : upstream);
             return fmt::format("  node {}: r {:.3e}, p {:.3f}, needed {:.3f} (upstream {:.3f}{}), "
                                "O/W/G {:.1f}/{:.1f}/{:.1f} m3/d",
@@ -1276,6 +1411,15 @@ private:
     /// never trigger), but with the unclipped FLO derivative -- the templated
     /// bhp() clips it at zero, which would describe a different function than
     /// the value on a downward-sloping part of the table.
+    /// Explicit WFR/GFR handed to the VFP lookup, and whether they apply
+    /// everywhere (fixed) or only below the table's first FLO value.
+    struct LookupFractions
+    {
+        Scalar wfr = 0;
+        Scalar gfr = 0;
+        bool fixed = false;
+    };
+
     struct TableDerivatives
     {
         Scalar value = 0;
@@ -1284,19 +1428,20 @@ private:
     };
     TableDerivatives tableLookup(const int table, const Scalar thp,
                                  const std::array<Scalar, NP>& q, const Scalar alq,
-                                 const std::optional<Scalar> max_slope) const
+                                 const std::optional<Scalar> max_slope,
+                                 const LookupFractions& f) const
     {
         const Scalar limit = max_slope.value_or(std::numeric_limits<Scalar>::lowest());
         // props_->bhp*() want water, oil, gas and negative-for-production.
         const auto plain = props_->bhp_with_slope_limit(table, -q[kWater], -q[kOil], -q[kGas],
-                                                        thp, alq, Scalar{0}, Scalar{0}, false,
+                                                        thp, alq, f.wfr, f.gfr, f.fixed,
                                                         limit);
         using Eval = DenseAd::Evaluation<Scalar, NP>;
         const Eval aqua = Eval::createVariable(-q[kWater], kWater);
         const Eval liquid = Eval::createVariable(-q[kOil], kOil);
         const Eval vapour = Eval::createVariable(-q[kGas], kGas);
         const Eval ad = props_->bhp_with_slope_limit(table, aqua, liquid, vapour, thp, alq,
-                                                     Scalar{0}, Scalar{0}, false, limit);
+                                                     f.wfr, f.gfr, f.fixed, limit);
         TableDerivatives out;
         out.value = plain.evaluation.value;
         out.dthp = plain.evaluation.dthp;
@@ -1378,12 +1523,33 @@ private:
     }
     bool hasTable(const Node& n) const { return n.vfp_table != NoTable; }
 
-    Scalar tableBhp(const int table, const Scalar thp, const std::array<Scalar, NP>& q, const Scalar alq) const
+    Scalar tableBhp(const int table, const Scalar thp, const std::array<Scalar, NP>& q, const Scalar alq,
+                    const LookupFractions& f) const
     {
         // props_->bhp() wants water, oil, gas (aqua, liquid, vapour); q here is
         // oil, water, gas (ProdGroupTreeBalancer's order) -- reordered right here,
         // the one place the two conventions meet.
-        return props_->bhp(table, -q[kWater], -q[kOil], -q[kGas], thp, alq, Scalar{0}, Scalar{0}, false);
+        return props_->bhp(table, -q[kWater], -q[kOil], -q[kGas], thp, alq, f.wfr, f.gfr, f.fixed);
+    }
+
+    /// What a well's tubing lookup is evaluated with: the fractions of its
+    /// fixed phase proportions (Well::fractions) at every FLO -- the same as
+    /// its rates' own wherever they are defined; without fixed proportions,
+    /// the iterate's own, and its explicit ones below the first FLO value.
+    LookupFractions wellFractions(const Well& well, const std::array<Scalar, NP>& /*q*/) const
+    {
+        if (!well.fractions.has_value()) {
+            return {well.explicit_fractions[0], well.explicit_fractions[1], false};
+        }
+        return {(*well.fractions)[0], (*well.fractions)[1], true};
+    }
+
+    /// What node \p i's table is evaluated with: the fractions of its own
+    /// flow, and below the table's first FLO value its fallback fractions.
+    LookupFractions nodeFractions(const int i) const
+    {
+        const auto& f = node_explicit_fractions_[i];
+        return f.has_value() ? LookupFractions{(*f)[0], (*f)[1], false} : LookupFractions{};
     }
 
     /// The phase-rate weights a given target mode measures, in this class's
@@ -1441,6 +1607,7 @@ private:
     const VFPProdProperties<Scalar>* props_;
     std::vector<Node> nodes_{Node{}};   // index 0: the terminal (parent == -1)
     std::vector<Scalar> node_alq_{Scalar{0}};   // parallel to nodes_; see addNode()
+    std::vector<std::optional<std::array<Scalar, 2>>> node_explicit_fractions_{std::nullopt};   // see setNodeExplicitFractions()
     std::vector<std::optional<Scalar>> fixed_pressure_{std::nullopt};   // parallel to nodes_; see setFixedPressure()
     std::vector<Well> wells_;
     std::vector<ActiveNode> activeNodes_;

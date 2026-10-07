@@ -55,3 +55,16 @@ fixed-pressure node below the root. With the group-tree solver, which handles
 this topology correctly, NETWORK-01-MULTIROOT has PRODA = GRPA = 80 bar and
 PROD1 on THP control at about 4300 m3/day; FOPT is 6.5% lower than the
 fixed-point run.
+
+## Network node pressures below the first FLO knot use WFR = GFR = 0
+
+`NetworkVfpPressureCalculator::compute()`
+(`BlackoilWellModelNetworkPressureComputation.hpp`) calls
+`VFPProdProperties::bhp()` with explicit WFR = GFR = 0 and
+`use_expvfp = false` ("we dont support explicit lookup"). Below a table's
+first FLO knot `bhp()` switches to the explicit fractions, so a branch
+carrying little or no flow is evaluated as dry, gas-free oil: a much heavier
+column and a jump in the curve at the knot. Affects nodes whose wells are
+shut in or nearly so. A fix needs fractions for the node, e.g. its wells'
+explicit fractions weighted by their rates or potentials.
+

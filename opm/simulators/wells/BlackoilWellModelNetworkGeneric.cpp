@@ -944,8 +944,9 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
     // Per candidate: present, usable ipr, three ipr_a, three ipr_b, efficiency
     // scaling, has a network-sourced (dynamic) thp limit, stopped, usable trial
     // ipr, three trial ipr_a, three trial ipr_b, tubing-table datum correction,
-    // bhp the trial ipr was taken at.
-    constexpr int kEntries = 20;
+    // bhp the trial ipr was taken at, phase shares (set, three shares), three
+    // reference rates, explicit WFR and GFR.
+    constexpr int kEntries = 29;
     std::vector<Scalar> shared(candidates.size() * kEntries, Scalar{0});
     for (std::size_t i = 0; i < candidates.size(); ++i) {
         const auto it = local.find(candidates[i].name);
@@ -1000,6 +1001,59 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
                 e[19] = ws.stopped_ipr_bhp;
             }
         }
+
+        // Its phase shares (rates per unit of FLO) for the network solve
+        // (GroupTreeSystem::WellNetworkData::phase_share): those of its IPR's
+        // rates at its current bhp -- the linearisation the network uses, with
+        // every phase as it flows there (not the well state's own rates, which
+        // can be a single-phase guess set from a rate target before the well
+        // was ever solved); for a stopped well with a trial IPR, the rates that
+        // IPR gives at the bhp it was taken at. Below the table's first FLO
+        // value, where the VFP lookup itself stops trusting the rates'
+        // fractions, or when the deck asks for explicit lookups (WVFPEXP): the
+        // rates the explicit fractions are taken from. Its reference rates
+        // stand for it in a node's fallback fractions: those rates, else its
+        // potentials. Its explicit fractions apply below the table's first FLO
+        // value if it gets no shares.
+        const int table_id = candidates[i].vfp_table;
+        if (table_id > 0) {
+            const auto& vfp = *it->second->vfpProperties();
+            const auto& table = vfp.getProd()->getTable(table_id);
+            const auto flo = [&table](const std::array<Scalar, Sys::NP>& r) {
+                return detail::getFlo(table, r[Sys::kWater], r[Sys::kOil], r[Sys::kGas]);
+            };
+            std::array<Scalar, Sys::NP> q{};   // positive, [oil, water, gas]
+            if (e[1] > Scalar{0}) {
+                for (int ph = 0; ph < Sys::NP; ++ph) {
+                    q[ph] = e[2 + ph] + e[5 + ph] * ws.bhp;   // ipr: a + b*bhp, b negative here
+                }
+            }
+            if (e[11] > Scalar{0} && flo(q) < table.getFloAxis().front()) {
+                for (int ph = 0; ph < Sys::NP; ++ph) {
+                    q[ph] = e[12 + ph] + e[15 + ph] * e[19];   // trial ipr: a + b*bhp, b negative here
+                }
+            }
+            if (flo(q) < table.getFloAxis().front() || it->second->useVfpExplicit()) {
+                for (int ph = 0; ph < Sys::NP; ++ph) {
+                    q[ph] = -ws.prev_surface_rates[pos[ph]];
+                }
+            }
+            if (flo(q) > Scalar{0}) {
+                e[20] = Scalar{1};
+                for (int ph = 0; ph < Sys::NP; ++ph) {
+                    e[21 + ph] = std::max(q[ph], Scalar{0}) / flo(q);
+                }
+            } else {
+                for (int ph = 0; ph < Sys::NP; ++ph) {
+                    q[ph] = std::max(ws.well_potentials[pos[ph]], Scalar{0});
+                }
+            }
+            for (int ph = 0; ph < Sys::NP; ++ph) {
+                e[24 + ph] = std::max(q[ph], Scalar{0});
+            }
+            e[27] = vfp.getExplicitWFR(table_id, it->second->indexOfWell());
+            e[28] = vfp.getExplicitGFR(table_id, it->second->indexOfWell());
+        }
     }
     well_model_.comm().sum(shared.data(), shared.size());
 
@@ -1039,6 +1093,13 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
             data.trial_ipr_b[ph] = e[15 + ph];
         }
         data.trial_bhp = e[19];
+        if (e[20] > Scalar{0}) {
+            data.phase_share = std::array<Scalar, Sys::NP>{e[21], e[22], e[23]};
+        }
+        for (int ph = 0; ph < Sys::NP; ++ph) {
+            data.reference_q[ph] = e[24 + ph];
+        }
+        data.explicit_fractions = {e[27], e[28]};
         result.emplace(candidates[i].name, std::move(data));
     }
     return result;
@@ -1253,6 +1314,14 @@ solveGroupTree(const Network::ExtNetwork& network,
             ++num_candidates;
         }
     }
+    // Below a node table's first FLO value the fractions of its flow at the
+    // previous converged solve apply; nodes without one get their wells'
+    // reference fractions in finalize().
+    for (std::size_t n = 1; n < order.size(); ++n) {
+        if (const auto f = group_tree_node_fractions_.find(order[n]); f != group_tree_node_fractions_.end()) {
+            system.setNodeExplicitFractions(static_cast<int>(n), f->second[0], f->second[1]);
+        }
+    }
     system.finalize();
 
     std::vector<Scalar> guess(system.numNodes());
@@ -1297,6 +1366,12 @@ solveGroupTree(const Network::ExtNetwork& network,
                     root.name(), reportStepIdx, result.iterations,
                     num_candidates > 0 ? fmt::format(" ({} reopen candidates)", num_candidates)
                                        : std::string{}));
+    const auto fractions = system.nodeFractions(result.well_phase_rates);
+    for (std::size_t n = 1; n < order.size(); ++n) {
+        if (fractions[n].has_value()) {
+            group_tree_node_fractions_[order[n]] = *fractions[n];
+        }
+    }
     return GroupTreeSolve{std::move(system), std::move(order), std::move(result)};
 }
 

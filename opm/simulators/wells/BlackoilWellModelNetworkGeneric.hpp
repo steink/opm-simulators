@@ -501,6 +501,11 @@ protected:
     bool network_autochoke_ = false;
     bool network_complementarity_ = false;
     std::map<std::string, Scalar> well_vfp_dp_;
+    /// Each production node's (WFR, GFR) at its last converged group-tree
+    /// solve with a flow at or above its table's first FLO value: what its
+    /// table is looked up with below that value at the next solve. Updated by
+    /// solveGroupTree() (hence mutable).
+    mutable std::map<std::string, std::array<Scalar, 2>> group_tree_node_fractions_;
     /// Last production solve per tree root: the inputs it was built from and
     /// what it gave. Inside a network sub-loop the wells are frozen, so the
     /// same inputs come back sub-iteration after sub-iteration.

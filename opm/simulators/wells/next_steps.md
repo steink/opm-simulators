@@ -243,6 +243,60 @@ Results, on vs off:
   events 412 → 3, FOPT unchanged. PROD2 is closed once (reason: network) and
   reopened by WTEST at day 227.
 
+### Step 5c — Phase fractions in the network's tubing lookups (done)
+model5 STDW with `--network-analytic-jacobian=true` (group-tree, timestep
+hold): 12 → 19 timesteps, 0 → 31 network give-ups. Not the Jacobian: it
+matches differences (≤1e-2 relative), the scaled and unscaled condition
+numbers are 4.7–35, and the same failing systems also fail with the
+difference Jacobian (29/31) and with a line search (31/31). The analytic
+run just drifts (solutions agree only to the 1e-2 tolerance) into states
+the difference run never reaches.
+
+Cause: a THP well near its lift limit (C-1H) has phase IPRs that reach
+zero at different bhps, so its WFR/GFR change quickly along the IPR near
+shut-in. The slope limit only bounds d(tubing)/d(FLO) at fixed fractions, so
+the "flattened" curve is a different line at every query: C-1H's row
+(bhp - tubing) rises to +0.77 near FLO 800, then falls to -34 at shut-in. A
+stable root (~195.6 bar), an unwanted crossing (~197.8) and the cap; Newton
+bounces between them.
+
+Related: every network tubing lookup (GroupTreeSystem, NetworkProductionSystem,
+master's fixed-point nodes) passes explicit WFR = GFR = 0, so below the
+table's first FLO knot it evaluates a dry, gas-free oil column -- unlike the
+well's own solve, which uses the well's explicit fractions. Not involved for
+C-1H (FLO >= 33 > 20 throughout), very likely for B14 on the large model
+(zero-flow node with a 32 bar head; zero-rate cap values).
+
+Implemented (after a first attempt that froze the fractions only in the
+tubing lookup, while the phase rates still followed their own IPRs -- an
+inconsistent system that made things worse):
+1. Wells: one IPR in the table's FLO with fixed phase proportions
+   (GroupTreeSystem::applyPhaseShare()): q_p = share_p * (a_FLO + b_FLO*bhp).
+   Shares from the well's IPR at its current bhp (trial rates for a stopped
+   candidate); from the rates behind its explicit fractions below the first
+   FLO value or under WVFPEXP. Rates, node inflow and tubing lookups then have
+   one composition at every bhp, the FLO-based slope limit keeps the row
+   monotone, and all phases reach zero at one shut-in bhp. The composition
+   does not change with rate as the well's own inflow can; the outer rounds
+   correct it from a new start point.
+2. Nodes: actual fractions, but below the table's first FLO value the
+   fractions of the previous converged solve (stored per node), else the mix
+   of their wells' reference rates -- instead of WFR = GFR = 0.
+Note: detail::getWFR()/getGFR() take production-negative rates (a sign slip
+here first gave 0/0 everywhere).
+
+Results: network give-ups on model5 0-31 -> 0-3, the two Jacobians agree;
+FLOW-CGC 84 -> 70 / 73 -> 47 timesteps; opm-tests network decks unchanged;
+model5 STDW 12 -> 25 / 11 -> 55 timesteps and MSW iteration hold (difference
+Jacobian) 16 -> 194: the outer loop -- the network stops a well at its lift
+limit with the composition of its operating point, its own zero-rate reopen
+checks (lagged explicit fractions) reopen it. Next: open/stop oscillation.
+
+Open: which explicit fractions -- start of the timestep (prev_surface_rates,
+as now) or the most recent converged flowing solve (FLO at or above the
+table's first value) -- see the discussion of C-1H, whose explicit water cut
+was 0.025 against an actual 0.195.
+
 ### Step 6 — Reservoir-aware IPR (large, research)
 The linearized near-well response from the assembled Jacobian
 (`well_status_oscillation.md`, strategy D), including the measured response
