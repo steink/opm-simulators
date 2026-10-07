@@ -1367,6 +1367,24 @@ solveGroupTree(const Network::ExtNetwork& network,
                     num_candidates > 0 ? fmt::format(" ({} reopen candidates)", num_candidates)
                                        : std::string{}));
     const auto fractions = system.nodeFractions(result.well_phase_rates);
+    {   // DEBUG: the node flows and per-well rates of this converged solve
+        // (wells under this root that are not in it are dropped, so they show
+        // as absent rather than with an earlier solve's rates).
+        const auto flows = system.nodeFlowsFromWellRates(result.well_phase_rates);
+        for (std::size_t n = 1; n < order.size(); ++n) {
+            if (schedule.hasGroup(order[n], reportStepIdx)) {
+                for (const auto& wname : schedule.getGroup(order[n], reportStepIdx).wells()) {
+                    group_tree_debug_well_rates_.erase(wname);
+                }
+            }
+        }
+        for (std::size_t n = 1; n < order.size(); ++n) {
+            group_tree_debug_node_flows_[order[n]] = flows[n];
+        }
+        for (int w = 0; w < system.numWells(); ++w) {
+            group_tree_debug_well_rates_[system.wells()[w].name] = result.well_phase_rates[w];
+        }
+    }
     for (std::size_t n = 1; n < order.size(); ++n) {
         if (fractions[n].has_value()) {
             group_tree_node_fractions_[order[n]] = *fractions[n];
@@ -1919,6 +1937,77 @@ assignNodeAndBranchValues(data::GroupAndNetworkValues& values,
                                             reportStepIdx,
                                             well_model_.comm());
     const auto& converged_pressures = converged.node_pressures;
+    // DEBUG: where GPR (the last network update's pressures) and GNETPR (this
+    // fixed-point recomputation from the final rates) differ, recompute the
+    // node's branch lookup in variants to show which difference causes it.
+    if (well_model_.comm().rank() == 0) {
+        const auto& prod = *well_model_.getVFPProperties().getProd();
+        for (const auto& [node, gnetpr] : converged_pressures) {
+            const auto gpr_it = node_pressures_.find(node);
+            const auto br_it = converged.branch_data.find(node);
+            const auto up = network.uptree_branch(node);
+            if (gpr_it == node_pressures_.end() || br_it == converged.branch_data.end() || !up
+                || !up->vfp_table().has_value()) {
+                continue;
+            }
+            const Scalar gpr = gpr_it->second;
+            if (std::abs(gpr - gnetpr) < Scalar{0.5} * unit::barsa) {
+                continue;
+            }
+            const int table_id = *up->vfp_table();
+            const auto& table = prod.getTable(table_id);
+            const auto& b = br_it->second;   // production positive
+            const Scalar w = b.water_rate, o = b.oil_rate, g = b.gas_rate;
+            const Scalar alq = up->alq_value(VFPProdTable::ALQDimension(table.getALQType(), sched.getUnits())).value_or(0.0);
+            const std::string& up_node = up->uptree_node();
+            const Scalar up_gnetpr = converged_pressures.count(up_node) ? converged_pressures.at(up_node) : Scalar{0};
+            const Scalar up_gpr = node_pressures_.count(up_node) ? node_pressures_.at(up_node) : up_gnetpr;
+            const auto fb = group_tree_node_fractions_.find(node);
+            const Scalar fwfr = fb != group_tree_node_fractions_.end() ? fb->second[0] : Scalar{0};
+            const Scalar fgfr = fb != group_tree_node_fractions_.end() ? fb->second[1] : Scalar{0};
+            const Scalar flo = detail::getFlo(table, w, o, g);
+            const Scalar p_noclamp = prod.bhp(table_id, -w, -o, -g, up_gnetpr, alq, 0.0, 0.0, false);
+            const Scalar p_fallback = prod.bhp(table_id, -w, -o, -g, up_gnetpr, alq, fwfr, fgfr, false);
+            const Scalar p_from_gpr = prod.bhp(table_id, -w, -o, -g, up_gpr, alq, fwfr, fgfr, false);
+            std::string gt;
+            if (const auto f = group_tree_debug_node_flows_.find(node); f != group_tree_debug_node_flows_.end()) {
+                gt = fmt::format("; group-tree node flow O/W/G {:.5g}/{:.5g}/{:.5g} m3/d", f->second[0] * unit::day,
+                                 f->second[1] * unit::day, f->second[2] * unit::day);
+            }
+            if (sched.hasGroup(node, reportStepIdx)) {
+                for (const auto& wname : sched.getGroup(node, reportStepIdx).wells()) {
+                    const auto r = group_tree_debug_well_rates_.find(wname);
+                    gt += fmt::format("; {} group-tree O/W/G {}", wname, r == group_tree_debug_well_rates_.end()
+                        ? std::string("absent")
+                        : fmt::format("{:.5g}/{:.5g}/{:.5g}", r->second[0] * unit::day, r->second[1] * unit::day,
+                                      r->second[2] * unit::day));
+                    if (well_model_.wellState().has(wname)) {
+                        const auto& ws = well_model_.wellState().well(wname);
+                        const auto& pu = well_model_.phaseUsage();
+                        gt += fmt::format(" final {:.5g}/{:.5g}/{:.5g}",
+                            -ws.surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx)] * unit::day,
+                            -ws.surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx)] * unit::day,
+                            -ws.surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx)] * unit::day);
+                    }
+                }
+            }
+            OpmLog::debug(gt.empty() ? std::string{} : "  " + gt.substr(2));
+            OpmLog::debug(fmt::format(
+                "Node pressure check {} (up {}): GPR {:.3f} vs GNETPR {:.3f} bar (diff {:+.3f}); "
+                "unclamped {:.3f}, with fallback fractions {:.3f}, from upstream GPR {:.3f}; "
+                "rates O/W/G {:.5g}/{:.5g}/{:.5g} m3/d, FLO {:.5g} (axis {:.5g}..{:.5g}); "
+                "upstream GPR {:.3f} / GNETPR {:.3f} (THP axis {:.3f}..{:.3f}); fallback WFR/GFR {}; "
+                "table {} ALQ {:.4g}; add gas lift gas {}",
+                node, up_node, gpr / unit::barsa, gnetpr / unit::barsa, (gpr - gnetpr) / unit::barsa,
+                p_noclamp / unit::barsa, p_fallback / unit::barsa, p_from_gpr / unit::barsa,
+                o * unit::day, w * unit::day, g * unit::day, flo * unit::day,
+                table.getFloAxis().front() * unit::day, table.getFloAxis().back() * unit::day,
+                up_gpr / unit::barsa, up_gnetpr / unit::barsa,
+                table.getTHPAxis().front() / unit::barsa, table.getTHPAxis().back() / unit::barsa,
+                fb != group_tree_node_fractions_.end() ? fmt::format("{:.4g}/{:.4g}", fwfr, fgfr) : std::string("none"),
+                table_id, alq, network.node(node).add_gas_lift_gas() ? "yes" : "no"));
+        }
+    }
     converged_branchvalues = std::move(converged.branch_data);
     for (const auto& [node, converged_pressure] : converged_pressures) {
         auto it = nodevalues.find(node);

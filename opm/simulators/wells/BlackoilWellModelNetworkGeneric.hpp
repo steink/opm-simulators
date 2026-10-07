@@ -506,6 +506,9 @@ protected:
     /// table is looked up with below that value at the next solve. Updated by
     /// solveGroupTree() (hence mutable).
     mutable std::map<std::string, std::array<Scalar, 2>> group_tree_node_fractions_;
+    // DEBUG: the last converged group-tree solve's node flows and well rates.
+    mutable std::map<std::string, std::array<Scalar, 3>> group_tree_debug_node_flows_;
+    mutable std::map<std::string, std::array<Scalar, 3>> group_tree_debug_well_rates_;
     /// Last production solve per tree root: the inputs it was built from and
     /// what it gave. Inside a network sub-loop the wells are frozen, so the
     /// same inputs come back sub-iteration after sub-iteration.
