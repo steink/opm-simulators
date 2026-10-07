@@ -1154,12 +1154,18 @@ public:
         const Scalar thp = x[pIdx(well.node)];
         const Scalar bhp = x[thpBhpIdx(w)];
         const auto tubing = slopeLimitedBhp(well, thp, q);
+        const auto f = wellFractions(well, q);
         return fmt::format("  well {} [{}{}]: thp {:.3f}, bhp {:.3f}, shut-in {:.3f}, tubing {:.3f} ({}), "
-                           "row {:.3e}, {}",
+                           "row {:.3e}, {}; fractions WFR/GFR fixed {}, explicit {:.4g}/{:.4g}, used {:.4g}/{:.4g}{}",
                            well.name, controlLetter(w), well.reopen_candidate ? ", candidate" : "",
                            thp / unit::barsa, bhp / unit::barsa, well.bhp_shutin / unit::barsa,
                            (tubing.evaluation.value - well.vfp_dp) / unit::barsa,
-                           slopeLimitName(tubing.limit), thpWellResidualRow(w, x), rates);
+                           slopeLimitName(tubing.limit), thpWellResidualRow(w, x), rates,
+                           well.fractions.has_value()
+                               ? fmt::format("{:.4g}/{:.4g}", (*well.fractions)[0], (*well.fractions)[1])
+                               : std::string("none"),
+                           well.explicit_fractions[0], well.explicit_fractions[1], f.wfr, f.gfr,
+                           f.fixed ? "" : " (below first FLO only)");
     }
 
     std::string describeRow(const int i, const State& x, const State& r,
