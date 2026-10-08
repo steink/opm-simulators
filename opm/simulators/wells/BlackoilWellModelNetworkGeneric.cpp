@@ -1011,8 +1011,9 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
         // rates at its current bhp -- the linearisation the network uses, with
         // every phase as it flows there (not the well state's own rates, which
         // can be a single-phase guess set from a rate target before the well
-        // was ever solved); for a stopped well with a trial IPR, the rates that
-        // IPR gives at the bhp it was taken at. Below the table's first FLO
+        // was ever solved); for a stopped well with a trial IPR, the
+        // composition its anchor judged its lift with (else the rates that IPR
+        // gives at the bhp it was taken at). Below the table's first FLO
         // value, where the VFP lookup itself stops trusting the rates'
         // fractions, or when the deck asks for explicit lookups (WVFPEXP): the
         // rates the explicit fractions are taken from. Its reference rates
@@ -1033,8 +1034,17 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
                 }
             }
             if (e[11] > Scalar{0} && flo(q) < table.getFloAxis().front()) {
+                // A stopped well with a trial IPR: the composition its anchor
+                // judged its lift with, else the trial IPR's rates at its bhp.
+                std::array<Scalar, Sys::NP> c{};
+                if (static_cast<int>(ws.stopped_composition.size()) >= pu.numActivePhases()) {
+                    for (int ph = 0; ph < Sys::NP; ++ph) {
+                        c[ph] = -ws.stopped_composition[pos[ph]];
+                    }
+                }
                 for (int ph = 0; ph < Sys::NP; ++ph) {
-                    q[ph] = e[12 + ph] + e[15 + ph] * e[19];   // trial ipr: a + b*bhp, b negative here
+                    q[ph] = flo(c) > Scalar{0} ? c[ph]
+                                               : e[12 + ph] + e[15 + ph] * e[19];   // trial ipr: a + b*bhp, b negative here
                 }
             }
             if (flo(q) < table.getFloAxis().front() || it->second->useVfpExplicit()) {

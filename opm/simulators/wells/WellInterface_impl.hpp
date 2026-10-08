@@ -932,6 +932,7 @@ namespace Opm
         std::fill(ws.stopped_ipr_a.begin(), ws.stopped_ipr_a.end(), Scalar{0});
         std::fill(ws.stopped_ipr_b.begin(), ws.stopped_ipr_b.end(), Scalar{0});
         ws.stopped_ipr_bhp = Scalar{0};
+        std::fill(ws.stopped_composition.begin(), ws.stopped_composition.end(), Scalar{0});
 
         // Only meaningful for a producer that is stopped (still part of the
         // system, unlike shut): persistently (ws.status) or, far more often,
@@ -978,6 +979,11 @@ namespace Opm
                 ws.stopped_ipr_a = a;
                 ws.stopped_ipr_b = b;
                 ws.stopped_ipr_bhp = bhp;
+                // The network gives the candidate the composition the anchor
+                // judged its lift with, whichever point the IPR is from.
+                if (anchor.composition.size() == ws.stopped_composition.size()) {
+                    ws.stopped_composition = anchor.composition;
+                }
             };
 
             // First the current THP limit (the node pressure in a network),
@@ -1334,6 +1340,7 @@ namespace Opm
         constexpr Scalar nan = std::numeric_limits<Scalar>::quiet_NaN();
         Scalar flows_at = nan;
         Scalar stops_at = nan;
+        std::optional<std::vector<Scalar>> lift_rates;   // see the first flowing round
         bool found = false;
         auto& deferred_logger = groupStateHelper.deferredLogger();
         const auto& pu = this->phaseUsage();
@@ -1391,8 +1398,24 @@ namespace Opm
                     out.start_ipr_a = ws.implicit_ipr_a;
                     out.start_ipr_b = ws.implicit_ipr_b;
                 }
-                auto rates = ws.surface_rates;
-                this->adaptRatesForVFP(rates);
+                // The lift margin is evaluated with one composition per anchor:
+                // that of its first flowing solve. Before it there are no
+                // rates and the explicit fractions are all there is (the start
+                // bhp); after it they would only add a lag (they are the rates
+                // at the start of the timestep, or when the well last flowed).
+                // Not each round's own: rounds move towards the touching point,
+                // near shut-in for a well without a lift cliff, where the
+                // composition degenerates to that of its last producing layer.
+                // Below the table's first FLO value the lookup still falls back
+                // to the explicit fractions.
+                if (!lift_rates.has_value()) {
+                    out.composition = ws.surface_rates;
+                    auto first = ws.surface_rates;
+                    this->adaptRatesForVFP(first);
+                    lift_rates = first;
+                    this->operability_status_.use_vfpexplicit = false;
+                }
+                const auto& rates = *lift_rates;
                 const auto max_thp = calc.maxFlowingThp(well_state_copy, this->well_ecl_,
                                                         rates, rho, summary_state);
                 deferred_logger.debug(fmt::format(

@@ -444,6 +444,9 @@ public:
         /// and then that bhp and the IPR there.
         bool start_flows{false};
         Scalar start_bhp{0};
+        /// Surface rates of the first flowing solve (production negative):
+        /// the composition the lift margin is evaluated with in every round.
+        std::vector<Scalar> composition;
         std::vector<Scalar> start_ipr_a;
         std::vector<Scalar> start_ipr_b;
         /// A final BHP-controlled solve at bhp: whether it converged with the

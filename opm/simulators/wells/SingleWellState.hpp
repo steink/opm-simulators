@@ -77,6 +77,7 @@ public:
         serializer(stopped_ipr_a);
         serializer(stopped_ipr_b);
         serializer(stopped_ipr_bhp);
+        serializer(stopped_composition);
         serializer(surface_rates);
         serializer(reservoir_rates);
         serializer(prev_surface_rates);
@@ -163,6 +164,11 @@ public:
     std::vector<Scalar> stopped_ipr_a;
     std::vector<Scalar> stopped_ipr_b;
     Scalar stopped_ipr_bhp{0};
+    // The composition the trial IPR's anchor judged the well's lift with
+    // (surface rates of its first flowing solve, production negative; only
+    // the proportions matter), which the network solve gives the reopen
+    // candidate too. Zero when there is none.
+    std::vector<Scalar> stopped_composition;
     std::vector<Scalar> surface_rates;
     std::vector<Scalar> reservoir_rates;
     std::vector<Scalar> prev_surface_rates;
