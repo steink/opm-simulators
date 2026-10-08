@@ -315,6 +315,11 @@ public:
     /// Per local well, the hydrostatic correction its tubing table needs;
     /// computed on the typed side, where the well's density lives.
     void setWellVfpDp(const std::string& well, const Scalar dp) { well_vfp_dp_[well] = dp; }
+
+    /// The lowest pressure production network node \p node can have at
+    /// \p reportStepIdx: the nearest fixed (terminal) pressure at or above
+    /// it. Nullopt if \p node is not in the active production network.
+    std::optional<Scalar> lowestNodePressure(const std::string& node, const int reportStepIdx) const;
     bool networkAutochoke() const { return network_autochoke_; }
     /// Answer the gas lift optimiser's trials from the network instead of
     /// from a well solve at a fixed thp.

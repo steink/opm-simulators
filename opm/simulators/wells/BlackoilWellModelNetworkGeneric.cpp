@@ -1110,6 +1110,28 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
 }
 
 template<typename Scalar, typename IndexTraits>
+std::optional<Scalar>
+BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>::
+lowestNodePressure(const std::string& node, const int reportStepIdx) const
+{
+    const auto& network = well_model_.schedule()[reportStepIdx].network();
+    if (!network.active() || !network.has_node(node)) {
+        return std::nullopt;
+    }
+    std::string at = node;
+    while (true) {
+        if (const auto p = network.node(at).terminal_pressure(); p.has_value()) {
+            return static_cast<Scalar>(*p);
+        }
+        const auto up = network.uptree_branch(at);
+        if (!up.has_value()) {
+            return std::nullopt;
+        }
+        at = up->uptree_node();
+    }
+}
+
+template<typename Scalar, typename IndexTraits>
 std::optional<typename BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>::GroupTreeSolve>
 BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>::
 solveGroupTree(const Network::ExtNetwork& network,

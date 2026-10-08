@@ -925,7 +925,8 @@ namespace Opm
     updateStoppedWellTrialIpr(const Simulator& simulator,
                               const double dt,
                               const GroupStateHelperType& groupStateHelper,
-                              WellStateType& well_state)
+                              WellStateType& well_state,
+                              const std::optional<Scalar> min_node_pressure)
     {
         auto& ws = well_state.well(this->index_of_well_);
         std::fill(ws.stopped_ipr_a.begin(), ws.stopped_ipr_a.end(), Scalar{0});
@@ -966,51 +967,76 @@ namespace Opm
                                                   : "BHP-controlled solve failed"));
                 return;
             }
-            // It cannot lift against the THP it would see now, with a margin
-            // so that a well right at its lift limit is not reopened only to
-            // stop again: not a reopen candidate.
             const Scalar margin = this->param_.group_tree_reopen_thp_margin_ * unit::barsa;
-            if (anchor.thp < thp_limit + margin) {
-                deferred_logger.debug(fmt::format("Stopped well {}: no trial IPR (max flowing THP "
-                                                  "{:.3f} bar, THP limit {:.3f} bar, margin {:.3f} bar)",
-                                                  this->name(), anchor.thp / unit::barsa,
-                                                  thp_limit / unit::barsa, margin / unit::barsa));
-                return;
-            }
-            // The anchor's IPR is the right one where the well has a lift
-            // cliff (it touches at a positive FLO): reopened near its node
-            // pressure, it runs close to that point. Touching at zero rate,
-            // the touching point is the shut-in point -- never an operating
-            // point, and a candidate there would start on its own cap in the
-            // network solve -- so the IPR comes from the first solve instead,
-            // at the THP limit, where the well would actually run.
-            if (!(anchor.flo > Scalar{0})) {
-                if (anchor.start != Anchor::Start::GivenThp || !anchor.start_flows) {
-                    deferred_logger.debug(fmt::format("Stopped well {}: no trial IPR (max flowing THP {:.3f} bar "
-                                                      "at zero rate, and no flow at the THP limit {:.3f} bar)",
-                                                      this->name(), anchor.thp / unit::barsa,
-                                                      thp_limit / unit::barsa));
+            const auto useIpr = [&](const std::vector<Scalar>& a, const std::vector<Scalar>& b,
+                                    const Scalar bhp, const std::string& where) {
+                deferred_logger.debug(fmt::format("Stopped well {}: trial IPR at bhp {:.3f} bar {} (max flowing "
+                                                  "THP {:.3f} bar{}, THP limit {:.3f} bar)", this->name(),
+                                                  bhp / unit::barsa, where, anchor.thp / unit::barsa,
+                                                  anchor.status == Status::Capped ? ", capped" : "",
+                                                  thp_limit / unit::barsa));
+                ws.stopped_ipr_a = a;
+                ws.stopped_ipr_b = b;
+                ws.stopped_ipr_bhp = bhp;
+            };
+
+            // First the current THP limit (the node pressure in a network),
+            // with a margin so that a well right at its lift limit is not
+            // reopened only to stop again. The anchor's IPR is the right one
+            // where the well has a lift cliff (it touches at a positive FLO):
+            // reopened near its node pressure, it runs close to that point.
+            // Touching at zero rate, the touching point is the shut-in point --
+            // never an operating point, and a candidate there would start on
+            // its own cap in the network solve -- so the IPR comes from the
+            // first solve instead, at the THP limit, where it would run.
+            if (anchor.thp >= thp_limit + margin) {
+                if (anchor.flo > Scalar{0}) {
+                    useIpr(anchor.ipr_a, anchor.ipr_b, anchor.bhp, "at its maximum flowing THP");
                     return;
                 }
-                deferred_logger.debug(fmt::format("Stopped well {}: trial IPR at bhp {:.3f} bar from the solve "
-                                                  "at the THP limit {:.3f} bar (max flowing THP {:.3f} bar, "
-                                                  "reached at zero rate)",
-                                                  this->name(), anchor.start_bhp / unit::barsa,
-                                                  thp_limit / unit::barsa, anchor.thp / unit::barsa));
-                ws.stopped_ipr_a = anchor.start_ipr_a;
-                ws.stopped_ipr_b = anchor.start_ipr_b;
-                ws.stopped_ipr_bhp = anchor.start_bhp;
+                if (anchor.start == Anchor::Start::GivenThp && anchor.start_flows) {
+                    useIpr(anchor.start_ipr_a, anchor.start_ipr_b, anchor.start_bhp,
+                           "from the solve at the THP limit");
+                    return;
+                }
+            }
+
+            // It cannot flow at the current THP limit. In a network that
+            // pressure includes whatever flowed through the node when it was
+            // solved -- possibly this well's own flow before it stopped -- and
+            // the network solve decides, with the candidate's own THP row,
+            // whether it flows at the pressure the node actually gets. So look
+            // at lower pressures, down to the lowest the node can have (its
+            // nearest fixed pressure upstream); a well that cannot flow even
+            // there is no candidate. Without a network the THP limit is fixed.
+            const Scalar lowest = min_node_pressure.value_or(thp_limit);
+            if (anchor.thp < lowest + margin) {
+                deferred_logger.debug(fmt::format("Stopped well {}: no trial IPR (max flowing THP {:.3f} bar, "
+                                                  "THP limit {:.3f} bar, lowest node pressure {:.3f} bar, "
+                                                  "margin {:.3f} bar)", this->name(), anchor.thp / unit::barsa,
+                                                  thp_limit / unit::barsa, lowest / unit::barsa,
+                                                  margin / unit::barsa));
                 return;
             }
-            deferred_logger.debug(fmt::format("Stopped well {}: trial IPR at bhp {:.3f} bar, max flowing "
-                                              "THP {:.3f} bar{}, THP limit {:.3f} bar",
-                                              this->name(), anchor.bhp / unit::barsa,
-                                              anchor.thp / unit::barsa,
-                                              anchor.status == Status::Capped ? " (capped)" : "",
-                                              thp_limit / unit::barsa));
-            ws.stopped_ipr_a = anchor.ipr_a;
-            ws.stopped_ipr_b = anchor.ipr_b;
-            ws.stopped_ipr_bhp = anchor.bhp;
+            if (anchor.flo > Scalar{0}) {
+                useIpr(anchor.ipr_a, anchor.ipr_b, anchor.bhp, "at its maximum flowing THP, below the THP limit");
+                return;
+            }
+            // Touching at zero rate: a flowing point below the maximum flowing
+            // THP, as close to it -- and so to the current pressure -- as works.
+            const Scalar top = std::min(anchor.thp, thp_limit);
+            for (const Scalar f : {Scalar{0.25}, Scalar{0.5}, Scalar{1.0}}) {
+                const Scalar thp = top - f * (top - lowest);
+                const auto trial = this->trialSolveAtThp(simulator, dt, groupStateHelper, well_state, thp);
+                if (trial.has_value()) {
+                    useIpr(std::get<1>(*trial), std::get<2>(*trial), std::get<0>(*trial),
+                           fmt::format("from a solve at THP {:.3f} bar", thp / unit::barsa));
+                    return;
+                }
+            }
+            deferred_logger.debug(fmt::format("Stopped well {}: no trial IPR (no flow at THPs between "
+                                              "{:.3f} and {:.3f} bar)", this->name(), lowest / unit::barsa,
+                                              top / unit::barsa));
             return;
         }
 
@@ -1185,6 +1211,52 @@ namespace Opm
                                               thp_guess / unit::barsa));
         }
         return InitialSolveResult::Flows;
+    }
+
+    template<typename TypeTag>
+    std::optional<std::tuple<typename WellInterface<TypeTag>::Scalar,
+                             std::vector<typename WellInterface<TypeTag>::Scalar>,
+                             std::vector<typename WellInterface<TypeTag>::Scalar>>>
+    WellInterface<TypeTag>::
+    trialSolveAtThp(const Simulator& simulator,
+                    const double dt,
+                    const GroupStateHelperType& groupStateHelper,
+                    const WellStateType& well_state,
+                    const Scalar thp)
+    {
+        // Scratch copies, as in computeAnchor(); the well object's own state
+        // is restored whatever happens.
+        WellStateType well_state_copy = well_state;
+        GroupStateHelperType groupStateHelper_copy = groupStateHelper;
+        auto well_guard = groupStateHelper_copy.pushWellState(well_state_copy);
+        const auto status = this->wellStatus_;
+        const auto stop_reason = this->stop_reason_;
+        const auto operability = this->operability_status_;
+        this->openWell();
+        this->operability_status_.use_vfpexplicit = true;
+
+        std::optional<std::tuple<Scalar, std::vector<Scalar>, std::vector<Scalar>>> out;
+        try {
+            const auto& summary_state = simulator.vanguard().summaryState();
+            const WellBhpThpCalculator calc(*this);
+            const Scalar bhp = std::max(calc.calculateMinimumBhpAtThp(well_state_copy, this->well_ecl_,
+                                                                      summary_state, this->getRefDensity(), thp),
+                                        calc.mostStrictBhpFromBhpLimits(summary_state));
+            if (this->solveWellWithBhp(simulator, dt, bhp, groupStateHelper_copy, well_state_copy)
+                && !this->wellIsStopped()) {
+                this->updateIPRImplicit(simulator, groupStateHelper_copy, well_state_copy);
+                const auto& ws = well_state_copy.well(this->index_of_well_);
+                out = std::make_tuple(bhp, ws.implicit_ipr_a, ws.implicit_ipr_b);
+            }
+        } catch (const std::exception&) {
+            out.reset();
+        }
+
+        this->wellStatus_ = status;
+        this->stop_reason_ = stop_reason;
+        this->operability_status_ = operability;
+        this->updatePrimaryVariables(groupStateHelper);
+        return out;
     }
 
     template<typename TypeTag>

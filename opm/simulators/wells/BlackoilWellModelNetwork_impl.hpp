@@ -147,9 +147,16 @@ refreshWellNetworkData(const double dt, const details::DomainScope scope)
         // separate, physically-grounded trial IPR (stopped_ipr_a/b)
         // at the same cadence; a no-op for any well not currently
         // stopped. Not consumed here or by any network solve yet.
+        // In a production network, the lowest pressure its node can have
+        // bounds where a stopped well could still be reopened.
+        std::optional<Scalar> lowest;
+        if (well->isProducer()) {
+            lowest = this->lowestNodePressure(well->wellEcl().groupName(),
+                                              well_model_.simulator().episodeIndex());
+        }
         well->updateStoppedWellTrialIpr(well_model_.simulator(), dt,
                                         well_model_.groupStateHelper(),
-                                        well_model_.wellState());
+                                        well_model_.wellState(), lowest);
         // The tubing table's datum is not the well's reference
         // depth; the well's thp evaluation corrects for it and
         // the network system has to apply the same.

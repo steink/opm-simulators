@@ -63,6 +63,7 @@ namespace Opm {
 #include <opm/material/densead/Evaluation.hpp>
 
 #include <limits>
+#include <tuple>
 #include <vector>
 
 namespace Opm
@@ -390,8 +391,10 @@ public:
     /// -- linearised at its zero-rate state -- is not a usable reference. With
     /// a tubing table: the IPR at the well's maximum flowing THP
     /// (computeAnchor(), started from a solve at the THP limit, i.e. the node
-    /// pressure in a network); no trial IPR if the well cannot flow, or if its
-    /// maximum flowing THP is below its current THP limit. Without one: a trial
+    /// pressure in a network). If it cannot flow at its current THP limit, a
+    /// flowing point at a lower pressure, down to \p min_node_pressure (the
+    /// lowest pressure its network node can have); no trial IPR if it cannot
+    /// flow even there (without a network: at its THP limit). Without one: a trial
     /// solve at the well's own limits (estimateOperableBhp()). Stored in
     /// well_state's stopped_ipr_a/b, zeroed when there is none; the well object
     /// itself is left as it was. The group-tree network solve offers a well
@@ -399,7 +402,18 @@ public:
     void updateStoppedWellTrialIpr(const Simulator& simulator,
                                    const double dt,
                                    const GroupStateHelperType& groupStateHelper,
-                                   WellStateType& well_state);
+                                   WellStateType& well_state,
+                                   const std::optional<Scalar> min_node_pressure = std::nullopt);
+
+    /// A BHP-controlled solve at the bhp on the tubing curve at \p thp (its
+    /// minimum there, at least the bhp limit), on scratch copies: that bhp
+    /// and the IPR there if the well flows, nullopt otherwise.
+    std::optional<std::tuple<Scalar, std::vector<Scalar>, std::vector<Scalar>>>
+    trialSolveAtThp(const Simulator& simulator,
+                    const double dt,
+                    const GroupStateHelperType& groupStateHelper,
+                    const WellStateType& well_state,
+                    const Scalar thp);
 
     /// The well's anchor (timestep_initialization.md, section 6.2): the
     /// highest THP it can flow against, and its IPR and operating point there.
