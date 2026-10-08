@@ -167,6 +167,20 @@ FlatNetworkInput<Scalar> extractFlatNetworkInput(const Tree<Scalar>& tree,
                                                  const GuideRate& guideRate,
                                                  const std::unordered_set<std::string>& networkThpWells = {});
 
+/// Restrict a flattened tree (extractFlatNetworkInput()) to the wells named in
+/// \p inside -- e.g. those whose group is a node of one network -- for a solve
+/// that sees only those wells. An Active group all of whose wells are inside
+/// keeps its own equations. One that also controls wells outside cannot have
+/// its target met within this solve: its inside wells tied to its own lambda
+/// are pinned at the rates the balancer gave them (\p tree), and its nested
+/// entries are restricted the same way. Inside wells on their own limits are
+/// kept as they are; everything outside is dropped. Satellite groups count as
+/// inside (they have no network node to be outside of).
+template<class Scalar>
+FlatNetworkInput<Scalar> restrictFlatNetworkInput(const FlatNetworkInput<Scalar>& flat,
+                                                  const Tree<Scalar>& tree,
+                                                  const std::unordered_set<std::string>& inside);
+
 /// Top-level entry point: build tree, balance it, validate, and apply.
 /// All internal functions are implementation details not exposed through this interface.
 ///

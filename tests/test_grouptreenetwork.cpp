@@ -350,6 +350,96 @@ BOOST_AUTO_TEST_CASE(flat_extraction_on_a_pass_through_tree)
     BOOST_CHECK(w3.activeChildren.empty());
 }
 
+// Flattening from below the controlling group -- a network root (here GP1)
+// under the Active PLAT: W1 and W2 are group-controlled from PLAT, outside
+// the flattened tree, but they still flow into it, so each enters pinned at
+// the rate the balancer gave it (a target on its largest phase) instead of
+// being dropped.
+BOOST_AUTO_TEST_CASE(flat_extraction_below_the_controlling_group_pins_its_wells)
+{
+    Opm::Parser parser;
+    const auto deck = parser.parseString(kEmptyDeck);
+    const EclipseState es{deck};
+    const Schedule schedule{deck, es};
+    GuideRate guide_rate{schedule};
+    DeferredLogger logger;
+    const std::vector<std::string> wnames{"W1", "W2", "W3"};
+    const std::array<double, 3> guide{3.0, 2.0, 1.0};
+    for (std::size_t i = 0; i < wnames.size(); ++i) {
+        guide_rate.compute(wnames[i], 0, 0.0, guide[i] / 86400.0, 0.0, 0.0);
+    }
+
+    auto tree = buildTree(/*target=*/3000.0, /*cap=*/{2000.0, 2000.0, 400.0}, guide);
+    BOOST_REQUIRE(ProdGroupTreeBalancer::balanceTreeForTesting(tree, guide_rate, 1e-8, logger));
+    BOOST_REQUIRE(tree.at("W1").modeCategory == ProdNodeModeCategory::Group);
+    BOOST_REQUIRE(tree.at("W2").modeCategory == ProdNodeModeCategory::Group);
+
+    const auto flat = ProdGroupTreeBalancer::extractFlatNetworkInput(tree, std::string("GP1"), guide_rate);
+    logFlat(flat);
+    BOOST_REQUIRE_EQUAL(flat.size(), 2U);
+    for (const auto& e : flat) {
+        BOOST_CHECK(e.type == ProdNodeType::Well);
+        BOOST_CHECK(e.mode == Well::ProducerCMode::ORAT);
+        BOOST_CHECK(e.ownWells.empty());
+        BOOST_CHECK(e.activeChildren.empty());
+        BOOST_CHECK_CLOSE(e.target, -tree.at(e.name).rates[0], 1e-9);
+        BOOST_CHECK(e.target > 0.0);
+    }
+    BOOST_CHECK(flat[0].name != flat[1].name);
+}
+
+// Restricting the flattened tree to one network's wells. A network covering
+// all of PLAT's wells keeps PLAT's equations as they are; one covering only
+// GP1 (W1, W2) cannot meet PLAT's target on its own -- W3 is outside -- so W1
+// and W2 are pinned at their balanced rates and W3 is dropped.
+BOOST_AUTO_TEST_CASE(flat_input_restricted_to_one_networks_wells)
+{
+    Opm::Parser parser;
+    const auto deck = parser.parseString(kEmptyDeck);
+    const EclipseState es{deck};
+    const Schedule schedule{deck, es};
+    GuideRate guide_rate{schedule};
+    DeferredLogger logger;
+    const std::vector<std::string> wnames{"W1", "W2", "W3"};
+    const std::array<double, 3> guide{3.0, 2.0, 1.0};
+    for (std::size_t i = 0; i < wnames.size(); ++i) {
+        guide_rate.compute(wnames[i], 0, 0.0, guide[i] / 86400.0, 0.0, 0.0);
+    }
+    auto tree = buildTree(/*target=*/3000.0, /*cap=*/{2000.0, 2000.0, 400.0}, guide);
+    BOOST_REQUIRE(ProdGroupTreeBalancer::balanceTreeForTesting(tree, guide_rate, 1e-8, logger));
+    const auto flat = ProdGroupTreeBalancer::extractFlatNetworkInput(tree, std::string("FIELD"), guide_rate);
+
+    // All wells inside: unchanged.
+    const auto all = ProdGroupTreeBalancer::restrictFlatNetworkInput(flat, tree, {"W1", "W2", "W3"});
+    BOOST_REQUIRE_EQUAL(all.size(), flat.size());
+    bool has_plat = false;
+    for (const auto& e : all) {
+        if (e.name == "PLAT") {
+            has_plat = true;
+            BOOST_CHECK_EQUAL(e.ownWells.size(), 2U);
+            BOOST_CHECK_EQUAL(e.activeChildren.size(), 1U);
+        }
+    }
+    BOOST_CHECK(has_plat);
+
+    // Only GP1's wells inside: PLAT's target cannot be met here.
+    const auto part = ProdGroupTreeBalancer::restrictFlatNetworkInput(flat, tree, {"W1", "W2"});
+    logFlat(part);
+    BOOST_REQUIRE_EQUAL(part.size(), 2U);
+    for (const auto& e : part) {
+        BOOST_CHECK(e.name == "W1" || e.name == "W2");
+        BOOST_CHECK(e.type == ProdNodeType::Well);
+        BOOST_CHECK(e.mode == Well::ProducerCMode::ORAT);
+        BOOST_CHECK_CLOSE(e.target, -tree.at(e.name).rates[0], 1e-9);
+    }
+
+    // Only W3 inside: it is on its own limit, kept as it is.
+    const auto w3 = ProdGroupTreeBalancer::restrictFlatNetworkInput(flat, tree, {"W3"});
+    BOOST_REQUIRE_EQUAL(w3.size(), 1U);
+    BOOST_CHECK_EQUAL(w3.front().name, "W3");
+    BOOST_CHECK_CLOSE(w3.front().target * 86400.0, 400.0, 1e-6);
+}
+
 // The case Part 1's first draft got wrong: GP1 has its own tighter limit, so
 // it is Individual too, nested inside PLAT's. PLAT's own sum must still
 // account for GP1's production even though W1/W2 now answer to GP1's lambda,

@@ -2362,6 +2362,34 @@ namespace {
 /// Build the Active-node entry rooted at \p name (already known to be
 /// ProdNodeModeCategory::Individual) and append it, and every nested Active
 /// node found beneath it, to \p out.
+/// A well whose rate the flattened tree cannot tie to anything it contains:
+/// group-controlled from an Active group above the flattening's root (another
+/// tree's business, e.g. FIELD above a network root), or left uncategorized.
+/// It still flows, so it enters pinned at the rate the balancer gave it --
+/// expressed as a target on its largest phase, which the network turns into
+/// rates along the well's own IPR.
+template<class Scalar>
+FlatActiveNode<Scalar> pinnedAtBalancedRate(const ProdGroupTreeNode<Scalar>& node)
+{
+    FlatActiveNode<Scalar> entry;
+    entry.name = node.name;
+    entry.type = ProdNodeType::Well;
+    entry.resvCoeff = node.resvCoeff;
+    // node.rates: negative = production, [oil, water, gas].
+    constexpr std::array<Well::ProducerCMode, 3> modes{Well::ProducerCMode::ORAT,
+                                                       Well::ProducerCMode::WRAT,
+                                                       Well::ProducerCMode::GRAT};
+    int largest = 0;
+    for (int c = 1; c < 3; ++c) {
+        if (-node.rates[c] > -node.rates[largest]) {
+            largest = c;
+        }
+    }
+    entry.mode = modes[largest];
+    entry.target = std::max(-node.rates[largest], Scalar(0));
+    return entry;
+}
+
 template<class Scalar>
 void collectActiveNode(const Tree<Scalar>& tree, const std::string& name,
                        const GuideRate& guideRate,
@@ -2442,6 +2470,12 @@ void collectActiveNode(const Tree<Scalar>& tree, const std::string& name,
                 const Scalar eff = accumulatedEfficiency(tree, childName, name);
                 const Scalar gr = getGuideRateForMode(childName, child.initialRates, ctrlMode, guideRate);
                 entry.ownWells.push_back({childName, gr, eff});
+            } else {
+                // Not tied to this node's lambda, but it flows: counted in
+                // this node's sum at the rate the balancer gave it.
+                const Scalar eff = accumulatedEfficiency(tree, childName, name);
+                entry.activeChildren.push_back({childName, eff});
+                out.push_back(pinnedAtBalancedRate(child));
             }
             return;
         }
@@ -2469,9 +2503,9 @@ FlatNetworkInput<Scalar> extractFlatNetworkInput(const Tree<Scalar>& tree,
     // is found. Each one found becomes a root of the flattened output (its
     // nearest Active ancestor, if any, is above rootName and not this
     // function's concern). A Group-category well with nothing above it
-    // binding has nothing to be tied to and nothing to report here either --
-    // it is the caller's job to have already scoped rootName to somewhere
-    // this cannot arise for wells it cares about.
+    // binding within rootName (its controlling group is above rootName, e.g.
+    // FIELD above a network root) enters pinned at its balanced rate: its
+    // rate is decided elsewhere, but it still flows into this tree.
     std::function<void(const std::string&)> findRoots = [&](const std::string& name) {
         if (tree.count(name) == 0) {
             return;
@@ -2482,13 +2516,95 @@ FlatNetworkInput<Scalar> extractFlatNetworkInput(const Tree<Scalar>& tree,
             return;
         }
         if (node.type == ProdNodeType::Well) {
-            return;   // Group-category well with nothing above binding it: nothing to report
+            // Group-controlled from above rootName (or uncategorized): its
+            // rate is decided outside this tree, but it flows into it.
+            out.push_back(pinnedAtBalancedRate(node));
+            return;
         }
         for (const auto& childName : node.children) {
             findRoots(childName);
         }
     };
     findRoots(rootName);
+    return out;
+}
+
+template<class Scalar>
+FlatNetworkInput<Scalar> restrictFlatNetworkInput(const FlatNetworkInput<Scalar>& flat,
+                                                  const Tree<Scalar>& tree,
+                                                  const std::unordered_set<std::string>& inside)
+{
+    std::unordered_map<std::string, const FlatActiveNode<Scalar>*> byName;
+    std::unordered_set<std::string> referenced;
+    for (const auto& e : flat) {
+        byName[e.name] = &e;
+        for (const auto& c : e.activeChildren) {
+            referenced.insert(c.name);
+        }
+    }
+
+    // Whether every well an entry's equations involve is inside.
+    std::unordered_map<std::string, bool> memo;
+    std::function<bool(const std::string&)> fullyInside = [&](const std::string& name) -> bool {
+        if (const auto it = memo.find(name); it != memo.end()) {
+            return it->second;
+        }
+        const auto& e = *byName.at(name);
+        bool all = true;
+        if (e.satelliteRates.has_value()) {
+            all = true;
+        } else if (e.type == ProdNodeType::Well) {
+            all = inside.count(e.name) > 0;
+        } else {
+            for (const auto& w : e.ownWells) {
+                all = all && inside.count(w.name) > 0;
+            }
+            for (const auto& c : e.activeChildren) {
+                all = fullyInside(c.name) && all;
+            }
+        }
+        memo[name] = all;
+        return all;
+    };
+
+    FlatNetworkInput<Scalar> out;
+    std::unordered_set<std::string> emitted;
+    auto push = [&](FlatActiveNode<Scalar> e) {
+        if (emitted.insert(e.name).second) {
+            out.push_back(std::move(e));
+        }
+    };
+    // An entry kept with its equations: it and everything it references.
+    std::function<void(const std::string&)> keep = [&](const std::string& name) {
+        const auto& e = *byName.at(name);
+        push(e);
+        for (const auto& c : e.activeChildren) {
+            keep(c.name);
+        }
+    };
+    std::function<void(const std::string&)> restrict = [&](const std::string& name) {
+        const auto& e = *byName.at(name);
+        if (fullyInside(name)) {
+            keep(name);
+            return;
+        }
+        if (e.type == ProdNodeType::Well || e.satelliteRates.has_value()) {
+            return;   // a well outside
+        }
+        for (const auto& w : e.ownWells) {
+            if (inside.count(w.name) > 0 && tree.count(w.name) > 0) {
+                push(pinnedAtBalancedRate(tree.at(w.name)));
+            }
+        }
+        for (const auto& c : e.activeChildren) {
+            restrict(c.name);
+        }
+    };
+    for (const auto& e : flat) {
+        if (referenced.count(e.name) == 0) {
+            restrict(e.name);
+        }
+    }
     return out;
 }
 
@@ -2505,6 +2621,9 @@ template bool balanceTreeForTesting<double>(
 template FlatNetworkInput<double> extractFlatNetworkInput<double>(
     const Tree<double>&, const std::string&, const GuideRate&,
     const std::unordered_set<std::string>&);
+
+template FlatNetworkInput<double> restrictFlatNetworkInput<double>(
+    const FlatNetworkInput<double>&, const Tree<double>&, const std::unordered_set<std::string>&);
 
 template bool runGroupTreeBalancer<double, BlackOilDefaultFluidSystemIndices>(
     BlackoilWellModelGeneric<double, BlackOilDefaultFluidSystemIndices>&,
@@ -2543,6 +2662,9 @@ template bool applyTreeToState<float, BlackOilDefaultFluidSystemIndices>(
 template FlatNetworkInput<float> extractFlatNetworkInput<float>(
     const Tree<float>&, const std::string&, const GuideRate&,
     const std::unordered_set<std::string>&);
+
+template FlatNetworkInput<float> restrictFlatNetworkInput<float>(
+    const FlatNetworkInput<float>&, const Tree<float>&, const std::unordered_set<std::string>&);
 
 #endif
 

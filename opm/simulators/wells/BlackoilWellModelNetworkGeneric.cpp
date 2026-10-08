@@ -1217,10 +1217,25 @@ solveGroupTree(const Network::ExtNetwork& network,
             networkThpWells.insert(name);
         }
     }
-    const auto flat = ProdGroupTreeBalancer::extractFlatNetworkInput(
-        balancedTree, root.name(), well_model_.guideRate(), networkThpWells);
+    // The network's wells are those of its nodes that are groups (its leaf
+    // nodes, in practice); its root need not be a group at all, nor its nodes
+    // follow the group tree. So the whole balanced tree is flattened, and then
+    // restricted to these wells: an Active group's equations are kept only if
+    // all its wells are in this network.
+    std::unordered_set<std::string> networkWells;
+    for (const auto& name : order) {
+        if (schedule.hasGroup(name, reportStepIdx)) {
+            for (const auto& w : schedule.getGroup(name, reportStepIdx).wells()) {
+                networkWells.insert(w);
+            }
+        }
+    }
+    const auto flat = ProdGroupTreeBalancer::restrictFlatNetworkInput(
+        ProdGroupTreeBalancer::extractFlatNetworkInput(balancedTree, std::string("FIELD"),
+                                                       well_model_.guideRate(), networkThpWells),
+        balancedTree, networkWells);
     if (flat.empty()) {
-        return giveUp(fmt::format("nothing under {} is Active in the balanced tree", root.name()));
+        return giveUp(fmt::format("none of the wells under {} is in the balanced tree", root.name()));
     }
 
     // Resolve each well's own network node (Well::groupName(), the same
