@@ -509,6 +509,8 @@ protected:
     // DEBUG: the last converged group-tree solve's node flows and well rates.
     mutable std::map<std::string, std::array<Scalar, 3>> group_tree_debug_node_flows_;
     mutable std::map<std::string, std::array<Scalar, 3>> group_tree_debug_well_rates_;
+    // DEBUG: (network root, report step) pairs already described.
+    mutable std::set<std::pair<std::string, int>> group_tree_debug_logged_;
     /// Last production solve per tree root: the inputs it was built from and
     /// what it gave. Inside a network sub-loop the wells are frozen, so the
     /// same inputs come back sub-iteration after sub-iteration.

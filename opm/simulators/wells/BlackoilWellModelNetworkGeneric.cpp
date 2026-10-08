@@ -1333,6 +1333,82 @@ solveGroupTree(const Network::ExtNetwork& network,
             ++num_candidates;
         }
     }
+    // DEBUG: once per network root and report step, how the wells under this
+    // network's leaf groups end up (or do not end up) in the solve.
+    if (group_tree_debug_logged_.insert({root.name(), reportStepIdx}).second) {
+        const auto kindName = [](const auto kind) {
+            switch (kind) {
+            case Sys::WellKind::Pinned: return "pinned";
+            case Sys::WellKind::Group: return "group";
+            case Sys::WellKind::Thp: return "thp";
+            }
+            return "?";
+        };
+        const auto catName = [](const ProdNodeModeCategory c) {
+            switch (c) {
+            case ProdNodeModeCategory::Group: return "Group";
+            case ProdNodeModeCategory::Individual: return "Individual";
+            case ProdNodeModeCategory::None: return "None";
+            case ProdNodeModeCategory::Transparent: return "Transparent";
+            }
+            return "?";
+        };
+        log(fmt::format("GroupTreeDebug root {} step {}: {} network nodes, {} flat entries, {} wells in the solve",
+                        root.name(), reportStepIdx, order.size(), flat.size(), system.numWells()));
+        for (std::size_t n = 0; n < order.size(); ++n) {
+            std::string wells;
+            const bool is_group = schedule.hasGroup(order[n], reportStepIdx);
+            if (is_group) {
+                for (const auto& w : schedule.getGroup(order[n], reportStepIdx).wells()) {
+                    wells += " " + w;
+                }
+            }
+            log(fmt::format("GroupTreeDebug   node {} {} ({}; leaf {}){}{}", n, order[n],
+                            is_group ? "group" : "not a group",
+                            network.downtree_branches(order[n]).empty() ? "yes" : "no",
+                            wells.empty() ? "" : "; wells:", wells));
+        }
+        for (const auto& e : flat) {
+            std::string own, children;
+            for (const auto& w : e.ownWells) { own += " " + w.name; }
+            for (const auto& c : e.activeChildren) { children += " " + c.name; }
+            log(fmt::format("GroupTreeDebug   flat {} ({}, mode {}, target {:.5g}){}{}{}{}{}", e.name,
+                            e.type == ProdNodeType::Well ? "well" : "group",
+                            static_cast<int>(e.mode),
+                            e.target * unit::day,
+                            own.empty() ? "" : "; own:", own, children.empty() ? "" : "; children:", children,
+                            e.satelliteRates.has_value() ? "; satellite" : ""));
+        }
+        std::set<std::string> in_solve;
+        for (const auto& w : system.wells()) {
+            in_solve.insert(w.name);
+            log(fmt::format("GroupTreeDebug   solve well {}: {}, node {}{}", w.name, kindName(w.kind), w.node,
+                            w.reopen_candidate ? ", candidate" : ""));
+        }
+        for (std::size_t n = 1; n < order.size(); ++n) {
+            if (!schedule.hasGroup(order[n], reportStepIdx)) {
+                continue;
+            }
+            for (const auto& w : schedule.getGroup(order[n], reportStepIdx).wells()) {
+                if (in_solve.count(w) > 0) {
+                    continue;
+                }
+                const auto t = balancedTree.find(w);
+                const auto d = wellNetworkData.find(w);
+                log(fmt::format("GroupTreeDebug   NOT in solve: {} at node {}: balanced tree {}, gather {}",
+                                w, order[n],
+                                t == balancedTree.end() ? std::string("absent")
+                                    : fmt::format("{} (parent {}, rate O/W/G {:.4g}/{:.4g}/{:.4g})",
+                                                  catName(t->second.modeCategory), t->second.parent,
+                                                  -t->second.rates[0] * unit::day, -t->second.rates[1] * unit::day,
+                                                  -t->second.rates[2] * unit::day),
+                                d == wellNetworkData.end() ? std::string("absent")
+                                    : fmt::format("has_ipr {}, stopped {}, trial {}", d->second.has_ipr,
+                                                  d->second.stopped, d->second.has_trial_ipr)));
+            }
+        }
+    }
+
     // Below a node table's first FLO value the fractions of its flow at the
     // previous converged solve apply; nodes without one get their wells'
     // reference fractions in finalize().
