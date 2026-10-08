@@ -965,8 +965,13 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
         }
         Scalar* e = &shared[i * kEntries];
         e[0] = Scalar{1};
-        if (static_cast<int>(ws.implicit_ipr_b.size()) >= pu.numActivePhases()
-            && ws.implicit_ipr_b[pos[Sys::kOil]] > Scalar{0}) {
+        // A usable IPR: some phase's rate responds to bhp -- not necessarily
+        // oil (a gas well has none).
+        const auto responds = [&pos, &pu](const std::vector<Scalar>& b) {
+            return static_cast<int>(b.size()) >= pu.numActivePhases()
+                && std::any_of(pos.begin(), pos.end(), [&b](const int p) { return b[p] > Scalar{0}; });
+        };
+        if (responds(ws.implicit_ipr_b)) {
             e[1] = Scalar{1};
             for (int ph = 0; ph < Sys::NP; ++ph) {
                 // ws holds q = b*bhp - a in opm's signed rates (production
@@ -991,8 +996,7 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
         }
         if (ws.status == WellStatus::OPEN && it->second->wellIsStopped()) {
             e[10] = Scalar{1};
-            if (static_cast<int>(ws.stopped_ipr_b.size()) >= pu.numActivePhases()
-                && ws.stopped_ipr_b[pos[Sys::kOil]] > Scalar{0}) {
+            if (responds(ws.stopped_ipr_b)) {
                 e[11] = Scalar{1};
                 for (int ph = 0; ph < Sys::NP; ++ph) {
                     e[12 + ph] = ws.stopped_ipr_a[pos[ph]];

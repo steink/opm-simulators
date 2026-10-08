@@ -1370,8 +1370,14 @@ public:
             if (well.kind == WellKind::Thp) {
                 bhp[w] = x[thpBhpIdx(w)];
             } else {
+                // From the phase whose rate responds most to bhp (not oil
+                // as such: a gas well has none).
                 const auto qw = wellPhaseRatesOwn(w, x);
-                bhp[w] = (well.ipr_b[kOil] != Scalar{0}) ? (qw[kOil] - well.ipr_a[kOil]) / well.ipr_b[kOil] : Scalar{0};
+                int p = 0;
+                for (int k = 1; k < NP; ++k) {
+                    if (std::abs(well.ipr_b[k]) > std::abs(well.ipr_b[p])) { p = k; }
+                }
+                bhp[w] = (well.ipr_b[p] != Scalar{0}) ? (qw[p] - well.ipr_a[p]) / well.ipr_b[p] : Scalar{0};
             }
         }
         return bhp;
