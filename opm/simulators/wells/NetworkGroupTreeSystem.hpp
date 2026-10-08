@@ -131,10 +131,11 @@ public:
         // see reopenOutcomes(). Never ranked by worstCliffViolation(): a
         // candidate on the flattened curve is simply not reopened.
         bool reopen_candidate = false;
-        // Reopen candidates only: where its trial IPR was taken (0 if unknown).
-        // The candidate starts there rather than at bhp_shutin: for a tubing
-        // curve with a minimum, the curve at zero rate needs more than the
-        // shut-in bhp, so a start at the cap would never leave it.
+        // Thp wells: where it starts in the solve (0 if unknown) -- a flowing
+        // well's current bhp, a reopen candidate's trial-IPR bhp. A candidate
+        // starts there rather than at bhp_shutin: for a tubing curve with a
+        // minimum, the curve at zero rate needs more than the shut-in bhp, so
+        // a start at the cap would never leave it.
         Scalar start_bhp = 0;
 
         // Set by applyPhaseShare(): the water and gas fractions (the table's
@@ -341,6 +342,9 @@ public:
         // See Well::explicit_fractions, Well::reference_q.
         std::array<Scalar, 2> explicit_fractions{};
         std::array<Scalar, NP> reference_q{};
+        // The well's current bhp, if it flows (0 otherwise): where a Thp
+        // well starts (Well::start_bhp).
+        Scalar bhp = 0;
     };
 
     /// Add a stopped well as a reopen candidate (Well::reopen_candidate): a Thp
@@ -473,6 +477,7 @@ public:
             well.ipr_b = wd.ipr_b;
             well.explicit_fractions = wd.explicit_fractions;
             well.reference_q = wd.reference_q;
+            well.start_bhp = wd.bhp;
             if (wd.phase_share.has_value()) {
                 applyPhaseShare(well, *wd.phase_share);
             }
@@ -804,14 +809,14 @@ public:
         }
         for (int w = 0; w < numWells(); ++w) {
             if (wells_[w].kind == WellKind::Thp) {
-                // A reopen candidate starts where its trial IPR was taken (on
-                // the flowing side of a tubing curve with a minimum), or at
-                // shut-in (rate 0) if that is not known.
+                // A flowing well starts at its current bhp, a reopen candidate
+                // where its trial IPR was taken (on the flowing side of a
+                // tubing curve with a minimum). Without either: a candidate at
+                // shut-in (rate 0); a flowing well at the node pressure guess,
+                // as before (a low bhp, a high rate).
                 const auto& well = wells_[w];
-                x[thpBhpIdx(w)] = !well.reopen_candidate
-                    ? node_pressure_guess[well.node - 1]
-                    : (well.start_bhp > Scalar{0} ? std::min(well.start_bhp, well.bhp_shutin)
-                                                  : well.bhp_shutin);
+                x[thpBhpIdx(w)] = well.start_bhp > Scalar{0} ? std::min(well.start_bhp, well.bhp_shutin)
+                    : (well.reopen_candidate ? well.bhp_shutin : node_pressure_guess[well.node - 1]);
             }
         }
         return x;

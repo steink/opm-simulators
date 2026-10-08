@@ -945,8 +945,8 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
     // scaling, has a network-sourced (dynamic) thp limit, stopped, usable trial
     // ipr, three trial ipr_a, three trial ipr_b, tubing-table datum correction,
     // bhp the trial ipr was taken at, phase shares (set, three shares), three
-    // reference rates, explicit WFR and GFR.
-    constexpr int kEntries = 29;
+    // reference rates, explicit WFR and GFR, current bhp.
+    constexpr int kEntries = 30;
     std::vector<Scalar> shared(candidates.size() * kEntries, Scalar{0});
     for (std::size_t i = 0; i < candidates.size(); ++i) {
         const auto it = local.find(candidates[i].name);
@@ -982,6 +982,11 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
             }
         }
         e[8] = ws.efficiency_scaling_factor;
+        // Where a flowing THP well starts in the network solve: its own
+        // current solution, consistent with the IPR the solve uses.
+        if (!it->second->wellIsStopped()) {
+            e[29] = ws.bhp;
+        }
         // Individual + THP is the only case this ever matters for (see
         // extractFlatNetworkInput()'s own doc comment on networkThpWells);
         // harmless to compute unconditionally for every well.
@@ -1114,6 +1119,7 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
             data.reference_q[ph] = e[24 + ph];
         }
         data.explicit_fractions = {e[27], e[28]};
+        data.bhp = e[29];
         result.emplace(candidates[i].name, std::move(data));
     }
     return result;
