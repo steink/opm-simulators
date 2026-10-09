@@ -102,6 +102,7 @@ configureSolvers(DeferredLogger& deferred_logger)
     this->useNewtonSolver(solver_mode == "newton");
     this->useGroupTreeSolver(solver_mode == "group-tree");
     this->useAnalyticJacobian(well_model_.param().network_analytic_jacobian_);
+    this->useBranchFlattening(well_model_.param().group_tree_branch_flattening_);
     this->useNetworkGroupControl(well_model_.param().network_group_control_);
     this->useNetworkAutochoke(well_model_.param().network_autochoke_);
     this->useNetworkComplementarity(well_model_.param().network_complementarity_);

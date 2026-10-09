@@ -318,6 +318,68 @@ oscillation is left. It plugs into the same places as Step 4.
   split into reviewable PRs (slope-limited VFP lookup; `GroupTreeSystem` with
   analytic Jacobian; C1; the A/B workflow).
 
+### Network convergence (group-tree solve)
+
+Findings from the small decks (model5 STDW/MSW, FLOW-CGC). Model5 timestep
+counts change a lot after small changes, so single runs are indications only.
+
+- **Causes of the failures** (model5 STDW, mostly around C-1H):
+  - the first Newton step overshoots into a zero-flow state;
+  - a Thp well bounces across the edge between the flattened and the real
+    part of its tubing curve, so Newton never settles near convergence;
+  - branch tables fall at low flow (C1: 33.4 bar at zero flow, 29.4 bar at
+    986 m3/d). The network is then non-monotone and can have more than one
+    solution; the result depends on the start and on the Jacobian.
+- **Branch flattening** (`--group-tree-branch-flattening`, default on):
+  - every branch table is looked up with slope limit 0, which gives a unique
+    solution;
+  - if some branch ends on its flattened part, the network is solved again
+    from there with those branches' real tables. This happens on most solves,
+    usually in 2 iterations: real operating points routinely sit on the
+    falling part of branch tables;
+  - if that second solve fails, a `NETWORK_FLATTENED_BRANCH` warning is issued
+    and the relaxed update is used. This happens on model5 STDW (C1, a few
+    report steps). Keeping the flattened solution instead cost timesteps.
+    Still open: whether the real network has no solution there, or Newton
+    cycles at C-1H's kink (a damped step, or moving gradually from the
+    flattened to the real table, could help). The relaxed-update fallback is
+    meant to go eventually.
+  - Default NUPCOL: no change on MSW and FLOW-CGC (FLOW-CGC iteration hold 307
+    → 297 Newton iterations). STDW timestep hold 25 → 24 timesteps, STDW
+    iteration hold 54 → 56 (the warm start below gave 16).
+- **Warm start** (tried, not kept; revisit if needed). Before Newton, a few
+  passes (2 tried) of:
+  1. every Thp well solved on its own row at its node's current pressure: the
+     flattened row increases with bhp, so the root is unique. Found by
+     bisection between its shut-in bhp and a lower bhp, stepping down from the
+     shut-in bhp in doubling steps; a well that cannot flow there sits on its
+     cap.
+  2. all node pressures recomputed top-down from the resulting flows (each
+     node's table at its parent's pressure). The stored node pressures are
+     ignored as guesses.
+
+  Results at default NUPCOL: STDW iteration hold 54 → 16 timesteps, timestep
+  hold 25 → 22, retries 3 → 0; no change on MSW and FLOW-CGC. With branch
+  flattening it changed nothing (the flattened network has one solution, so
+  the start does not matter). It lived in `GroupTreeSystem::start()` (about
+  40 lines).
+- **Also tried, dropped:** sweeping only nodes without a guess (no effect); a
+  dwell before a Thp well may switch between its cap and its row again
+  (worse); a consistent projected Newton step at the cap (stalls, dx = 0); a
+  slope margin of 0.8 or 0.5 for the wells' tubing curves (mixed).
+- **NUPCOL 99** (balancer and network solve in every Newton iteration):
+  FLOW-CGC improves (iteration hold 58 → 47 timesteps). On model5 it exposes
+  open/stop cycling within a timestep: B-1H is stopped at its lift cliff,
+  reopened by the next solve, and so on (1004 times in one run, 35 chops).
+  `--max-well-status-switch-for-wells=2` ends it (FLOW-CGC 26 timesteps, STDW
+  11–17), but costs 7–8% FOPT on model5, as wells stay stopped for the rest of
+  the timestep. It works only indirectly: the well-side reopen counter also
+  blocks the network's reopen.
+- **Postponed (until the single-iteration level is done):** a group-tree
+  reopen limit per well and timestep (count network reopens and cliff stops,
+  hold the well stopped after N), and checking whether the wells it holds
+  could really flow.
+
 ---
 
 ## 3. Open question: the group-tree / network solution procedure in B

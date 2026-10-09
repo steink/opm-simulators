@@ -306,6 +306,7 @@ public:
     /// Assemble the network Jacobian from the VFP table derivatives instead of
     /// differencing the residual.
     void useAnalyticJacobian(const bool on) { analytic_jacobian_ = on; }
+    void useBranchFlattening(const bool on) { branch_flattening_ = on; }
 
     /// Let the network hold the group's total and place the split itself, rather
     /// than taking each group-controlled well's rate as fixed.
@@ -502,6 +503,7 @@ protected:
     bool group_tree_solver_ = false;
     std::optional<ProdGroupTreeBalancer::Tree<Scalar>> balanced_group_tree_;
     bool analytic_jacobian_ = false;
+    bool branch_flattening_ = true;   // group-tree solver: see GroupTreeSystem::setBranchFlattening()
     bool network_group_control_ = false;
     bool network_autochoke_ = false;
     bool network_complementarity_ = false;

@@ -193,6 +193,7 @@ struct GroupTreeMaxInitialSolveFailures { static constexpr int value = 3; };
 struct CloseStoppedWells { static constexpr bool value = false; };
 template<class Scalar>
 struct GroupTreeReopenThpMargin { static constexpr Scalar value = 0.0; };
+struct GroupTreeBranchFlattening { static constexpr bool value = true; };
 template<class Scalar>
 struct LocalToleranceScalingMb { static constexpr Scalar value = 1.0; };
 
@@ -461,6 +462,10 @@ public:
     /// A stopped producer is offered for reopening only if its maximum flowing
     /// THP exceeds its current THP limit (the node pressure) by this much [bar].
     Scalar group_tree_reopen_thp_margin_;
+
+    /// Group-tree network solver: flatten branch tables so their pressure never
+    /// falls with flow, and solve again with the real tables from that solution.
+    bool group_tree_branch_flattening_;
 
     /// Nonlinear solver type: newton or nldd
     std::string nonlinear_solver_;

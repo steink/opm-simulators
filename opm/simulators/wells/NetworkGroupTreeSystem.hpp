@@ -198,6 +198,7 @@ public:
         node_alq_.push_back(alq);
         fixed_pressure_.push_back(std::nullopt);
         node_explicit_fractions_.push_back(std::nullopt);
+        node_flattened_.push_back(false);
         return static_cast<int>(nodes_.size()) - 1;
     }
 
@@ -669,6 +670,56 @@ public:
     /// solve() difference residual(). See jacobian().
     void setAnalyticJacobian(const bool on) { analytic_jacobian_ = on; }
 
+    /// Look up node \p node's branch table flattened so that its pressure
+    /// never falls with flow (slope limit 0), or the table as it is.
+    void setNodeFlattening(const int node, const bool on) { node_flattened_[node] = on; }
+
+    /// setNodeFlattening() for every node with a table and no fixed pressure.
+    /// A branch table on its falling low-flow branch makes the network
+    /// non-monotone (more than one solution); flattened, it is not.
+    void setBranchFlattening(const bool on)
+    {
+        for (int i = 1; i <= numNodes(); ++i) {
+            node_flattened_[i] = on && hasTable(nodes_[i]) && !fixed_pressure_[i].has_value();
+        }
+    }
+
+    /// The flattened nodes whose lookup at \p result's converged flows and
+    /// pressures is not on the real table: there the solution is one of the
+    /// flattened network, not of the real one.
+    std::vector<int> flattenedNodes(const Result<Scalar>& result) const
+    {
+        std::vector<int> out;
+        const auto flows = nodeFlowsFromWellRates(result.well_phase_rates);
+        for (int i = 1; i <= numNodes(); ++i) {
+            if (!node_flattened_[i]) {
+                continue;
+            }
+            const auto& q = flows[i];
+            const auto f = nodeFractions(i);
+            const auto limited = props_->bhp_with_slope_limit(nodes_[i].vfp_table, -q[kWater], -q[kOil],
+                                                              -q[kGas], result.node_pressure[nodes_[i].parent],
+                                                              node_alq_[i], f.wfr, f.gfr, f.fixed, Scalar{0});
+            if (limited.limit != detail::SlopeLimit::Unflattened) {
+                out.push_back(i);
+            }
+        }
+        return out;
+    }
+
+    /// Start every Thp well at its bhp in \p result (a converged solve of
+    /// this system).
+    void setStartFromResult(const Result<Scalar>& result)
+    {
+        for (std::size_t w = 0; w < wells_.size(); ++w) {
+            if (wells_[w].kind == WellKind::Thp) {
+                wells_[w].start_bhp = result.well_bhp[w];
+            }
+        }
+    }
+
+    const Node& node(const int i) const { return nodes_[i]; }
+
     int numNodes() const { return static_cast<int>(nodes_.size()) - 1; }   // excludes the terminal
     int numActiveNodes() const { return static_cast<int>(activeNodes_.size()); }
     /// Active nodes that actually got a lambda unknown -- see finalize().
@@ -891,9 +942,7 @@ public:
                 continue;
             }
             const Scalar upstream = (nodes_[i].parent == 0) ? terminal_pressure_ : x[pIdx(nodes_[i].parent)];
-            const Scalar computed = hasTable(nodes_[i])
-                ? tableBhp(nodes_[i].vfp_table, upstream, q[i], node_alq_[i], nodeFractions(i))
-                : upstream;
+            const Scalar computed = hasTable(nodes_[i]) ? nodeTableBhp(i, upstream, q[i]) : upstream;
             r[pIdx(i)] = (x[pIdx(i)] - computed) / unit::barsa;
         }
 
@@ -989,7 +1038,7 @@ public:
             if (hasTable(nodes_[i])) {
                 const Scalar upstream = (parent == 0) ? terminal_pressure_ : x[pIdx(parent)];
                 const auto t = tableLookup(nodes_[i].vfp_table, upstream, q[i], node_alq_[i],
-                                           std::nullopt, nodeFractions(i));
+                                           nodeSlopeLimit(i), nodeFractions(i));
                 if (parent != 0) {
                     J(row, pIdx(parent)) -= t.dthp / bar;
                 }
@@ -1181,9 +1230,7 @@ public:
             const Scalar upstream = (nodes_[node].parent == 0) ? terminal_pressure_
                                                                : x[pIdx(nodes_[node].parent)];
             const Scalar computed = fixed_pressure_[node].has_value() ? *fixed_pressure_[node]
-                : (hasTable(nodes_[node]) ? tableBhp(nodes_[node].vfp_table, upstream, flows[node],
-                                                     node_alq_[node], nodeFractions(node))
-                                          : upstream);
+                : (hasTable(nodes_[node]) ? nodeTableBhp(node, upstream, flows[node]) : upstream);
             return fmt::format("  node {}: r {:.3e}, p {:.3f}, needed {:.3f} (upstream {:.3f}{}), "
                                "O/W/G {:.1f}/{:.1f}/{:.1f} m3/d",
                                nodes_[node].name, r[i], x[i] / unit::barsa, computed / unit::barsa,
@@ -1540,6 +1587,23 @@ private:
     }
     bool hasTable(const Node& n) const { return n.vfp_table != NoTable; }
 
+    /// Node \p i's table at (upstream, q), flattened if setNodeFlattening().
+    Scalar nodeTableBhp(const int i, const Scalar upstream, const std::array<Scalar, NP>& q) const
+    {
+        if (!node_flattened_[i]) {
+            return tableBhp(nodes_[i].vfp_table, upstream, q, node_alq_[i], nodeFractions(i));
+        }
+        const auto f = nodeFractions(i);
+        return props_->bhp_with_slope_limit(nodes_[i].vfp_table, -q[kWater], -q[kOil], -q[kGas],
+                                            upstream, node_alq_[i], f.wfr, f.gfr, f.fixed, Scalar{0})
+            .evaluation.value;
+    }
+
+    std::optional<Scalar> nodeSlopeLimit(const int i) const
+    {
+        return node_flattened_[i] ? std::optional<Scalar>{Scalar{0}} : std::nullopt;
+    }
+
     Scalar tableBhp(const int table, const Scalar thp, const std::array<Scalar, NP>& q, const Scalar alq,
                     const LookupFractions& f) const
     {
@@ -1624,6 +1688,7 @@ private:
     const VFPProdProperties<Scalar>* props_;
     std::vector<Node> nodes_{Node{}};   // index 0: the terminal (parent == -1)
     std::vector<Scalar> node_alq_{Scalar{0}};   // parallel to nodes_; see addNode()
+    std::vector<bool> node_flattened_{false};   // parallel to nodes_; see setNodeFlattening()
     std::vector<std::optional<std::array<Scalar, 2>>> node_explicit_fractions_{std::nullopt};   // see setNodeExplicitFractions()
     std::vector<std::optional<Scalar>> fixed_pressure_{std::nullopt};   // parallel to nodes_; see setFixedPressure()
     std::vector<Well> wells_;

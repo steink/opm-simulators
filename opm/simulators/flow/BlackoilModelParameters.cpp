@@ -145,6 +145,7 @@ BlackoilModelParameters<Scalar>::BlackoilModelParameters()
     group_tree_max_initial_solve_failures_ = Parameters::Get<Parameters::GroupTreeMaxInitialSolveFailures>();
     close_stopped_wells_ = Parameters::Get<Parameters::CloseStoppedWells>();
     group_tree_reopen_thp_margin_ = Parameters::Get<Parameters::GroupTreeReopenThpMargin<Scalar>>();
+    group_tree_branch_flattening_ = Parameters::Get<Parameters::GroupTreeBranchFlattening>();
 }
 
 template<class Scalar>
@@ -424,6 +425,10 @@ void BlackoilModelParameters<Scalar>::registerParameters()
         ("A stopped producer is offered to the group-tree network solve for reopening only if its "
          "maximum flowing THP exceeds its current THP limit (the node pressure) by this margin "
          "[bar]");
+    Parameters::Register<Parameters::GroupTreeBranchFlattening>
+        ("Group-tree network solver: solve with branch tables flattened so that a branch's "
+         "pressure drop never falls with flow (a unique network solution), then, if some branch "
+         "ended on its flattened part, solve again with the real tables from that solution");
     // if openMP is available, use two threads per mpi rank by default
 #if _OPENMP
     Parameters::SetDefault<Parameters::ThreadsPerProcess>(2);
