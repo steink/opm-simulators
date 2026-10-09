@@ -164,6 +164,14 @@ WellInterfaceGeneric<Scalar, IndexTraits>::perforationData() const
 }
 
 template<typename Scalar, typename IndexTraits>
+bool WellInterfaceGeneric<Scalar, IndexTraits>::
+awaitsFlow(const SingleWellState<Scalar, IndexTraits>& ws) const
+{
+    return this->isProducer() && ws.status == Well::Status::OPEN && !this->wellIsStopped()
+        && std::ranges::all_of(ws.surface_rates, [](const Scalar q) { return q == Scalar{0}; });
+}
+
+template<typename Scalar, typename IndexTraits>
 const std::string&
 WellInterfaceGeneric<Scalar, IndexTraits>::name() const
 {

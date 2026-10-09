@@ -1774,7 +1774,7 @@ namespace Opm {
         // in A3 (groupTreeIprMismatch_()).
         std::unordered_set<std::string> stopped_before;
         for (const auto& well : well_container_) {
-            if (well->wellIsStopped()) {
+            if (well->wellIsStopped() || well->awaitsFlow(this->wellState().well(well->indexOfWell()))) {
                 stopped_before.insert(well->name());
             }
         }

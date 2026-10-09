@@ -33,7 +33,8 @@ one unless the well is:
 
 - a producer (injectors never get one);
 - not SHUT, and stopped -- persistently (`ws.status == STOP`) or, far more
-  often, dynamically (`wellIsStopped()`);
+  often, dynamically (`wellIsStopped()`) -- or open without any rate
+  (`awaitsFlow()`, below);
 - not held stopped for the whole timestep (`isHeldStoppedForTimestep()`: its
   initial solve at the start of the step failed).
 
@@ -172,7 +173,7 @@ that bhp and the IPR there.
 ## 6. Into the network solve
 
 **Gather** (`gatherWellNetworkDataForGroupTree()`): a stopped well
-(`ws.status == OPEN && wellIsStopped()`) has a trial IPR if some phase's
+(`ws.status == OPEN && wellIsStopped()`, or `awaitsFlow()`) has a trial IPR if some phase's
 `stopped_ipr_b` is positive (any phase, not just oil). It carries the trial
 IPR (sign-converted to production positive), `stopped_ipr_bhp`, and phase
 shares (rates per unit of FLO) from `stopped_composition`: the composition the
@@ -181,6 +182,16 @@ anchor's gate and the network solve see the same fluid, whichever point the
 trial IPR comes from. Fallbacks: without a stored composition (no tubing
 table), the rates the trial IPR gives at `stopped_ipr_bhp`; below the table's
 first FLO value, the rates behind its explicit fractions.
+
+**Open wells without any rate** (`WellInterfaceGeneric::awaitsFlow()`): a
+well stopped in one iteration is reopened by its own solve in the next, to try
+again with updated reservoir pressures, and until it has been solved to a
+flowing state it is open with zero rates. The balancer leaves such a well out,
+so the network solve treats it as a stopped well: it gets a trial IPR and is a
+reopen candidate. If it does not flow at the node pressure, it is stopped
+(stop reason Network), and the stop hold applies as for other wells stopped in
+B. Before this, it was in neither the balanced solve nor the candidates
+(FLOW-CGC, PROD2, timestep hold: 47 → 28 timesteps).
 
 **Candidates** (`solveGroupTree()`, only when B offers them -- the first pass
 of its settle loop): every stopped well under this network with a trial IPR,

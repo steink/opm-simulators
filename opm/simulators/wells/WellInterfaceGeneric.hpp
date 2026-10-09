@@ -167,6 +167,12 @@ public:
 
     bool wellIsStopped() const { return this->wellStatus_ == Well::Status::STOP; }
 
+    /// An open producer without any rate: reopened after a stop (to try again
+    /// with updated reservoir pressures) and not yet solved to a flowing
+    /// state. The group-tree workflow treats it as a stopped well: it gets a
+    /// trial IPR and is a reopen candidate in the network solve.
+    bool awaitsFlow(const SingleWellState<Scalar, IndexTraits>& ws) const;
+
     /// Keep a stopped well stopped in its local solves: the group-tree
     /// workflow's network-level stop decision holds for the rest of the global
     /// iteration instead of being undone by the well's own operability check.

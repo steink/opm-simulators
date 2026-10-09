@@ -938,9 +938,10 @@ namespace Opm
         // system, unlike shut): persistently (ws.status) or, far more often,
         // dynamically by the well model (wellIsStopped()) --
         // calculateMinimumBhpFromThp() (called via estimateOperableBhp()
-        // below) also only supports producers.
+        // below) also only supports producers. Or open but without any rate
+        // yet (awaitsFlow()): reopened after a stop, not yet flowing.
         if (!this->isProducer() || ws.status == WellStatus::SHUT
-            || (ws.status != WellStatus::STOP && !this->wellIsStopped())) {
+            || (ws.status != WellStatus::STOP && !this->wellIsStopped() && !this->awaitsFlow(ws))) {
             return;
         }
         // Its initial solve failed: no IPR to offer for the rest of the step.

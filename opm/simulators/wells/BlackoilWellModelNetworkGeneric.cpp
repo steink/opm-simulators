@@ -984,7 +984,7 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
         e[8] = ws.efficiency_scaling_factor;
         // Where a flowing THP well starts in the network solve: its own
         // current solution, consistent with the IPR the solve uses.
-        if (!it->second->wellIsStopped()) {
+        if (!it->second->wellIsStopped() && !it->second->awaitsFlow(ws)) {
             e[29] = ws.bhp;
         }
         // Individual + THP is the only case this ever matters for (see
@@ -993,13 +993,14 @@ gatherWellNetworkDataForGroupTree(const int reportStepIdx) const
         e[9] = it->second->getDynamicThpLimit().has_value() ? Scalar{1} : Scalar{0};
         // Only the well model's own dynamic stop (wellIsStopped() on an OPEN
         // well) makes a reopen candidate: a persistent STOP (deck, economic
-        // limits) is not the network's to undo.
+        // limits) is not the network's to undo. So does an open well without
+        // any rate (awaitsFlow()): the balancer leaves it out.
         // The tubing table's datum is not the well's reference depth: the
         // well's own solve applies this correction (see refreshWellNetworkData()).
         if (const auto dp = well_vfp_dp_.find(candidates[i].name); dp != well_vfp_dp_.end()) {
             e[18] = dp->second;
         }
-        if (ws.status == WellStatus::OPEN && it->second->wellIsStopped()) {
+        if (ws.status == WellStatus::OPEN && (it->second->wellIsStopped() || it->second->awaitsFlow(ws))) {
             e[10] = Scalar{1};
             if (responds(ws.stopped_ipr_b)) {
                 e[11] = Scalar{1};
@@ -1623,6 +1624,12 @@ updateGroupTreeOpenSet(const Network::ExtNetwork& network,
     pos[Sys::kGas]   = pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx);
     for (const auto& outcome : solved->system.reopenOutcomes(solved->result)) {
         if (!outcome.reopens) {
+            // An open well without any rate (awaitsFlow()) that cannot flow
+            // here is stopped, as if it had been stopped all along.
+            if (auto* well = findWell(outcome.name);
+                well != nullptr && well->awaitsFlow(well_model_.wellState()[well->indexOfWell()])) {
+                well->stopWell(WellInterfaceGeneric<Scalar, IndexTraits>::StopReason::Network);
+            }
             if (report) {
                 deferred_logger.debug(fmt::format(
                     "Network: well {} stays stopped under the group-tree balancer at report "
