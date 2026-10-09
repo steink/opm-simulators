@@ -1329,6 +1329,42 @@ public:
         }
         diag_letters_ = set;
 
+        // DEBUG: the Jacobian entries of each Thp well's row and of its
+        // node's row (bar per bar), and the raw step.
+        if (it <= 2 || it >= 41) {
+            const auto Jx = usesAnalyticJacobian() ? jacobian(x) : [&] {
+                DenseMatrix<Scalar> fd(n);
+                for (int j = 0; j < n; ++j) {
+                    const Scalar h = Scalar{1e-2} * columnScale(j);
+                    State shifted = x;
+                    shifted[j] += h;
+                    const auto rj = residual(shifted);
+                    for (int i = 0; i < n; ++i) { fd(i, j) = (rj[i] - r[i]) / h; }
+                }
+                return fd;
+            }();
+            for (int w = 0; w < numWells(); ++w) {
+                if (wells_[w].kind != WellKind::Thp) { continue; }
+                const int k = thpBhpIdx(w);
+                const int p = pIdx(wells_[w].node);
+                const auto qw = wellPhaseRatesOwn(w, x);
+                out.push_back(fmt::format("  J {}: dRw/dbhp {:+.4g}, dRw/dp {:+.4g}, dRn/dbhp {:+.4g}, dRn/dp {:+.4g}; "
+                                          "r_w {:+.4g}, r_n {:+.4g}; raw dbhp {:+.4g}, dp {:+.4g} bar; "
+                                          "q oil {:.4g} m3/d, dT/dq {}",
+                                          wells_[w].name, Jx(k, k) * unit::barsa, Jx(k, p) * unit::barsa,
+                                          Jx(p, k) * unit::barsa, Jx(p, p) * unit::barsa, r[k], r[p],
+                                          dx_raw.empty() ? 0.0 : dx_raw[k] / unit::barsa,
+                                          dx_raw.empty() ? 0.0 : dx_raw[p] / unit::barsa,
+                                          qw[kOil] * unit::day,
+                                          [&] {
+                                              const auto t = tableLookup(wells_[w].vfp_table, x[p], qw, wells_[w].alq,
+                                                                         wells_[w].ipr_slope_limit,
+                                                                         wellFractions(wells_[w], qw));
+                                              return fmt::format("{:.4g}/{:.4g}/{:.4g}", t.dq[kOil], t.dq[kWater], t.dq[kGas]);
+                                          }()));
+            }
+        }
+
         // The analytic Jacobian against a forward difference of the residual,
         // with the same steps NetworkSolve::solve() takes when it differences.
         if (usesAnalyticJacobian()) {

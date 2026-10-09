@@ -335,7 +335,7 @@ solve(Sys& system,
     const int describe_from = max_iterations - kDiagnosticIterations + 1;
     auto describe = [&](const int it, const auto& x_it, const auto& r_it, const auto& dx_raw,
                         const auto& dx_limited, const bool moved) {
-        if (it < describe_from) {
+        if (it < describe_from && it > 2) {   // DEBUG: also the first two, where it started
             return;
         }
         auto lines = system.describeIteration(it, x_it, r_it, dx_raw, dx_limited, moved);
