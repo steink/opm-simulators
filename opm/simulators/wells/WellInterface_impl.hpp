@@ -489,7 +489,9 @@ namespace Opm
             const Scalar bhp = well_state.well(this->index_of_well_).bhp;
             Scalar prod_limit = prod_controls.bhp_limit;
             Scalar inj_limit = inj_controls.bhp_limit;
-            const bool has_thp = this->wellHasTHPConstraints(summary_state);
+            // A solve at a fixed control (solveWellWithBhp()) asks whether the
+            // well flows at that control; its THP limit plays no part there.
+            const bool has_thp = !fixed_control && this->wellHasTHPConstraints(summary_state);
             if (has_thp){
                 std::vector<Scalar> rates(this->num_conservation_quantities_);
                 if (this->isInjector()){

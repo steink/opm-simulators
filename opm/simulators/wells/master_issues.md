@@ -68,3 +68,39 @@ column and a jump in the curve at the knot. Affects nodes whose wells are
 shut in or nearly so. A fix needs fractions for the node, e.g. its wells'
 explicit fractions weighted by their rates or potentials.
 
+## A BHP-controlled solve applies the well's THP limit when reopening
+
+**Found:** on a large model, a stopped producer (A2) was solved at bhps from
+55.75 bar down to its 10 bar bhp limit (group-tree trial IPR), and stayed
+stopped at every one, although it had flowed at 50.5 bar.
+
+**What goes wrong:** `solveWellWithBhp()` solves with a single BHP control
+(`fixed_control = true`, `fixed_status = false`). When the well is stopped
+during that solve, `updateWellControlAndStatusLocalIteration()` reopens it
+only if its (zero-rate) bhp exceeds
+
+    prod_limit = max(calculateMinimumBhpFromThp(...), bhp target)
+
+whenever `wellHasTHPConstraints()` -- the minimum bhp on the tubing curve at
+the well's own THP limit (network THP included). The bhp target then drops
+out: a well whose shut-in pressure lies between the target and that minimum
+bhp can never reopen in a solve at the target, however low it is.
+
+It is made likely by a second effect: the local solve checks the status
+before its first Newton step (`its_since_last_switch` starts at
+`min_its_after_switch`), and a well starting from zero rates (a stopped well's
+state) has `WQTotal = 0` and is stopped at once (`stopWell(NoFlow)`) without
+being solved at all.
+
+**Fix (on the branch):** apply the THP threshold only when the control is not
+fixed: `has_thp = !fixed_control && wellHasTHPConstraints(...)`. Checking
+`prod_controls.hasControl(THP)` instead would not do: in ordinary solves
+`prod_controls` are the deck controls, which do not include a network THP
+limit (`dynamic_thp_limit_`). The only fixed-control solve that can change
+status is `solveWellWithBhp()` (`solveWellWithZeroRate()` also fixes the
+status), so ordinary solves are unchanged. `solveWellWithBhp()` has about ten
+callers (operability checks, `estimateOperableBhp()`, potentials, initial
+solves); those solving at the minimum bhp at the THP limit see no difference,
+the others are now really solved at the bhp they ask for. On the branch the
+group-tree trial solves also start from a producing state
+(`WellInterface::seedTrialRates()`).
