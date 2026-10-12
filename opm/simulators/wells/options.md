@@ -66,7 +66,8 @@ Most apply to `--network-solver=newton` only.
 | `--shut-unsolvable-wells` | `true` | Shuts wells that keep failing to converge. Also gates the shut after `--group-tree-max-initial-solve-failures`. |
 | `--network-pressure-update-damping-factor` | `0.1` | Damping of the fixed-point node pressure update. Group-tree node pressures are handed to the wells undamped (C2). |
 | `--network-max-pressure-update-in-bars` | `5` | Cap on the fixed-point pressure update. |
-| `--network-max-outer-iterations`, `--network-max-sub-iterations` | `3`, `100` | Bounds on the network iterations. In group-tree mode the sub-iterations are the workflow's rounds. |
+| `--network-max-outer-iterations` | `3` | Bound on the network outer iterations per Newton iteration. In group-tree mode these are the workflow's rounds (B, B4, A3): at most this many per Newton iteration, after which the loop stops with the last round's result. Within a round, B's settle loop (rebalance after a cliff stop or a reopen) is capped at 10 passes in the code (`kMaxCliffDiagnosisIters`), with no option. |
+| `--network-max-sub-iterations` | `100` | Bound on the fixed-point network sub-iterations. In group-tree mode it applies only to the injection networks, which still use the fixed point. |
 | `--check-group-constraints-inner-well-iterations` | `true` | Group constraints are checked in the local well solves. The initial solve under group control relies on this. |
 | `--use-implicit-ipr` | `true` | Implicit IPRs, used by the balancer and the network solve. |
 | `--solve-welleq-initially` | `true` | Wells are solved in `prepareTimeStep()`. Also a condition for skipping A1 in the first round. |
