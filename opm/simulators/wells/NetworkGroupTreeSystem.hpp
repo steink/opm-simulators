@@ -1221,7 +1221,33 @@ public:
                                ? fmt::format("{:.4g}/{:.4g}", (*well.fractions)[0], (*well.fractions)[1])
                                : std::string("none"),
                            well.explicit_fractions[0], well.explicit_fractions[1], f.wfr, f.gfr,
-                           f.fixed ? "" : " (below first FLO only)");
+                           f.fixed ? "" : " (below first FLO only)")
+            + tableDiagnostics(well, thp, q, f);   // DEBUG
+    }
+
+    /// DEBUG: where a well's tubing lookup sits on its table -- the table's
+    /// axes, the plain (not slope-limited) value, the FLO, the slope limit and
+    /// the datum correction.
+    std::string tableDiagnostics(const Well& well, const Scalar thp, const std::array<Scalar, NP>& q,
+                                 const auto& f) const
+    {
+        const auto& table = props_->getTable(well.vfp_table);
+        const auto range = [](const auto& axis, const Scalar scale) {
+            return axis.empty() ? std::string("-")
+                                : fmt::format("{:.4g}..{:.4g} ({})", axis.front() / scale, axis.back() / scale,
+                                              axis.size());
+        };
+        const Scalar flo = detail::getFlo(table, q[kWater], q[kOil], q[kGas]);
+        const Scalar plain = tableBhp(well.vfp_table, thp, q, well.alq, f);
+        return fmt::format("\n    table {}: plain {:.3f} bar, FLO {:.4g} m3/d, slope limit {}, datum "
+                           "correction {:.3f} bar; axes FLO {} m3/d, THP {} bar, WFR {}, GFR {}, ALQ {}",
+                           well.vfp_table, (plain - well.vfp_dp) / unit::barsa, flo * unit::day,
+                           well.ipr_slope_limit.has_value()
+                               ? fmt::format("{:.4g} bar/(m3/d)", *well.ipr_slope_limit / unit::barsa / unit::day)
+                               : std::string("none"),
+                           well.vfp_dp / unit::barsa, range(table.getFloAxis(), Scalar{1} / unit::day),
+                           range(table.getTHPAxis(), unit::barsa), range(table.getWFRAxis(), Scalar{1}),
+                           range(table.getGFRAxis(), Scalar{1}), range(table.getALQAxis(), Scalar{1}));
     }
 
     std::string describeRow(const int i, const State& x, const State& r,
