@@ -775,7 +775,9 @@ public:
         const auto& table = props_->getTable(well.vfp_table);
         const Scalar dflo_dbhp = detail::getFlo(table, well.ipr_b[kWater],
                                                 well.ipr_b[kOil], well.ipr_b[kGas]);
-        if (dflo_dbhp == Scalar{0}) {
+        // Not falling with bhp: no producer IPR to limit against (an IPR
+        // linearised at shut-in can have the wrong sign).
+        if (!(dflo_dbhp < Scalar{0})) {
             return std::nullopt;
         }
         constexpr Scalar margin = Scalar{0.95};

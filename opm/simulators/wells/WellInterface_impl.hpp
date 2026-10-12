@@ -1008,6 +1008,12 @@ namespace Opm
             const Scalar margin = this->param_.group_tree_reopen_thp_margin_ * unit::barsa;
             const auto useIpr = [&](const std::vector<Scalar>& a, const std::vector<Scalar>& b,
                                     const Scalar bhp, const std::string& where) {
+                if (!this->floIprValid(a, b, bhp, summary_state)) {
+                    deferred_logger.debug(fmt::format("Stopped well {}: IPR at bhp {:.3f} bar {} is not usable "
+                                                      "(FLO not falling with bhp, or not producing)",
+                                                      this->name(), bhp / unit::barsa, where));
+                    return false;
+                }
                 deferred_logger.debug(fmt::format("Stopped well {}: trial IPR at bhp {:.3f} bar {} (max flowing "
                                                   "THP {:.3f} bar{}, THP limit {:.3f} bar)", this->name(),
                                                   bhp / unit::barsa, where, anchor.thp / unit::barsa,
@@ -1021,25 +1027,25 @@ namespace Opm
                 if (anchor.composition.size() == ws.stopped_composition.size()) {
                     ws.stopped_composition = anchor.composition;
                 }
+                return true;
             };
 
             // First the current THP limit (the node pressure in a network),
             // with a margin so that a well right at its lift limit is not
-            // reopened only to stop again. The anchor's IPR is the right one
-            // where the well has a lift cliff (it touches at a positive FLO):
-            // reopened near its node pressure, it runs close to that point.
-            // Touching at zero rate, the touching point is the shut-in point --
-            // never an operating point, and a candidate there would start on
-            // its own cap in the network solve -- so the IPR comes from the
-            // first solve instead, at the THP limit, where it would run.
+            // reopened only to stop again. The IPR of the first solve, on the
+            // tubing curve at the THP limit, is linearised where the well would
+            // run at the current node pressure -- whether it has a lift cliff
+            // or not; the touching point can be far from there, and touching
+            // at zero rate it is the shut-in point, never an operating point.
+            // Without that solve, the anchor's IPR where it has a cliff.
             if (anchor.thp >= thp_limit + margin) {
-                if (anchor.flo > Scalar{0}) {
-                    useIpr(anchor.ipr_a, anchor.ipr_b, anchor.bhp, "at its maximum flowing THP");
+                if (!from_lower && anchor.start == Anchor::Start::GivenThp && anchor.start_flows
+                    && useIpr(anchor.start_ipr_a, anchor.start_ipr_b, anchor.start_bhp,
+                              "from the solve at the THP limit")) {
                     return;
                 }
-                if (!from_lower && anchor.start == Anchor::Start::GivenThp && anchor.start_flows) {
-                    useIpr(anchor.start_ipr_a, anchor.start_ipr_b, anchor.start_bhp,
-                           "from the solve at the THP limit");
+                if (anchor.flo > Scalar{0}
+                    && useIpr(anchor.ipr_a, anchor.ipr_b, anchor.bhp, "at its maximum flowing THP")) {
                     return;
                 }
             }
@@ -1050,8 +1056,8 @@ namespace Opm
             // the network solve decides, with the candidate's own THP row,
             // whether it flows at the pressure the node actually gets. So offer
             // a flowing point below it.
-            if (anchor.flo > Scalar{0}) {
-                useIpr(anchor.ipr_a, anchor.ipr_b, anchor.bhp, "at its maximum flowing THP, below the THP limit");
+            if (anchor.flo > Scalar{0}
+                && useIpr(anchor.ipr_a, anchor.ipr_b, anchor.bhp, "at its maximum flowing THP, below the THP limit")) {
                 return;
             }
             // Touching at zero rate: a flowing point below the maximum flowing
@@ -1059,9 +1065,9 @@ namespace Opm
             // works: the lower start that flowed, else steps down to the bhp
             // limit from the bhp at the lower of the maximum flowing THP and
             // the THP limit.
-            if (from_lower && anchor.start_flows) {
-                useIpr(anchor.start_ipr_a, anchor.start_ipr_b, anchor.start_bhp,
-                       "from a solve below the THP limit");
+            if (from_lower && anchor.start_flows
+                && useIpr(anchor.start_ipr_a, anchor.start_ipr_b, anchor.start_bhp,
+                          "from a solve below the THP limit")) {
                 return;
             }
             const Scalar top = std::min(anchor.thp, thp_limit);
@@ -1069,9 +1075,10 @@ namespace Opm
                                                                           this->getRefDensity(), top),
                                             bhp_limit);
             for (const Scalar bhp : trialBhpSteps(bhp_top, bhp_limit)) {
-                if (const auto trial = this->trialSolveAtBhp(simulator, dt, groupStateHelper, well_state, bhp)) {
-                    useIpr(trial->first, trial->second, bhp,
-                           fmt::format("from a solve at bhp {:.3f} bar", bhp / unit::barsa));
+                const auto trial = this->trialSolveAtBhp(simulator, dt, groupStateHelper, well_state, bhp);
+                if (trial.has_value()
+                    && useIpr(trial->first, trial->second, bhp,
+                              fmt::format("from a solve at bhp {:.3f} bar", bhp / unit::barsa))) {
                     return;
                 }
             }
@@ -1469,10 +1476,27 @@ namespace Opm
                         continue;
                     }
                 }
-                flows_at = std::isnan(flows_at) ? bhp : std::max(flows_at, bhp);
-
                 this->updateIPRImplicit(simulator, groupStateHelper_copy, well_state_copy);
                 const auto& ws = well_state_copy.well(this->index_of_well_);
+                // Flowing, but so close to shut-in that its IPR is degenerate
+                // (a phase with the wrong sign): no use as a linearisation, so
+                // treated like a stop, narrowing the bracket from above.
+                if (!this->floIprValid(ws.implicit_ipr_a, ws.implicit_ipr_b, bhp, summary_state)) {
+                    deferred_logger.debug(fmt::format("Anchor: well {} round {}: IPR at bhp {:.3f} bar is not "
+                                                      "usable (FLO not falling with bhp, or not producing); "
+                                                      "treated as no flow", this->name(), round, bhp / unit::barsa));
+                    stops_at = std::isnan(stops_at) ? bhp : std::min(stops_at, bhp);
+                    if (std::isnan(flows_at)) {
+                        out.status = Anchor::Status::NoFlow;
+                        break;
+                    }
+                    if (stops_at - flows_at < bhp_tol) {
+                        break;
+                    }
+                    bhp = Scalar{0.5} * (flows_at + stops_at);
+                    continue;
+                }
+                flows_at = std::isnan(flows_at) ? bhp : std::max(flows_at, bhp);
                 if (round == 1) {
                     out.start_flows = true;
                     out.start_bhp = bhp;
@@ -1547,19 +1571,17 @@ namespace Opm
                 bhp = next;
             }
 
-            // One more solve for the rates, IPR and THP the well actually has:
-            // at the touching bhp, or, where no flowing solve exists there (the
-            // touching point is at zero rate, or past a bhp already seen not to
-            // flow) or the solve fails, at the highest bhp seen to flow.
+            // One more solve for the rates, IPR and THP the well actually has
+            // at the touching bhp. Only there: the anchor's THP, FLO, bhp and
+            // IPR all describe one point. Where no flowing solve exists there
+            // (past a bhp already seen not to flow), or it fails or its IPR is
+            // not usable, the last valid round's values stand -- its IPR, and
+            // the touching point found from it.
             if (found) {
                 std::vector<Scalar> candidates;
                 const Scalar touching = std::max(out.bhp, bhp_limit);
                 if (std::isnan(stops_at) || touching < stops_at) {
                     candidates.push_back(touching);
-                }
-                if (!std::isnan(flows_at)
-                    && (candidates.empty() || std::abs(flows_at - candidates.front()) > bhp_tol)) {
-                    candidates.push_back(flows_at);
                 }
                 for (const Scalar final_bhp : candidates) {
                     bool converged = false;
@@ -1585,6 +1607,10 @@ namespace Opm
                     }
                     this->updateIPRImplicit(simulator, groupStateHelper_copy, well_state_copy);
                     const auto& ws = well_state_copy.well(this->index_of_well_);
+                    if (!this->floIprValid(ws.implicit_ipr_a, ws.implicit_ipr_b, final_bhp, summary_state)) {
+                        out.final_failure = "IPR not usable";
+                        continue;
+                    }
                     out.final_solved = true;
                     out.final_failure.clear();
                     out.bhp = ws.bhp;

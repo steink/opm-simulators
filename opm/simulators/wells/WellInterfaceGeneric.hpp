@@ -173,6 +173,14 @@ public:
     /// trial IPR and is a reopen candidate in the network solve.
     bool awaitsFlow(const SingleWellState<Scalar, IndexTraits>& ws) const;
 
+    /// Whether the IPR q = ipr_b * bhp - ipr_a (active phases, production
+    /// negative) is a usable producer IPR at \p bhp, measured in the FLO of
+    /// the well's tubing table (all phases without one): FLO falls with bhp
+    /// and is positive (producing) at \p bhp. An IPR linearised close to
+    /// shut-in can have a phase with the wrong sign there.
+    bool floIprValid(const std::vector<Scalar>& ipr_a, const std::vector<Scalar>& ipr_b,
+                     const Scalar bhp, const SummaryState& summary_state) const;
+
     /// Keep a stopped well stopped in its local solves: the group-tree
     /// workflow's network-level stop decision holds for the rest of the global
     /// iteration instead of being undone by the well's own operability check.

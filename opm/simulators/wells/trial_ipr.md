@@ -87,8 +87,9 @@ candidate the same composition (section 6).
    - Stopped, or not converged after a flow: treated as a stop; if nothing has
      flowed yet, status *NoFlow*, stop; otherwise bisect the bracket and
      continue (stop when the bracket is narrower than 0.1 bar).
-2. The solve flowed: refresh the implicit IPR and compute the maximum flowing
-   THP for that IPR (`maxFlowingThp()`, below). The THP, touching bhp and
+2. The solve flowed: refresh the implicit IPR. If it is not usable (see
+   *Usable IPR* below) -- a solve barely flowing, close to shut-in -- the round
+   is treated as a stop. Otherwise compute the maximum flowing THP for that IPR (`maxFlowingThp()`, below). The THP, touching bhp and
    touching FLO become the anchor's current values; the first round's IPR is
    kept separately (`start_flows`, `start_bhp`, `start_ipr_a/b`).
 3. Settled if the table says *capped* (flows even at the table's highest THP),
@@ -97,8 +98,21 @@ candidate the same composition (section 6).
    Otherwise the next bhp is the touching bhp (bisected inside the bracket if it
    is past a bhp already seen to stop).
 
-**A final solve** at the touching bhp (or, failing that, at `flows_at`) gives
-the anchor's IPR, rates and the THP the table gives for them.
+**A final solve** at the touching bhp gives the anchor's IPR, rates and the
+THP the table gives for them -- only there, so that the anchor's THP, FLO, bhp
+and IPR describe one point. If the touching bhp is past one already seen not
+to flow, or the solve fails, or its IPR is not usable, the last valid round's
+values stand: its IPR and the touching point found from it. (It used to fall
+back to `flows_at`, the highest bhp seen to flow: next to shut-in, where W14 on
+the large model got an IPR with the gas slope of the wrong sign, reported with
+the maximum flowing THP of an earlier round.)
+
+**Usable IPR** (`WellInterfaceGeneric::floIprValid()`): measured in the FLO of
+the well's tubing table, FLO falls with bhp and is positive at the bhp the IPR
+was taken at. Checked for every anchor round, the final solve and every trial
+IPR before it is stored. Close to shut-in a phase can have the wrong sign
+while the others do not (W14: oil and water fine, gas b < 0), and a gas well's
+FLO is gas alone.
 
 **Status:** *Flows* (found), *Capped* (flows at the table's highest THP; the
 THP is a lower bound), *NoFlow* (cannot flow anywhere in the table's THP range),
@@ -131,9 +145,9 @@ least 5 bar.
 | anchor *NoFlow* at the current pressure | step down from its first bhp: the anchor again from each bhp (`computeAnchor(start_bhp)`) until one flows; its result replaces the first one in the rows below |
 | anchor *NoFlow* (also at the bhp limit) or *SolveFailed* | none |
 | **can flow at the current pressure**: max flowing THP ≥ limit + margin | |
-|   touches at FLO > 0 (lift cliff) | the anchor's IPR, at its touching bhp |
-|   touches at zero rate, and the first solve (at the THP limit) flowed | the first solve's IPR, at its bhp |
-|   touches at zero rate, first solve did not flow | falls through to the next part |
+|   the first solve (at the THP limit) flowed | the first solve's IPR, at its bhp |
+|   otherwise, touches at FLO > 0 (lift cliff) | the anchor's IPR, at its touching bhp |
+|   otherwise | falls through to the next part |
 | **cannot flow at the current pressure** | |
 |   touches at FLO > 0 | the anchor's IPR at its maximum flowing THP (below the limit) |
 |   touches at zero rate, the anchor started from a lower bhp and flowed there | that first solve's IPR, at its bhp |
@@ -160,11 +174,15 @@ bhp was ever really solved (`master_issues.md`).
   against that pressure would keep it stopped for good; the network solve
   decides, with the candidate's own THP row, at the pressure the node actually
   gets.
-- **The anchor's IPR at a cliff, not at zero rate.** With a cliff, a reopened
-  well runs near its lift limit, where the anchor's IPR is linearised. Touching
-  at zero rate, the touching point is the shut-in point: never an operating
-  point, often far off the well's productivity where it would run, and a
-  candidate there starts on its own cap in the network solve (T/C chatter).
+- **The first solve's IPR when it can flow at the current pressure.** That
+  solve is on the tubing curve at the THP limit, so its IPR is linearised where
+  the well would run at the current node pressure. The touching point can be
+  far from there (W14: THP limit 35 bar, maximum flowing THP 72 bar, touching
+  bhp 111 bar against about 43 bar at the THP limit), and touching at zero rate
+  it is the shut-in point, never an operating point (a candidate there starts
+  on its own cap: T/C chatter). The anchor's IPR at a cliff is used only when
+  the first solve did not flow, and below the current pressure, where the
+  touching point is the only flowing point nearby.
 - **No flow at the current pressure is not the end.** With every well under
   a node stopped, the node's pressure is that of zero flow, which a branch
   table falling at low flow makes its highest. If the anchor only tried that
