@@ -5,10 +5,9 @@ the network solve uses it to decide whether the well reopens. State as of the
 working tree after "flowing trial IPR" (on top of 200dcf962).
 
 Code: `WellInterface::updateStoppedWellTrialIpr()`, `computeAnchor()`,
-`trialSolveAtThp()` (`WellInterface_impl.hpp`);
+`lowerTrialBhp()`, `trialSolveAtBhp()` (`WellInterface_impl.hpp`);
 `WellBhpThpCalculator::maxFlowingThp()`, `VFPHelpers::maxFlowingThp()` /
 `liftMargin()`; `BlackoilWellModelNetwork::refreshWellNetworkData()`,
-`BlackoilWellModelNetworkGeneric::lowestNodePressure()`,
 `gatherWellNetworkDataForGroupTree()`, `solveGroupTree()`,
 `updateGroupTreeOpenSet()`; `GroupTreeSystem::addReopenCandidate()`,
 `reopenOutcomes()` (`NetworkGroupTreeSystem.hpp`).
@@ -41,11 +40,6 @@ one unless the well is:
 The well object and the well state are never changed by the trial: all solves
 run on scratch copies, and the well's status, stop reason and operability are
 restored afterwards. Only `stopped_ipr_a/b` and `stopped_ipr_bhp` are written.
-
-The caller also passes the **lowest pressure the well's network node can
-have** (`lowestNodePressure()`): the nearest fixed (terminal) pressure at or
-above the well's group in the production network. Nullopt if the well's group
-is not a network node (no network, or not in it).
 
 ## 3. Without a tubing table
 
@@ -127,28 +121,33 @@ gas wells).
 
 `margin` is `--group-tree-reopen-thp-margin` (bar, default 0), `limit` the
 well's current THP limit (the node pressure in a network, otherwise its deck
-THP limit), `lowest` the node's lowest possible pressure (`limit` without a
-network).
+THP limit). **Stepping down** from a bhp (`trialBhpSteps()`) means trying
+bhps down to the bhp limit in equal steps of max(1 bar, (bhp − bhp limit)/5),
+the last one the bhp limit itself: at most 5 steps when the distance is at
+least 5 bar.
 
 | Case | Trial IPR |
 |---|---|
-| anchor *NoFlow* or *SolveFailed* | none |
+| anchor *NoFlow* at the current pressure | step down from its first bhp: the anchor again from each bhp (`computeAnchor(start_bhp)`) until one flows; its result replaces the first one in the rows below |
+| anchor *NoFlow* (also at the bhp limit) or *SolveFailed* | none |
 | **can flow at the current pressure**: max flowing THP ≥ limit + margin | |
 |   touches at FLO > 0 (lift cliff) | the anchor's IPR, at its touching bhp |
 |   touches at zero rate, and the first solve (at the THP limit) flowed | the first solve's IPR, at its bhp |
 |   touches at zero rate, first solve did not flow | falls through to the next part |
 | **cannot flow at the current pressure** | |
-|   max flowing THP < lowest + margin | none: it cannot flow at any pressure its node can have |
 |   touches at FLO > 0 | the anchor's IPR at its maximum flowing THP (below the limit) |
-|   touches at zero rate | `trialSolveAtThp()` at THPs stepping down from top = min(max flowing THP, limit) towards lowest: top − f·(top − lowest), f = 0.25, 0.5, 1; the first that flows. None flows: none |
+|   touches at zero rate, the anchor started from a lower bhp and flowed there | that first solve's IPR, at its bhp |
+|   touches at zero rate, otherwise | `trialSolveAtBhp()` stepping down from the bhp on the tubing curve at min(max flowing THP, limit); the first that flows. None flows: none |
 
-Without a network `lowest` equals `limit`, so a well that cannot flow at its
-fixed THP limit gets no trial IPR -- as before this change.
+`trialSolveAtBhp(bhp)`: on scratch copies, a BHP-controlled solve at that bhp;
+if it converges with the well flowing, the IPR there.
 
-`trialSolveAtThp(thp)`: on scratch copies, a BHP-controlled solve at
-`max(calculateMinimumBhpAtThp(thp), bhp limit)` (that lookup with explicit
-fractions, as for the anchor's start); if it converges with the well flowing,
-that bhp and the IPR there.
+Every trial solve (the anchor's and `trialSolveAtBhp()`) starts from a
+producing state (`seedTrialRates()`: the last flowing rates, else the
+potentials, else a nominal rate). From zero rates the local solve stopped the
+well before its first step, and a well stopped in a BHP-controlled solve was
+reopened only above the minimum bhp at its THP limit, so no trial below that
+bhp was ever really solved (`master_issues.md`).
 
 ### Why these choices
 
@@ -166,9 +165,19 @@ that bhp and the IPR there.
   at zero rate, the touching point is the shut-in point: never an operating
   point, often far off the well's productivity where it would run, and a
   candidate there starts on its own cap in the network solve (T/C chatter).
-- **`lowest` as the gate.** A node's pressure in a production network is never
-  below the fixed pressure upstream of it; below that, offering the well only
-  costs solves.
+- **No flow at the current pressure is not the end.** With every well under
+  a node stopped, the node's pressure is that of zero flow, which a branch
+  table falling at low flow makes its highest. If the anchor only tried that
+  pressure, none of the wells would ever be a candidate, and the all-stopped
+  state would persist (seen on a large model at the start of a run).
+- **Down to the bhp limit, in steps, not to a lowest node pressure.** In a
+  network with hydrostatic branches, pumps or lift, a node's pressure need not
+  fall going upstream, so the nearest fixed pressure upstream is no floor
+  (seen on the large model: THP limit 50.6 bar, fixed pressure upstream 88
+  bar). The bhp limit is the only real floor. Stepping down to it (in fifths
+  of the distance, at least 1 bar) rather than going straight there keeps the
+  IPR as close to the current state as works; a point far below where the well
+  would run gives a poor IPR. The network solve then decides where it runs.
 
 ## 6. Into the network solve
 
@@ -224,15 +233,16 @@ without them; the candidates then stay stopped this round.
 ## 7. Caveats and open points
 
 - **Explicit fractions** remain only where a stopped well has no rates (the
-  start bhp of the anchor and of `trialSolveAtThp()`) and below a table's first
+  start bhp of the anchor) and below a table's first
   FLO value. Whether they should be the start-of-step rates or those of the
   most recent converged flowing solve is open (`next_steps.md`, Step 5c).
 - **Accuracy of the IPR.** A trial IPR is only as good as the well solve it is
   taken from; strongly nonlinear inflow (A11: gas rate per bar of drawdown
   changing fourfold between 74 and 110 bar) makes any single linearisation
   local, and a loose well-solve tolerance makes it worse.
-- **The descending solves** (zero-rate anchors that cannot flow at the current
-  pressure) were not exercised by the test decks so far.
+- **Stepping down** costs up to 5 more solves per round for a well that cannot
+  flow at all (each failed start ends after one solve). The descending trial solves (zero-rate anchors that
+  cannot flow at the current pressure) were not exercised by the test decks.
 - **Cost.** Every stopped predicting producer gets an anchor (up to 12 solves
   plus a final one) every round, and possibly up to three more solves.
 - **Reopening outside the network.** The wells' own operability checks can
