@@ -281,8 +281,10 @@ pre-step rebalance (a full A/B workflow), and the regular update's A1 and A3.
 Agreed order, with the group-tree workflow active (other modes unchanged):
 
 0. **`beginTimeStep()`, after the potentials and guide rates:** balance the
-   group tree on the wells' potentials and commit its categorization and
-   targets (6.2b). The balancer owns production from here, so the standard
+   group tree on the wells' current rates (the groups' rates are their sums),
+   with the potentials only as each well's pressure limit (their total, along
+   the current rates' fractions), and commit its categorization and targets
+   (6.2b). The balancer owns production from here, so the standard
    group-target update no longer overwrites them.
 1. **`beginTimeStep()`:** the initial solve (6.2, steps 1–3) for wells without
    a valid previous solution, replacing today's event-well solve for them. A

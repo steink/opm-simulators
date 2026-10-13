@@ -208,11 +208,26 @@ namespace Opm
         if (!(total_potential > Scalar(0))) {
             return std::nullopt;
         }
+        // The balancer scales the well's current rates (production negative in
+        // the well state): compare the limits along those, at the pressure
+        // limit's capacity, so that the strictest one binds first.
+        std::vector<Scalar> at_capacity(ws.surface_rates.size());
+        Scalar total_current = Scalar(0);
+        for (std::size_t p = 0; p < at_capacity.size(); ++p) {
+            at_capacity[p] = std::max(-ws.surface_rates[p], Scalar(0));
+            total_current += at_capacity[p];
+        }
+        if (!(total_current > Scalar(0))) {
+            return std::nullopt;
+        }
+        for (auto& q : at_capacity) {
+            q *= total_potential / total_current;
+        }
 
-        // A rate limit binds if the potentials exceed it (scale < 1).
+        // A rate limit binds if the rates at capacity exceed it (scale < 1).
         const auto controls = this->wellEcl().productionControls(summary_state);
         const auto [rate_mode, rate_scale] =
-            this->estimateStrictestProductionRateConstraintFromRates(potentials, controls);
+            this->estimateStrictestProductionRateConstraintFromRates(at_capacity, controls);
         if (rate_mode != Well::ProducerCMode::CMODE_UNDEFINED && rate_scale < Scalar(1)) {
             switch (rate_mode) {
             case Well::ProducerCMode::ORAT: return std::make_pair(rate_mode, Scalar(controls.oil_rate));

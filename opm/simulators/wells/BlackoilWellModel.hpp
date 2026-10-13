@@ -873,13 +873,14 @@ template<class Scalar> class WellContributions;
             std::unordered_map<std::string, std::pair<int, Scalar>>
             prepareWellsForBalancing_(DeferredLogger& deferred_logger);
 
-            /// @brief The balancer's candidates from the wells' potentials
+            /// @brief The balancer's candidates at the start of a timestep
             ///   (WellInterface::estimateStrictestProductionLimitFromPotentials()):
-            ///   every open, predicting producer with positive potentials.
-            /// @return The globally consistent limits map, and the same wells'
-            ///   potentials as their rates (globally consistent too).
-            std::pair<std::unordered_map<std::string, std::pair<int, Scalar>>,
-                      ProdGroupTreeBalancer::WellRateMap<Scalar>>
+            ///   every open, predicting producer with positive potentials and
+            ///   current rates. The potentials give the pressure limit's
+            ///   capacity only; the tree is built on the wells' current rates,
+            ///   as the groups' rates are their sums.
+            /// @return The globally consistent limits map.
+            std::unordered_map<std::string, std::pair<int, Scalar>>
             prepareWellsForBalancingFromPotentials_();
 
             /// @brief Start-of-timestep balance of the group tree on the wells'

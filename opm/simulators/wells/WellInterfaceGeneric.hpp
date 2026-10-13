@@ -319,9 +319,12 @@ public:
 
     //! \brief Strictest individual production limit for the group-tree balancer
     //! from the well's potentials (ws.well_potentials) instead of a converged
-    //! IPR: a rate limit if the potentials exceed it, else the pressure limit
-    //! (BHP or THP) with the total potential as its rate. Nullopt for an
-    //! injector or a well without positive potentials.
+    //! IPR. The potentials give only the pressure limit's capacity (their
+    //! total); the limits are compared along the well's current rates, the
+    //! fractions the balancer scales with: the current rates scaled to that
+    //! capacity, a rate limit if those exceed it, else the pressure limit (BHP
+    //! or THP) with the total potential as its rate. Nullopt for an injector,
+    //! or a well without positive potentials or current rates.
     virtual std::optional<std::pair<Well::ProducerCMode, Scalar>>
     estimateStrictestProductionLimitFromPotentials(const WellStateType&,
                                                    const SummaryState&) const
