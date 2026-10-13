@@ -2433,11 +2433,18 @@ void collectActiveNode(const Tree<Scalar>& tree, const std::string& name,
     }
 
     // Wells directly under this Active node are weighed by their own guide
-    // rate in *this* node's control mode -- the same lookup the balancer
-    // itself uses (getGuideRateForMode), against the same beginning-of-step
-    // initialRates snapshot, not the tree's own groupTarget.guideRate, which
-    // is not reliably populated by the time balancing has converged.
-    const auto ctrlMode = node.preferredMode;
+    // rate in *this* node's active control mode -- the same lookup the
+    // balancer itself uses (getGuideRateForMode), against the same
+    // beginning-of-step initialRates snapshot, not the tree's own
+    // groupTarget.guideRate, which is not reliably populated by the time
+    // balancing has converged. When the active mode is not the preferred one
+    // (gas limit on an oil-preferred group), the guide-rate code converts the
+    // preferred-mode guide rate with the well's rates (oil guide rate x GOR):
+    // the wells' gas is shared by their gas guide rates. A well the balancer
+    // put on its fallback (next to none of the active mode's phase) is not
+    // tied to the lambda; see walk() below.
+    const auto ctrlMode = (node.mode != Well::ProducerCMode::CMODE_UNDEFINED)
+        ? wellModeToGroupMode(node.mode) : node.preferredMode;
 
     // Walk descendants: pure pass-through ones (Group/None/Transparent --
     // nothing of their own binds) keep flattening through; an Individual
@@ -2466,13 +2473,16 @@ void collectActiveNode(const Tree<Scalar>& tree, const std::string& name,
             // Group-category well is always tied to this node's lambda --
             // GRUP and THP are mutually exclusive on a well's control mode,
             // so it can never also need the live-THP treatment above.
-            if (child.modeCategory == ProdNodeModeCategory::Group) {
+            if (child.modeCategory == ProdNodeModeCategory::Group && !child.useFallback) {
                 const Scalar eff = accumulatedEfficiency(tree, childName, name);
                 const Scalar gr = getGuideRateForMode(childName, child.initialRates, ctrlMode, guideRate);
                 entry.ownWells.push_back({childName, gr, eff});
             } else {
                 // Not tied to this node's lambda, but it flows: counted in
-                // this node's sum at the rate the balancer gave it.
+                // this node's sum at the rate the balancer gave it. This
+                // includes a well on the balancer's fallback (its share of the
+                // preferred mode's rate, distributeFallbackRates()); for now
+                // held at that rate rather than following the lambda.
                 const Scalar eff = accumulatedEfficiency(tree, childName, name);
                 entry.activeChildren.push_back({childName, eff});
                 out.push_back(pinnedAtBalancedRate(child));
