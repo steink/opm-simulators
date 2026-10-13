@@ -1535,6 +1535,31 @@ solveGroupTree(const Network::ExtNetwork& network,
         for (int w = 0; w < system.numWells(); ++w) {
             group_tree_debug_well_rates_[system.wells()[w].name] = result.well_phase_rates[w];
         }
+        // DEBUG: the state this solve hands on -- node pressures (the wells'
+        // THP limits at B4) with their liquid rate and GOR, and every well's
+        // kind, oil rate and bhp.
+        std::string nodes;
+        for (std::size_t n = 1; n < order.size(); ++n) {
+            const auto& q = flows[n];
+            nodes += fmt::format(" {} {:.2f} bar (L {:.0f}, GOR {:.0f})", order[n],
+                                 result.node_pressure[n] / unit::barsa,
+                                 (q[Sys::kOil] + q[Sys::kWater]) * unit::day,
+                                 q[Sys::kOil] > Scalar{0} ? q[Sys::kGas] / q[Sys::kOil] : Scalar{0});
+        }
+        std::string wells;
+        for (int w = 0; w < system.numWells(); ++w) {
+            const auto& well = system.wells()[w];
+            const char* kind = well.reopen_candidate ? "cand"
+                : (well.kind == Sys::WellKind::Thp ? "thp"
+                   : (well.kind == Sys::WellKind::Group ? "grp" : "pin"));
+            wells += fmt::format(" {} {} O/W/G {:.0f}/{:.0f}/{:.4g} bhp {:.2f};", well.name, kind,
+                                 result.well_phase_rates[w][Sys::kOil] * unit::day,
+                                 result.well_phase_rates[w][Sys::kWater] * unit::day,
+                                 result.well_phase_rates[w][Sys::kGas] * unit::day,
+                                 result.well_bhp[w] / unit::barsa);
+        }
+        log(fmt::format("GroupTreeState under {} at report step {}{}: nodes{}; wells{}", root.name(),
+                        reportStepIdx, num_candidates > 0 ? " (with candidates)" : "", nodes, wells));
     }
     for (std::size_t n = 1; n < order.size(); ++n) {
         if (fractions[n].has_value()) {
