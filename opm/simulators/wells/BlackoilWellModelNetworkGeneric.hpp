@@ -307,6 +307,8 @@ public:
     /// differencing the residual.
     void useAnalyticJacobian(const bool on) { analytic_jacobian_ = on; }
     void useBranchFlattening(const bool on) { branch_flattening_ = on; }
+    void keepFlattenedSolution(const bool on) { keep_flattened_solution_ = on; }
+    void useNetworkLineSearch(const bool on) { network_line_search_ = on; }
 
     /// Let the network hold the group's total and place the split itself, rather
     /// than taking each group-controlled well's rate as fixed.
@@ -500,6 +502,8 @@ protected:
     std::optional<ProdGroupTreeBalancer::Tree<Scalar>> balanced_group_tree_;
     bool analytic_jacobian_ = false;
     bool branch_flattening_ = true;   // group-tree solver: see GroupTreeSystem::setBranchFlattening()
+    bool keep_flattened_solution_ = false;   // --group-tree-flattened-branch-fallback=flattened
+    bool network_line_search_ = false;   // --group-tree-network-step=linesearch
     bool network_group_control_ = false;
     bool network_autochoke_ = false;
     bool network_complementarity_ = false;

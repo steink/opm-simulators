@@ -146,6 +146,8 @@ BlackoilModelParameters<Scalar>::BlackoilModelParameters()
     close_stopped_wells_ = Parameters::Get<Parameters::CloseStoppedWells>();
     group_tree_reopen_thp_margin_ = Parameters::Get<Parameters::GroupTreeReopenThpMargin<Scalar>>();
     group_tree_branch_flattening_ = Parameters::Get<Parameters::GroupTreeBranchFlattening>();
+    group_tree_flattened_branch_fallback_ = Parameters::Get<Parameters::GroupTreeFlattenedBranchFallback>();
+    group_tree_network_step_ = Parameters::Get<Parameters::GroupTreeNetworkStep>();
 }
 
 template<class Scalar>
@@ -429,6 +431,13 @@ void BlackoilModelParameters<Scalar>::registerParameters()
         ("Group-tree network solver: solve with branch tables flattened so that a branch's "
          "pressure drop never falls with flow (a unique network solution), then, if some branch "
          "ended on its flattened part, solve again with the real tables from that solution");
+    Parameters::Register<Parameters::GroupTreeFlattenedBranchFallback>
+        ("Group-tree network solver: when the solve with the real branch tables, after a flattened "
+         "solution, does not converge: 'relaxed' uses the relaxed fixed-point update, 'flattened' "
+         "keeps the flattened solution (both with a NETWORK_FLATTENED_BRANCH warning)");
+    Parameters::Register<Parameters::GroupTreeNetworkStep>
+        ("Group-tree network solver: step control of its Newton solve: 'full' (the full Newton "
+         "step) or 'linesearch' (halve the step until the residual norm drops)");
     // if openMP is available, use two threads per mpi rank by default
 #if _OPENMP
     Parameters::SetDefault<Parameters::ThreadsPerProcess>(2);

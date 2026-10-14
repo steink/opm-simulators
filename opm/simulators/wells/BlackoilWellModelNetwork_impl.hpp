@@ -103,6 +103,20 @@ configureSolvers(DeferredLogger& deferred_logger)
     this->useGroupTreeSolver(solver_mode == "group-tree");
     this->useAnalyticJacobian(well_model_.param().network_analytic_jacobian_);
     this->useBranchFlattening(well_model_.param().group_tree_branch_flattening_);
+    {
+        const auto& fallback = well_model_.param().group_tree_flattened_branch_fallback_;
+        if (fallback != "relaxed" && fallback != "flattened") {
+            OPM_THROW(std::runtime_error, "Invalid value '" + fallback
+                      + "' for --group-tree-flattened-branch-fallback; expected relaxed or flattened");
+        }
+        this->keepFlattenedSolution(fallback == "flattened");
+        const auto& step = well_model_.param().group_tree_network_step_;
+        if (step != "full" && step != "linesearch") {
+            OPM_THROW(std::runtime_error, "Invalid value '" + step
+                      + "' for --group-tree-network-step; expected full or linesearch");
+        }
+        this->useNetworkLineSearch(step == "linesearch");
+    }
     this->useNetworkGroupControl(well_model_.param().network_group_control_);
     this->useNetworkAutochoke(well_model_.param().network_autochoke_);
     this->useNetworkComplementarity(well_model_.param().network_complementarity_);

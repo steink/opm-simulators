@@ -1444,7 +1444,18 @@ solveGroupTree(const Network::ExtNetwork& network,
     }
     system.setBranchFlattening(branch_flattening_);
 
-    auto result = NetworkSolve::solve(system, guess, kNetworkSolveParams<Scalar>, NetworkSolve::FullStep{});
+    // The step control (--group-tree-network-step): the full Newton step, or a
+    // backtracking line search on the residual norm. The group-tree residual
+    // has kinks (piecewise-linear tables, the slope-limited lookups' bridged
+    // stretches), on which full steps can cycle although the solution is
+    // unique (Norne, E-1H: a period-3 cycle with every step raising the
+    // residual).
+    const auto solveSystem = [this](Sys& sys, const std::vector<Scalar>& start) {
+        return network_line_search_
+            ? NetworkSolve::solve(sys, start, kNetworkSolveParams<Scalar>, NetworkSolve::LineSearch{})
+            : NetworkSolve::solve(sys, start, kNetworkSolveParams<Scalar>, NetworkSolve::FullStep{});
+    };
+    auto result = solveSystem(system, guess);
     if (!result.converged) {
         // TEMPORARY diagnostics of the last iterations (NetworkSolve::kDiagnosticIterations).
         log(fmt::format("Network diag: group-tree solve under {} at report step {} failed; "
@@ -1489,28 +1500,32 @@ solveGroupTree(const Network::ExtNetwork& network,
         }
         refined.setStartFromResult(result);
         std::vector<Scalar> from(result.node_pressure.begin() + 1, result.node_pressure.end());
-        auto refined_result = NetworkSolve::solve(refined, from, kNetworkSolveParams<Scalar>,
-                                                  NetworkSolve::FullStep{});
+        auto refined_result = solveSystem(refined, from);
         if (!refined_result.converged) {
             if (well_model_.comm().rank() == 0) {
                 const auto msg = fmt::format("Network: branches {} under {} at report step {} ended on "
                                              "the flattened (falling, low-flow) part of their tables, and "
                                              "the network does not converge with their real tables from "
-                                             "there (max residual {:.3e}). Using the relaxed update.",
-                                             names, root.name(), reportStepIdx, refined_result.residual);
+                                             "there (max residual {:.3e}). {}.",
+                                             names, root.name(), reportStepIdx, refined_result.residual,
+                                             keep_flattened_solution_ ? "Keeping the flattened solution"
+                                                                      : "Using the relaxed update");
                 if (well_model_.groupStateHelper().hasDeferredLogger()) {
                     well_model_.groupStateHelper().deferredLogger().warning("NETWORK_FLATTENED_BRANCH", msg);
                 } else {
                     OpmLog::warning(msg);
                 }
             }
-            return giveUp(fmt::format("branches {} do not converge with their real tables", names));
+            if (!keep_flattened_solution_) {
+                return giveUp(fmt::format("branches {} do not converge with their real tables", names));
+            }
+        } else {
+            log(fmt::format("Network: branches {} under {} at report step {} ended on their flattened "
+                            "table; solved again with their real tables in {} iterations.",
+                            names, root.name(), reportStepIdx, refined_result.iterations));
+            system = std::move(refined);
+            result = std::move(refined_result);
         }
-        log(fmt::format("Network: branches {} under {} at report step {} ended on their flattened "
-                        "table; solved again with their real tables in {} iterations.",
-                        names, root.name(), reportStepIdx, refined_result.iterations));
-        system = std::move(refined);
-        result = std::move(refined_result);
     }
     log(fmt::format("Network: solved the production network under {} via the group-tree "
                     "balancer at report step {} in {} iterations{}.",

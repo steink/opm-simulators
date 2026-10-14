@@ -194,6 +194,8 @@ struct CloseStoppedWells { static constexpr bool value = false; };
 template<class Scalar>
 struct GroupTreeReopenThpMargin { static constexpr Scalar value = 0.0; };
 struct GroupTreeBranchFlattening { static constexpr bool value = true; };
+struct GroupTreeFlattenedBranchFallback { static constexpr auto value = "relaxed"; };
+struct GroupTreeNetworkStep { static constexpr auto value = "full"; };
 template<class Scalar>
 struct LocalToleranceScalingMb { static constexpr Scalar value = 1.0; };
 
@@ -466,6 +468,16 @@ public:
     /// Group-tree network solver: flatten branch tables so their pressure never
     /// falls with flow, and solve again with the real tables from that solution.
     bool group_tree_branch_flattening_;
+
+    /// What the group-tree network solve does when the solve with the real
+    /// branch tables, after a flattened solution, does not converge:
+    /// "relaxed" (the relaxed fixed-point update) or "flattened" (keep the
+    /// flattened solution).
+    std::string group_tree_flattened_branch_fallback_;
+
+    /// Step control of the group-tree network Newton solve: "full" or
+    /// "linesearch" (backtracking on the residual norm).
+    std::string group_tree_network_step_;
 
     /// Nonlinear solver type: newton or nldd
     std::string nonlinear_solver_;
