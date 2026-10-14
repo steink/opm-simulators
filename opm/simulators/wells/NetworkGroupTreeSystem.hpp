@@ -1357,6 +1357,52 @@ public:
         }
         diag_letters_ = set;
 
+        // DEBUG: why a step cannot lower the residual. Along the Newton
+        // direction, each row's change for a small step (one-sided), the
+        // resulting rate of change of |r|^2, and per Thp well its FLO, the
+        // nearest FLO knot and its row's derivative in bhp from either side.
+        if (it >= 41 && !dx_raw.empty()) {
+            const auto sq2 = [](const State& v) {
+                Scalar s2 = 0;
+                for (const auto e : v) { s2 += e * e; }
+                return s2;
+            };
+            for (const Scalar eps : {Scalar{1e-2}, Scalar{1e-4}}) {
+                State xe = x;
+                for (int i = 0; i < n; ++i) { xe[i] += eps * dx_raw[i]; }
+                const auto re = residual(xe);
+                std::string rows;
+                for (int i = 0; i < n; ++i) {
+                    if (std::abs(r[i]) > 1e-8 || std::abs(re[i] - r[i]) > 1e-8) {
+                        rows += fmt::format(" [{}] {:+.4g}->{:+.4g} (d/dl {:+.4g})", i, r[i], re[i],
+                                            (re[i] - r[i]) / eps);
+                    }
+                }
+                out.push_back(fmt::format("  STALL eps {:.0e}: d|r|^2/dl {:+.4g} (Newton model {:+.4g});{}",
+                                          eps, (sq2(re) - sq2(r)) / eps, -2 * sq2(r), rows));
+            }
+            for (int w = 0; w < numWells(); ++w) {
+                const auto& well = wells_[w];
+                if (well.kind != WellKind::Thp) { continue; }
+                const int k = thpBhpIdx(w);
+                const auto qw = wellPhaseRatesOwn(w, x);
+                const auto& table = props_->getTable(well.vfp_table);
+                const Scalar flo = detail::getFlo(table, qw[kWater], qw[kOil], qw[kGas]) * unit::day;
+                Scalar knot = 0;
+                for (const auto v : table.getFloAxis()) {
+                    if (std::abs(v - flo) < std::abs(knot - flo)) { knot = v; }
+                }
+                const Scalar h = Scalar{1e-2} * unit::barsa;
+                const Scalar hs = Scalar{1e-5} * unit::barsa;
+                const auto rowAt = [&](const Scalar d) { State xs = x; xs[k] += d; return residual(xs)[k]; };
+                out.push_back(fmt::format("  STALL well {}: FLO {:.1f} m3/d, nearest knot {:.0f}; dRw/dbhp "
+                                          "fd(+0.01 bar) {:+.4g}, one-sided +{:+.4g} / -{:+.4g}; dx {:+.4g} bar",
+                                          well.name, flo, knot, (rowAt(h) - r[k]) / h * unit::barsa,
+                                          (rowAt(hs) - r[k]) / hs * unit::barsa,
+                                          (r[k] - rowAt(-hs)) / hs * unit::barsa, dx_raw[k] / unit::barsa));
+            }
+        }
+
         // DEBUG: the Jacobian entries of each Thp well's row and of its
         // node's row (bar per bar), and the raw step.
         if (it <= 2 || it >= 41) {
