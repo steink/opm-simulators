@@ -670,6 +670,10 @@ public:
     /// solve() difference residual(). See jacobian().
     void setAnalyticJacobian(const bool on) { analytic_jacobian_ = on; }
 
+    /// Decide a Thp well's cap from the node pressure at every iterate (see
+    /// updateControls()) rather than once its bhp has reached shut-in.
+    void setCapByNodePressure(const bool on) { cap_by_node_pressure_ = on; }
+
     /// Look up node \p node's branch table flattened so that its pressure
     /// never falls with flow (slope limit 0), or the table as it is.
     void setNodeFlattening(const int node, const bool on) { node_flattened_[node] = on; }
@@ -1109,7 +1113,13 @@ public:
         for (int w = 0; w < numWells(); ++w) {
             if (wells_[w].kind != WellKind::Thp) { continue; }
             const auto& well = wells_[w];
-            bool capped = x[thpBhpIdx(w)] >= well.bhp_shutin;
+            // Capped when the tubing needs at least the shut-in bhp at
+            // (next to) zero rate. By default asked only once the bhp
+            // iterate has reached shut-in; with cap_by_node_pressure_ at
+            // every iterate, so that the cap follows the node pressure: on
+            // the slope-limited curve the well's row increases with bhp,
+            // so it has a root below shut-in exactly when this test fails.
+            bool capped = cap_by_node_pressure_ || x[thpBhpIdx(w)] >= well.bhp_shutin;
             if (capped) {
                 // Just off the cap, so the phase fractions are the well's own
                 // rather than 0/0 at exactly zero rate.
@@ -1827,6 +1837,7 @@ private:
     std::vector<std::vector<std::pair<int, std::array<Scalar, NP>>>> node_flow_jac_;
     std::vector<std::vector<std::pair<int, Scalar>>> target_jac_;
     bool analytic_jacobian_ = false;
+    bool cap_by_node_pressure_ = false;   // see setCapByNodePressure()
 };
 
 } // namespace Opm::NetworkSolve

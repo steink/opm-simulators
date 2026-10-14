@@ -1443,6 +1443,7 @@ solveGroupTree(const Network::ExtNetwork& network,
             ? it->second : *root.terminal_pressure();
     }
     system.setBranchFlattening(branch_flattening_);
+    system.setCapByNodePressure(cap_by_node_pressure_);
 
     // The step control (--group-tree-network-step): the full Newton step, or a
     // backtracking line search on the residual norm. The group-tree residual

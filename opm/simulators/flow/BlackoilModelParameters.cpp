@@ -148,6 +148,7 @@ BlackoilModelParameters<Scalar>::BlackoilModelParameters()
     group_tree_branch_flattening_ = Parameters::Get<Parameters::GroupTreeBranchFlattening>();
     group_tree_flattened_branch_fallback_ = Parameters::Get<Parameters::GroupTreeFlattenedBranchFallback>();
     group_tree_network_step_ = Parameters::Get<Parameters::GroupTreeNetworkStep>();
+    group_tree_cap_test_ = Parameters::Get<Parameters::GroupTreeCapTest>();
 }
 
 template<class Scalar>
@@ -438,6 +439,10 @@ void BlackoilModelParameters<Scalar>::registerParameters()
     Parameters::Register<Parameters::GroupTreeNetworkStep>
         ("Group-tree network solver: step control of its Newton solve: 'full' (the full Newton "
          "step) or 'linesearch' (halve the step until the residual norm drops)");
+    Parameters::Register<Parameters::GroupTreeCapTest>
+        ("Group-tree network solver: when a THP well is put on its shut-in cap: 'bhp' (once its bhp "
+         "iterate reaches shut-in) or 'node-pressure' (at every iterate, when its tubing needs at "
+         "least the shut-in bhp at zero rate at the current node pressure)");
     // if openMP is available, use two threads per mpi rank by default
 #if _OPENMP
     Parameters::SetDefault<Parameters::ThreadsPerProcess>(2);

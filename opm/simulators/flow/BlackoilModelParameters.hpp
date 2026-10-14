@@ -196,6 +196,7 @@ struct GroupTreeReopenThpMargin { static constexpr Scalar value = 0.0; };
 struct GroupTreeBranchFlattening { static constexpr bool value = true; };
 struct GroupTreeFlattenedBranchFallback { static constexpr auto value = "relaxed"; };
 struct GroupTreeNetworkStep { static constexpr auto value = "full"; };
+struct GroupTreeCapTest { static constexpr auto value = "node-pressure"; };
 template<class Scalar>
 struct LocalToleranceScalingMb { static constexpr Scalar value = 1.0; };
 
@@ -478,6 +479,12 @@ public:
     /// Step control of the group-tree network Newton solve: "full" or
     /// "linesearch" (backtracking on the residual norm).
     std::string group_tree_network_step_;
+
+    /// When the group-tree network solve puts a Thp well on its shut-in cap:
+    /// "bhp" (once its bhp iterate reaches shut-in) or "node-pressure" (at
+    /// every iterate, when its tubing needs at least the shut-in bhp at zero
+    /// rate at the current node pressure).
+    std::string group_tree_cap_test_;
 
     /// Nonlinear solver type: newton or nldd
     std::string nonlinear_solver_;

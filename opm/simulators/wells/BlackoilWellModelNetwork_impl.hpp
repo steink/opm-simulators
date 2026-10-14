@@ -116,6 +116,12 @@ configureSolvers(DeferredLogger& deferred_logger)
                       + "' for --group-tree-network-step; expected full or linesearch");
         }
         this->useNetworkLineSearch(step == "linesearch");
+        const auto& cap = well_model_.param().group_tree_cap_test_;
+        if (cap != "bhp" && cap != "node-pressure") {
+            OPM_THROW(std::runtime_error, "Invalid value '" + cap
+                      + "' for --group-tree-cap-test; expected bhp or node-pressure");
+        }
+        this->useCapByNodePressure(cap == "node-pressure");
     }
     this->useNetworkGroupControl(well_model_.param().network_group_control_);
     this->useNetworkAutochoke(well_model_.param().network_autochoke_);
