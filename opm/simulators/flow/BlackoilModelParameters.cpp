@@ -305,7 +305,7 @@ void BlackoilModelParameters<Scalar>::registerParameters()
          "(production only; the fixed point still always runs too, so the two are comparable)");
     Parameters::Register<Parameters::NetworkAnalyticJacobian>
         ("Assemble the network Jacobian from the VFP table derivatives instead of differencing "
-         "the residual (--network-solver=newton only)");
+         "the residual (--network-solver=newton and group-tree)");
     Parameters::Register<Parameters::NetworkGroupControl>
         ("Let the network hold a group's injection total and place the split itself, so a well "
          "that hits its own limit is taken up by the others (--network-solver=newton only)");

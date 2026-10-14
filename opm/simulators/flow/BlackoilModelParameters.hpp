@@ -160,7 +160,7 @@ template<class Scalar>
 struct NetworkMaxPressureUpdateInBars { static constexpr Scalar value = 5.0; };
 struct NetworkPressureUpdateSecant { static constexpr auto value = "injection"; };
 struct NetworkSolver { static constexpr auto value = "fixedpoint"; };
-struct NetworkAnalyticJacobian { static constexpr bool value = false; };
+struct NetworkAnalyticJacobian { static constexpr bool value = true; };
 struct NetworkGroupControl { static constexpr bool value = false; };
 struct NetworkAutochoke { static constexpr bool value = false; };
 struct NetworkAutochokeBracketSamples { static constexpr int value = 300; };

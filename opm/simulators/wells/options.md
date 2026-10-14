@@ -31,7 +31,18 @@ options below that are marked "group-tree only" have no effect.
 | `--group-tree-max-initial-solve-failures` | `3` | Group-tree only. A producer whose initial solve does not converge is stopped for that timestep and retried at the next. After this many consecutive failures it is shut, if `--shut-unsolvable-wells` is true. | Tested on a deck set up to fail. |
 | `--close-stopped-wells` | `false` | All modes. A well stopped cleanly during a timestep (no flow, not operable, re-open limit, network) and still stopped at its end is closed in the well-test state (shut or stopped per its shut-in setting until WTEST or a schedule event), without re-checking its operability. | With the timestep hold: FLOW-CGC 73 → 39 timesteps; FLOW-CGC 5-day cap, margin 3: 239 → 166, no chops, PROD2 412 → 3 status events; model5 −8.7% FOPT (no WTEST). Iteration hold: no change. |
 | `--log-well-anchors` | `false` | Diagnostic only. Computes and debug-logs every predicting producer's maximum flowing THP (its "anchor") at step start. No effect on the run. | Used for the step 3 analysis. |
-| `--network-analytic-jacobian` | `false` | Assembles the network Jacobian from VFP-table derivatives instead of finite differences. Also used by `group-tree`, despite its help text saying newton only. | To try on the large model. If it is no worse there, make it the group-tree default. |
+| `--network-analytic-jacobian` | `true` (was `false`) | Assembles the network Jacobian from VFP-table derivatives instead of finite differences (`newton` and `group-tree`). | Used on the large model. The finite-difference Jacobian is wrong where its step (0.01 bar of bhp) moves a well with a steep IPR across a tubing-table knot (Norne B-3H: 100 m3/d per 0.01 bar, derivative 9.4 instead of 19.6); the Newton direction is then no descent direction and a line search stalls. |
+
+### Only on `unstable-group-targets` and `integration`
+
+Not on `group-tree-network`: it comes from the port of
+`force-bhp-control-from-intersection-in-problematic-vfp-situations`
+(`unstable-group-targets`, `fd0d83b4d`), and reaches the `integration`
+worktree (`/home/steink/OPM/opm-simulators-int`) by its merge.
+
+| Option | Default | What it does | Findings |
+|---|---|---|---|
+| `--stabilize-problematic-wells` | `false` | A well whose local solve converges to an unstable solution, or does not converge, is solved from the intersection of its IPR and tubing curve, and its THP constraint is replaced by the bhp found there until its next local solve (`SingleWellState::forced_bhp_from_thp`). Off: `integration` behaves as `group-tree-network`. | No measurements recorded here yet. |
 
 ---
 
