@@ -1457,6 +1457,10 @@ solveGroupTree(const Network::ExtNetwork& network,
             : NetworkSolve::solve(sys, start, kNetworkSolveParams<Scalar>, NetworkSolve::FullStep{});
     };
     auto result = solveSystem(system, guess);
+    // DEBUG: cap switches (iterations on which some Thp well changed between
+    // its cap and its tubing row) per solve.
+    log(fmt::format("GroupTreeSwitches pass flat converged {} iterations {} switches {}",
+                    result.converged ? 1 : 0, result.iterations, result.switches));
     if (!result.converged) {
         // TEMPORARY diagnostics of the last iterations (NetworkSolve::kDiagnosticIterations).
         log(fmt::format("Network diag: group-tree solve under {} at report step {} failed; "
@@ -1502,6 +1506,9 @@ solveGroupTree(const Network::ExtNetwork& network,
         refined.setStartFromResult(result);
         std::vector<Scalar> from(result.node_pressure.begin() + 1, result.node_pressure.end());
         auto refined_result = solveSystem(refined, from);
+        log(fmt::format("GroupTreeSwitches pass real converged {} iterations {} switches {}",
+                        refined_result.converged ? 1 : 0, refined_result.iterations,
+                        refined_result.switches));   // DEBUG
         if (!refined_result.converged) {
             if (well_model_.comm().rank() == 0) {
                 const auto msg = fmt::format("Network: branches {} under {} at report step {} ended on "
