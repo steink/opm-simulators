@@ -197,6 +197,7 @@ struct GroupTreeBranchFlattening { static constexpr bool value = true; };
 struct GroupTreeFlattenedBranchFallback { static constexpr auto value = "relaxed"; };
 struct GroupTreeNetworkStep { static constexpr auto value = "full"; };
 struct GroupTreeCapTest { static constexpr auto value = "node-pressure"; };
+struct GroupTreeRealTablePass { static constexpr bool value = true; };
 template<class Scalar>
 struct LocalToleranceScalingMb { static constexpr Scalar value = 1.0; };
 
@@ -485,6 +486,11 @@ public:
     /// every iterate, when its tubing needs at least the shut-in bhp at zero
     /// rate at the current node pressure).
     std::string group_tree_cap_test_;
+
+    /// Group-tree network solve with flattened branch tables: solve again on
+    /// the real tables where a branch ends on its flattened part (true), or
+    /// accept the flattened solution as it is (false).
+    bool group_tree_real_table_pass_;
 
     /// Nonlinear solver type: newton or nldd
     std::string nonlinear_solver_;

@@ -724,6 +724,150 @@ public:
 
     const Node& node(const int i) const { return nodes_[i]; }
 
+    /// Thp well \p w's own state at node pressure \p p: the root of its row
+    /// on the slope-limited tubing curve (unique: the row rises with bhp),
+    /// or its shut-in cap, rates zero, where it cannot lift at \p p. Its
+    /// bhp and its rates ([oil, water, gas], production positive).
+    std::pair<Scalar, std::array<Scalar, NP>> thpWellAtNodePressure(const int w, const Scalar p) const
+    {
+        const auto& well = wells_[w];
+        const auto ratesAt = [&well](const Scalar bhp) {
+            std::array<Scalar, NP> q{};
+            for (int ph = 0; ph < NP; ++ph) { q[ph] = well.ipr_a[ph] + well.ipr_b[ph] * bhp; }
+            return q;
+        };
+        const auto row = [&](const Scalar bhp) {
+            return bhp - (slopeLimitedBhp(well, p, ratesAt(bhp)).evaluation.value - well.vfp_dp);
+        };
+        Scalar hi = well.bhp_shutin - Scalar{1e-3} * unit::barsa;
+        if (row(hi) <= Scalar{0}) {
+            return {well.bhp_shutin, std::array<Scalar, NP>{}};
+        }
+        Scalar lo = hi;
+        Scalar step = unit::barsa;
+        while (lo > unit::barsa && row(lo) > Scalar{0}) {
+            hi = lo;
+            lo = std::max(lo - step, Scalar{1} * unit::barsa);
+            step *= 2;
+        }
+        for (int it = 0; it < 60; ++it) {
+            const Scalar mid = Scalar{0.5} * (lo + hi);
+            (row(mid) > Scalar{0} ? hi : lo) = mid;
+        }
+        const Scalar bhp = Scalar{0.5} * (lo + hi);
+        auto q = ratesAt(bhp);
+        for (auto& v : q) { v = std::max(v, Scalar{0}); }
+        return {bhp, q};
+    }
+
+    /// Whether node \p i can flow on its real branch table with the wells
+    /// under it, at the upstream pressure of \p result (a converged solve).
+    /// q(p): the flow the wells deliver into the node at node pressure p --
+    /// every Thp well under it on its own row (thpWellAtNodePressure()), the
+    /// other wells and the child nodes at their rates in \p result. g(p) =
+    /// p - T(upstream, q(p)) on the node's real table. margin: the largest
+    /// g over the pressures at which some Thp well under the node flows; a
+    /// negative margin means no flowing state exists (a cliff at network
+    /// level: the wells cannot keep the branch flowing). crossing: the
+    /// lowest such p with g = 0 (the higher-flow crossing), if any.
+    struct NodeMargin
+    {
+        bool tested = false;
+        Scalar margin = 0;
+        std::optional<Scalar> crossing;
+        std::vector<int> thp_wells;
+    };
+    NodeMargin nodeMargin(const int i, const Result<Scalar>& result) const
+    {
+        NodeMargin out;
+        if (!hasTable(nodes_[i]) || fixed_pressure_[i].has_value()) {
+            return out;
+        }
+        const Scalar upstream = result.node_pressure[nodes_[i].parent];
+        std::array<Scalar, NP> fixed{};
+        for (const int w : wells_at_[i]) {
+            if (wells_[w].kind == WellKind::Thp) {
+                out.thp_wells.push_back(w);
+                continue;
+            }
+            for (int ph = 0; ph < NP; ++ph) { fixed[ph] += wells_[w].efficiency * result.well_phase_rates[w][ph]; }
+        }
+        if (out.thp_wells.empty()) {
+            return out;
+        }
+        const auto flows = nodeFlowsFromWellRates(result.well_phase_rates);
+        for (const int c : children_[i]) {
+            for (int ph = 0; ph < NP; ++ph) { fixed[ph] += nodes_[c].efficiency * flows[c][ph]; }
+        }
+        const auto deliver = [&](const Scalar p, bool& flowing) {
+            auto q = fixed;
+            flowing = false;
+            for (const int w : out.thp_wells) {
+                const auto qw = thpWellAtNodePressure(w, p).second;
+                for (int ph = 0; ph < NP; ++ph) {
+                    q[ph] += wells_[w].efficiency * qw[ph];
+                    flowing = flowing || qw[ph] > Scalar{0};
+                }
+            }
+            return q;
+        };
+        const auto g = [&](const Scalar p, bool& flowing) {
+            const auto q = deliver(p, flowing);
+            return p - tableBhp(nodes_[i].vfp_table, upstream, q, node_alq_[i], nodeFractions(i));
+        };
+        // The pressures at which some Thp well flows: from the upstream
+        // pressure to where the last of them is capped.
+        bool flowing = false;
+        Scalar lo = upstream;
+        Scalar hi = upstream + Scalar{10} * unit::barsa;
+        g(hi, flowing);
+        for (int k = 0; k < 8 && flowing; ++k) {
+            hi += (hi - upstream);
+            g(hi, flowing);
+        }
+        for (int it = 0; it < 40; ++it) {
+            const Scalar mid = Scalar{0.5} * (lo + hi);
+            g(mid, flowing);
+            (flowing ? lo : hi) = mid;
+        }
+        const Scalar p_top = lo;
+        g(upstream, flowing);
+        if (!flowing) {
+            out.tested = true;
+            out.margin = -std::numeric_limits<Scalar>::max();
+            return out;
+        }
+        constexpr int samples = 80;
+        Scalar best = -std::numeric_limits<Scalar>::max();
+        Scalar prev_p = upstream;
+        Scalar prev_g = g(upstream, flowing);
+        best = prev_g;
+        for (int k = 1; k <= samples; ++k) {
+            const Scalar p = upstream + (p_top - upstream) * k / samples;
+            const Scalar gk = g(p, flowing);
+            best = std::max(best, gk);
+            if (!out.crossing.has_value() && prev_g < Scalar{0} && gk >= Scalar{0}) {
+                Scalar a = prev_p;
+                Scalar b = p;
+                for (int it = 0; it < 50; ++it) {
+                    const Scalar mid = Scalar{0.5} * (a + b);
+                    (g(mid, flowing) < Scalar{0} ? a : b) = mid;
+                }
+                out.crossing = Scalar{0.5} * (a + b);
+            } else if (!out.crossing.has_value() && k == 1 && prev_g >= Scalar{0}) {
+                out.crossing = upstream;
+            }
+            prev_p = p;
+            prev_g = gk;
+        }
+        out.tested = true;
+        out.margin = best;
+        return out;
+    }
+
+    /// Start Thp well \p w at \p bhp (see Well::start_bhp).
+    void setWellStartBhp(const int w, const Scalar bhp) { wells_[w].start_bhp = bhp; }
+
     int numNodes() const { return static_cast<int>(nodes_.size()) - 1; }   // excludes the terminal
     int numActiveNodes() const { return static_cast<int>(activeNodes_.size()); }
     /// Active nodes that actually got a lambda unknown -- see finalize().

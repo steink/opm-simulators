@@ -1493,8 +1493,15 @@ solveGroupTree(const Network::ExtNetwork& network,
     // With flattened branch tables, a solution with some branch on its
     // flattened stretch is one of the flattened network only: solve the real
     // one from there (those branches unflattened, from this solution). If
-    // that fails, warn loudly and fall back to the relaxed update.
-    if (const auto flattened = system.flattenedNodes(result); !flattened.empty()) {
+    // that fails, test each such node (GroupTreeSystem::nodeMargin()): no
+    // flowing state on its real table -- a cliff at network level -- stops
+    // the Thp wells under it (updateGroupTreeOpenSet()); otherwise solve
+    // again from the crossing. Still failing: warn loudly and fall back to
+    // the relaxed update. --group-tree-real-table-pass=false accepts the
+    // flattened solution as it is.
+    std::vector<std::string> network_cliff_wells;
+    const auto flattened = real_table_pass_ ? system.flattenedNodes(result) : std::vector<int>{};
+    if (!flattened.empty()) {
         std::string names;
         for (const int i : flattened) {
             names += (names.empty() ? "" : ", ") + system.node(i).name;
@@ -1509,7 +1516,58 @@ solveGroupTree(const Network::ExtNetwork& network,
         log(fmt::format("GroupTreeSwitches pass real converged {} iterations {} switches {}",
                         refined_result.converged ? 1 : 0, refined_result.iterations,
                         refined_result.switches));   // DEBUG
+        bool cliff = false;
         if (!refined_result.converged) {
+            bool retry = false;
+            std::string margins;
+            for (const int i : flattened) {
+                const auto m = system.nodeMargin(i, result);
+                if (!m.tested) {
+                    continue;
+                }
+                margins += fmt::format(" {} margin {:.3f} bar{}", system.node(i).name, m.margin / unit::barsa,
+                                       m.crossing.has_value()
+                                           ? fmt::format(", crossing at {:.3f} bar", *m.crossing / unit::barsa)
+                                           : std::string{});
+                if (m.margin < Scalar{0}) {
+                    cliff = true;
+                    for (const int w : m.thp_wells) {
+                        network_cliff_wells.push_back(system.wells()[w].name);
+                    }
+                } else if (m.crossing.has_value()) {
+                    retry = true;
+                    from[i - 1] = *m.crossing;
+                    for (const int w : m.thp_wells) {
+                        refined.setWellStartBhp(w, refined.thpWellAtNodePressure(w, *m.crossing).first);
+                    }
+                }
+            }
+            log(fmt::format("Network: real-table solve under {} at report step {} failed; node test:{}",
+                            root.name(), reportStepIdx, margins));
+            if (cliff) {
+                if (well_model_.comm().rank() == 0) {
+                    std::string wells;
+                    for (const auto& w : network_cliff_wells) {
+                        wells += (wells.empty() ? "" : ", ") + w;
+                    }
+                    const auto msg = fmt::format("Network: under {} at report step {} the wells {} cannot keep "
+                                                 "their branch flowing on its real table (node test:{}); they "
+                                                 "are stopped.", root.name(), reportStepIdx, wells, margins);
+                    if (well_model_.groupStateHelper().hasDeferredLogger()) {
+                        well_model_.groupStateHelper().deferredLogger().info(msg);
+                    } else {
+                        OpmLog::info(msg);
+                    }
+                }
+            } else if (retry) {
+                refined_result = solveSystem(refined, from);
+                log(fmt::format("Network: real-table solve under {} at report step {} from the crossing: {} "
+                                "in {} iterations.", root.name(), reportStepIdx,
+                                refined_result.converged ? "converged" : "not converged",
+                                refined_result.iterations));
+            }
+        }
+        if (!cliff && !refined_result.converged) {
             if (well_model_.comm().rank() == 0) {
                 const auto msg = fmt::format("Network: branches {} under {} at report step {} ended on "
                                              "the flattened (falling, low-flow) part of their tables, and "
@@ -1527,7 +1585,7 @@ solveGroupTree(const Network::ExtNetwork& network,
             if (!keep_flattened_solution_) {
                 return giveUp(fmt::format("branches {} do not converge with their real tables", names));
             }
-        } else {
+        } else if (!cliff) {
             log(fmt::format("Network: branches {} under {} at report step {} ended on their flattened "
                             "table; solved again with their real tables in {} iterations.",
                             names, root.name(), reportStepIdx, refined_result.iterations));
@@ -1589,7 +1647,8 @@ solveGroupTree(const Network::ExtNetwork& network,
             group_tree_node_fractions_[order[n]] = *fractions[n];
         }
     }
-    return GroupTreeSolve{std::move(system), std::move(order), std::move(result)};
+    return GroupTreeSolve{std::move(system), std::move(order), std::move(result),
+                          std::move(network_cliff_wells)};
 }
 
 template<typename Scalar, typename IndexTraits>
@@ -1648,8 +1707,12 @@ updateGroupTreeOpenSet(const Network::ExtNetwork& network,
     pos[Sys::kOil]   = pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx);
     pos[Sys::kWater] = pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx);
     pos[Sys::kGas]   = pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx);
+    const auto& cliff_wells = solved->network_cliff_wells;
+    const auto atNetworkCliff = [&cliff_wells](const std::string& name) {
+        return std::find(cliff_wells.begin(), cliff_wells.end(), name) != cliff_wells.end();
+    };
     for (const auto& outcome : solved->system.reopenOutcomes(solved->result)) {
-        if (!outcome.reopens) {
+        if (!outcome.reopens || atNetworkCliff(outcome.name)) {
             // An open well without any rate (awaitsFlow()) that cannot flow
             // here is stopped, as if it had been stopped all along.
             if (auto* well = findWell(outcome.name);
@@ -1694,6 +1757,18 @@ updateGroupTreeOpenSet(const Network::ExtNetwork& network,
     // flattened part of its tubing curve -- a point it cannot actually
     // operate at. The dynamic status is what the well model's own solves
     // re-evaluate; WellState::stopWell() (ws.status) would be persistent.
+    // Wells that cannot keep their branch flowing on its real table (a cliff
+    // at network level, solveGroupTree()): stopped, all of them at once.
+    for (const auto& name : cliff_wells) {
+        auto* well = findWell(name);
+        if (well != nullptr && !well->wellIsStopped()) {
+            well->stopWell(WellInterfaceGeneric<Scalar, IndexTraits>::StopReason::Network);
+        }
+        changed = true;
+    }
+    if (!cliff_wells.empty()) {
+        return changed;
+    }
     if (const auto worst = solved->system.worstCliffViolation(solved->result)) {
         changed = true;
         if (auto* well = findWell(*worst)) {

@@ -122,6 +122,7 @@ configureSolvers(DeferredLogger& deferred_logger)
                       + "' for --group-tree-cap-test; expected bhp or node-pressure");
         }
         this->useCapByNodePressure(cap == "node-pressure");
+        this->useRealTablePass(well_model_.param().group_tree_real_table_pass_);
     }
     this->useNetworkGroupControl(well_model_.param().network_group_control_);
     this->useNetworkAutochoke(well_model_.param().network_autochoke_);

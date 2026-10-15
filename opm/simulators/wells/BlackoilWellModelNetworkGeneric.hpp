@@ -310,6 +310,7 @@ public:
     void keepFlattenedSolution(const bool on) { keep_flattened_solution_ = on; }
     void useNetworkLineSearch(const bool on) { network_line_search_ = on; }
     void useCapByNodePressure(const bool on) { cap_by_node_pressure_ = on; }
+    void useRealTablePass(const bool on) { real_table_pass_ = on; }
 
     /// Let the network hold the group's total and place the split itself, rather
     /// than taking each group-controlled well's rate as fixed.
@@ -486,6 +487,10 @@ protected:
         NetworkSolve::GroupTreeSystem<Scalar> system;
         std::vector<std::string> order;    // node names by index; order[0] == root.name()
         NetworkSolve::Result<Scalar> result;
+        /// Thp wells under a node that cannot flow on its real branch table
+        /// with them (GroupTreeSystem::nodeMargin() negative): stopped by
+        /// updateGroupTreeOpenSet(), not reopened.
+        std::vector<std::string> network_cliff_wells;
     };
     std::optional<GroupTreeSolve>
     ///
@@ -506,6 +511,7 @@ protected:
     bool keep_flattened_solution_ = false;   // --group-tree-flattened-branch-fallback=flattened
     bool network_line_search_ = false;   // --group-tree-network-step=linesearch
     bool cap_by_node_pressure_ = true;   // --group-tree-cap-test=node-pressure
+    bool real_table_pass_ = true;   // --group-tree-real-table-pass
     bool network_group_control_ = false;
     bool network_autochoke_ = false;
     bool network_complementarity_ = false;
