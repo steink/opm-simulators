@@ -1656,6 +1656,63 @@ public:
         for (int w = 0; w < numWells(); ++w) {
             out.push_back(describeWell(w, x));
         }
+        // DEBUG: for a node on its real table whose row is not met, the
+        // node residual g(p) = p - T(upstream, q(p)) over a range of node
+        // pressures, every Thp well under it solved on its own row at p
+        // (bisection on the slope-limited curve; capped where it cannot
+        // lift), the rest of the state as it is. A root of g is a solution
+        // of this node with its wells; none means the real table has none.
+        for (int i = 1; i <= numNodes(); ++i) {
+            if (!hasTable(nodes_[i]) || node_flattened_[i] || fixed_pressure_[i].has_value()
+                || std::abs(r[pIdx(i)]) < Scalar{0.1}) {
+                continue;
+            }
+            const Scalar upstream = (nodes_[i].parent == 0) ? terminal_pressure_ : x[pIdx(nodes_[i].parent)];
+            const Scalar p0 = x[pIdx(i)];
+            std::string line;
+            for (Scalar dp = -10; dp <= 15.001; dp += 1) {
+                const Scalar p = p0 + dp * unit::barsa;
+                State xs = x;
+                xs[pIdx(i)] = p;
+                std::string wells;
+                for (int w = 0; w < numWells(); ++w) {
+                    const auto& well = wells_[w];
+                    if (well.kind != WellKind::Thp || well.node != i) { continue; }
+                    const int k = thpBhpIdx(w);
+                    auto row = [&](const Scalar bhp) {
+                        xs[k] = bhp;
+                        const auto qw = wellPhaseRatesOwn(w, xs);
+                        return bhp - (slopeLimitedBhp(well, p, qw).evaluation.value - well.vfp_dp);
+                    };
+                    Scalar hi = well.bhp_shutin - Scalar{1e-3} * unit::barsa;
+                    if (row(hi) <= Scalar{0}) {
+                        xs[k] = well.bhp_shutin;   // cannot lift at p: capped, no flow
+                    } else {
+                        Scalar lo = hi;
+                        Scalar step = unit::barsa;
+                        while (lo > unit::barsa && row(lo) > Scalar{0}) {
+                            hi = lo;
+                            lo = std::max(lo - step, Scalar{1} * unit::barsa);
+                            step *= 2;
+                        }
+                        for (int it = 0; it < 60; ++it) {
+                            const Scalar mid = Scalar{0.5} * (lo + hi);
+                            (row(mid) > Scalar{0} ? hi : lo) = mid;
+                        }
+                        xs[k] = Scalar{0.5} * (lo + hi);
+                    }
+                    const auto qw = wellPhaseRatesOwn(w, xs);
+                    wells += fmt::format(" {}:{:.0f}", well.name, (qw[kOil] + qw[kWater]) * unit::day);
+                }
+                const auto q = nodeFlows(xs)[i];
+                const Scalar real = tableBhp(nodes_[i].vfp_table, upstream, q, node_alq_[i], nodeFractions(i));
+                line += fmt::format("\n    p {:.2f}: L {:.0f} ({}), needed {:.2f}, g {:+.3f}",
+                                    p / unit::barsa, (q[kOil] + q[kWater]) * unit::day, wells,
+                                    real / unit::barsa, (p - real) / unit::barsa);
+            }
+            out.push_back(fmt::format("  SCAN node {} (real table, upstream {:.3f} bar):{}", nodes_[i].name,
+                                      upstream / unit::barsa, line));
+        }
         return out;
     }
 

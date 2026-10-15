@@ -1568,6 +1568,13 @@ solveGroupTree(const Network::ExtNetwork& network,
             }
         }
         if (!cliff && !refined_result.converged) {
+            // DEBUG: the failed real-table solve's diagnostics, as for a
+            // failed first pass.
+            log(fmt::format("Network diag: real-table solve under {} at report step {} failed (branches {})",
+                            root.name(), reportStepIdx, names));
+            for (const auto& line : refined_result.diagnostics) {
+                log(line);
+            }
             if (well_model_.comm().rank() == 0) {
                 const auto msg = fmt::format("Network: branches {} under {} at report step {} ended on "
                                              "the flattened (falling, low-flow) part of their tables, and "
