@@ -1165,6 +1165,18 @@ solveGroupTree(const Network::ExtNetwork& network,
         log(fmt::format("Network: solving the production network via the group-tree "
                         "balancer is not possible at report step {} ({}); using the "
                         "relaxed update.", reportStepIdx, why));
+        // TEMPORARY: the relaxed fixed-point update is to go; make every use
+        // of it visible.
+        if (well_model_.comm().rank() == 0) {
+            const auto msg = fmt::format("Network: the group-tree solve under {} gave up at report step {} "
+                                         "({}); the relaxed fixed-point update is used.",
+                                         root.name(), reportStepIdx, why);
+            if (well_model_.groupStateHelper().hasDeferredLogger()) {
+                well_model_.groupStateHelper().deferredLogger().warning("NETWORK_FIXED_POINT_FALLBACK", msg);
+            } else {
+                OpmLog::warning(msg);
+            }
+        }
         return std::optional<GroupTreeSolve>{};
     };
 

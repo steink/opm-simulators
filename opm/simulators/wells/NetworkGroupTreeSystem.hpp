@@ -1404,6 +1404,31 @@ public:
                            range(table.getGFRAxis(), Scalar{1}), range(table.getALQAxis(), Scalar{1}));
     }
 
+    /// DEBUG: for a node looked up flattened, what the slope-limited lookup
+    /// did at this flow (unflattened, bridged, non-monotone, clamped), its
+    /// slope, the real table's value and slope, and the lookup's fractions.
+    std::string flattenedNodeDiagnostics(const int node, const Scalar upstream,
+                                         const std::array<Scalar, NP>& q) const
+    {
+        if (!hasTable(nodes_[node]) || !node_flattened_[node] || fixed_pressure_[node].has_value()) {
+            return {};
+        }
+        const auto f = nodeFractions(node);
+        const auto flat = props_->bhp_with_slope_limit(nodes_[node].vfp_table, -q[kWater], -q[kOil], -q[kGas],
+                                                       upstream, node_alq_[node], f.wfr, f.gfr, f.fixed, Scalar{0});
+        const auto real = props_->bhp_with_slope_limit(nodes_[node].vfp_table, -q[kWater], -q[kOil], -q[kGas],
+                                                       upstream, node_alq_[node], f.wfr, f.gfr, f.fixed,
+                                                       std::numeric_limits<Scalar>::lowest());
+        const auto& table = props_->getTable(nodes_[node].vfp_table);
+        const Scalar flo = detail::getFlo(table, q[kWater], q[kOil], q[kGas]);
+        return fmt::format("; flattened lookup {} (slope {:.4g} bar/(m3/d)), real {:.3f} bar (slope {:.4g}), "
+                           "FLO {:.1f} m3/d, WFR/GFR {:.5g}/{:.5g}", slopeLimitName(flat.limit),
+                           flat.evaluation.dflo / unit::barsa / unit::day, real.evaluation.value / unit::barsa,
+                           real.evaluation.dflo / unit::barsa / unit::day, flo * unit::day,
+                           detail::getWFR(table, -q[kWater], -q[kOil], -q[kGas]),
+                           detail::getGFR(table, -q[kWater], -q[kOil], -q[kGas]));
+    }
+
     std::string describeRow(const int i, const State& x, const State& r,
                             const std::vector<std::array<Scalar, NP>>& flows) const
     {
@@ -1420,7 +1445,8 @@ public:
                                fixed_pressure_[node].has_value() ? ", fixed"
                                    : (hasTable(nodes_[node]) ? "" : ", no table"),
                                flows[node][kOil] * unit::day, flows[node][kWater] * unit::day,
-                               flows[node][kGas] * unit::day);
+                               flows[node][kGas] * unit::day)
+                + flattenedNodeDiagnostics(node, upstream, flows[node]);   // DEBUG
         }
         if (i < numNodes() + numActiveLambdas()) {
             for (int k = 0; k < numActiveNodes(); ++k) {
