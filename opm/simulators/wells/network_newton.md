@@ -153,10 +153,36 @@ nothing for its lambda to move: its lambda and row are dropped
 - **margin >= 0**: a flowing state exists and Newton missed it; the
   real-table solve is retried from the crossing (node pressure and the wells'
   bhps there).
-- Still failing: `NETWORK_FLATTENED_BRANCH` warning and the relaxed
-  fixed-point update for that network (or the flattened solution, with
-  `--group-tree-flattened-branch-fallback=flattened`). None left on the Norne
-  runs.
+- Still failing: the flattened solution is kept, with a
+  `NETWORK_FLATTENED_BRANCH` warning
+  (`--group-tree-flattened-branch-fallback=flattened`, default; `relaxed`
+  gives the old fixed-point update). None left on the Norne runs.
+
+## 5b. When pass 1 fails
+
+- From iteration 20 the solve takes line-search steps
+  (`NetworkSolve::Parameters::line_search_from`, group-tree solve only), to
+  break the cycles full steps fall into (4.6).
+- A failure with reopen candidates is solved again without them (6.2).
+- Still failing after 50 iterations: the **best iterate** -- the smallest
+  max residual over the whole solve, the start included, so never worse than
+  the start -- is handed over, with a `NETWORK_NOT_CONVERGED` warning ("FAR
+  from a network solution" above 5 bar). No open-set decisions (reopens,
+  cliff stops) are made on it.
+- The relaxed fixed-point update is left only for networks the group-tree
+  solve does not support (autochoke nodes, a satellite network node, missing
+  well data, a root missing from a non-empty balanced tree); temporarily
+  warned as `NETWORK_FIXED_POINT_FALLBACK`.
+- A network without balanced wells (an empty balanced tree: none producing
+  yet at the start, or all closed) is solved for its nodes alone, plus any
+  reopen candidates, instead of being handed to the fixed-point update.
+
+Norne (original deck, timestep hold, limit 2): 4 best-iterate hand-overs in
+a run, max residuals 0.39-3.4 bar. Their causes (2026-10-15): the flattened
+branch lookup jumps where a flat interval's slope crosses the limit (E-TPL,
+0.9 bar), and at zero flow where the node fractions switch to the fallback
+(D-TPL, 8 bar); and a well cycling between its cap and its tubing row on a
+rising branch (D-2H).
 
 Limits: the upstream pressure is held at its flattened value (exact for
 Norne's templates under a fixed node), and child nodes at their flows.
@@ -205,6 +231,6 @@ Norne's templates under a fixed node), and child nodes at their flows.
 | `--group-tree-cap-test` | `node-pressure` |
 | `--network-analytic-jacobian` | `true` |
 | `--group-tree-network-step` | `full` |
-| `--group-tree-flattened-branch-fallback` | `relaxed` |
+| `--group-tree-flattened-branch-fallback` | `flattened` |
 
 Details and measurements: `options.md`.

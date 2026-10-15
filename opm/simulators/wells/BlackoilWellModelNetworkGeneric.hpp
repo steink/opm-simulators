@@ -508,7 +508,7 @@ protected:
     std::optional<ProdGroupTreeBalancer::Tree<Scalar>> balanced_group_tree_;
     bool analytic_jacobian_ = false;
     bool branch_flattening_ = true;   // group-tree solver: see GroupTreeSystem::setBranchFlattening()
-    bool keep_flattened_solution_ = false;   // --group-tree-flattened-branch-fallback=flattened
+    bool keep_flattened_solution_ = true;   // --group-tree-flattened-branch-fallback=flattened
     bool network_line_search_ = false;   // --group-tree-network-step=linesearch
     bool cap_by_node_pressure_ = true;   // --group-tree-cap-test=node-pressure
     bool real_table_pass_ = true;   // --group-tree-real-table-pass

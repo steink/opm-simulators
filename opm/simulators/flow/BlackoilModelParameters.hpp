@@ -194,7 +194,7 @@ struct CloseStoppedWells { static constexpr bool value = false; };
 template<class Scalar>
 struct GroupTreeReopenThpMargin { static constexpr Scalar value = 0.0; };
 struct GroupTreeBranchFlattening { static constexpr bool value = true; };
-struct GroupTreeFlattenedBranchFallback { static constexpr auto value = "relaxed"; };
+struct GroupTreeFlattenedBranchFallback { static constexpr auto value = "flattened"; };
 struct GroupTreeNetworkStep { static constexpr auto value = "full"; };
 struct GroupTreeCapTest { static constexpr auto value = "node-pressure"; };
 struct GroupTreeRealTablePass { static constexpr bool value = true; };

@@ -74,6 +74,14 @@ struct Result
     /// Production only: every well's water/oil/gas and bhp at the solution.
     std::vector<std::array<Scalar, 3>> well_phase_rates;
     std::vector<Scalar> well_bhp;
+    /// A solve that did not converge: its best iterate, the one with the
+    /// smallest max norm of the scaled residual over the whole solve, the
+    /// start included -- never worse than the start by that measure.
+    Scalar best_residual = 0.0;
+    std::vector<Scalar> best_node_pressure;
+    std::vector<Scalar> best_well_rate;
+    std::vector<std::array<Scalar, 3>> best_well_phase_rates;
+    std::vector<Scalar> best_well_bhp;
     /// TEMPORARY diagnostics of a solve that did not converge: what the
     /// system reports on its last kDiagnosticIterations iterations and its
     /// final state (SystemBase::describeIteration(), describeState()).
@@ -283,13 +291,19 @@ struct LineSearch
     }
 };
 
-/// Convergence settings for solve(). No defaults: a caller states what it wants.
+/// Convergence settings for solve(). The first two have no defaults: a caller
+/// states what it wants.
 template<class Scalar>
 struct Parameters
 {
     /// Max norm of the scaled residual at which the system is converged.
     Scalar tolerance;
     int max_iterations;
+    /// From this iteration on, steps go through LineSearch instead of the
+    /// caller's globalisation (0: never). Full steps converge most solves; a
+    /// line search late in the solve breaks the cycles they can fall into
+    /// without stalling the solves they converge.
+    int line_search_from = 0;
 };
 
 /// Solve an InjectionSystem or a ProductionSystem by Newton-Raphson, choosing
@@ -330,6 +344,8 @@ solve(Sys& system,
 
     int switches = 0;
     bool enforcing = false;
+    auto best_x = x;
+    Scalar best_worst = std::numeric_limits<Scalar>::infinity();
     // TEMPORARY: described iterations of a solve that may be about to fail.
     std::vector<std::string> diagnostics;
     const int describe_from = max_iterations - kDiagnosticIterations + 1;
@@ -358,6 +374,10 @@ solve(Sys& system,
                 break;
             }
             worst = std::max(worst, std::abs(e));
+        }
+        if (worst < best_worst) {
+            best_worst = worst;
+            best_x = x;
         }
         {   // remember the active set, so a cycle can be seen in the report
             std::string set;
@@ -454,6 +474,8 @@ solve(Sys& system,
             for (int i = 0; i < n; ++i) {
                 x[i] += dx[i];
             }
+        } else if (params.line_search_from > 0 && it >= params.line_search_from) {
+            x = LineSearch{}.accept(system, x, r, dx);
         } else {
             x = globalisation.accept(system, x, r, dx);
         }
@@ -461,6 +483,11 @@ solve(Sys& system,
     last.iterations = max_iterations + 1;
     last.node_pressure = system.pressures(x);
     last.well_rate = system.wellRates(x);
+    last.best_residual = best_worst;
+    last.best_node_pressure = system.pressures(best_x);
+    last.best_well_rate = system.wellRates(best_x);
+    last.best_well_phase_rates = system.wellPhaseRates(best_x);
+    last.best_well_bhp = system.wellBhps(best_x);
     last.diagnostics = std::move(diagnostics);
     const auto state = system.describeState(x);
     last.diagnostics.insert(last.diagnostics.end(), state.begin(), state.end());

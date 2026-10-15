@@ -112,6 +112,16 @@ namespace details {
 template<class Scalar>
 constexpr NetworkSolve::Parameters<Scalar> kNetworkSolveParams{1e-2, 50};
 
+// The group-tree network solve: full steps, and from iteration 20 a line
+// search, to break the cycles full steps can fall into.
+template<class Scalar>
+constexpr NetworkSolve::Parameters<Scalar> kGroupTreeSolveParams{1e-2, 50, 20};
+
+// Above this max residual of its best iterate [bar or relative], an
+// unconverged group-tree solve is reported as far from a network solution.
+template<class Scalar>
+constexpr Scalar kGroupTreeFarResidual = 5.0;
+
 
 template<typename Scalar, typename IndexTraits>
 BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>::
@@ -1161,7 +1171,11 @@ solveGroupTree(const Network::ExtNetwork& network,
     if (!root.terminal_pressure().has_value()) {
         return giveUp(fmt::format("the tree under {} has no terminal pressure", root.name()));
     }
-    if (balancedTree.count(root.name()) == 0) {
+    // An empty tree: the balancer had no producing well (none open yet at
+    // the start, or all closed). The network then has no balanced wells and
+    // is solved for its nodes alone, plus any reopen candidates -- not
+    // handed to the relaxed update.
+    if (!balancedTree.empty() && balancedTree.count(root.name()) == 0) {
         return giveUp(fmt::format("{} is not a node in the balanced group tree", root.name()));
     }
 
@@ -1251,9 +1265,9 @@ solveGroupTree(const Network::ExtNetwork& network,
         ProdGroupTreeBalancer::extractFlatNetworkInput(balancedTree, std::string("FIELD"),
                                                        well_model_.guideRate(), networkThpWells),
         balancedTree, networkWells);
-    if (flat.empty()) {
-        return giveUp(fmt::format("none of the wells under {} is in the balanced tree", root.name()));
-    }
+    // No well of this network in the balanced tree (none producing: all
+    // stopped, or none open yet): solved for its nodes and reopen
+    // candidates alone, like an empty tree above.
 
     // Resolve each well's own network node (Well::groupName(), the same
     // convention newtonProductionNodePressures() uses) into this system's
@@ -1453,8 +1467,8 @@ solveGroupTree(const Network::ExtNetwork& network,
     // residual).
     const auto solveSystem = [this](Sys& sys, const std::vector<Scalar>& start) {
         return network_line_search_
-            ? NetworkSolve::solve(sys, start, kNetworkSolveParams<Scalar>, NetworkSolve::LineSearch{})
-            : NetworkSolve::solve(sys, start, kNetworkSolveParams<Scalar>, NetworkSolve::FullStep{});
+            ? NetworkSolve::solve(sys, start, kGroupTreeSolveParams<Scalar>, NetworkSolve::LineSearch{})
+            : NetworkSolve::solve(sys, start, kGroupTreeSolveParams<Scalar>, NetworkSolve::FullStep{});
     };
     auto result = solveSystem(system, guess);
     // DEBUG: cap switches (iterations on which some Thp well changed between
@@ -1483,12 +1497,31 @@ solveGroupTree(const Network::ExtNetwork& network,
             return solveGroupTree(network, reportStepIdx, root, balancedTree,
                                   /*offerReopenCandidates=*/false);
         }
-        return giveUp(fmt::format("it did not converge in {} iterations; max residual {:.3e}, "
-                                  "{} control switches{}",
-                                  result.iterations - 1, result.residual, result.switches,
-                                  result.control_trace.empty()
-                                      ? std::string{}
-                                      : fmt::format(", controls {}", result.control_trace)));
+        // Neither the flattened nor any other solve converged: continue with
+        // the best iterate -- never worse than the start by its residual --
+        // rather than the relaxed fixed-point update, and say so. No open-set
+        // changes are made on it (updateGroupTreeOpenSet()).
+        if (well_model_.comm().rank() == 0) {
+            const bool far = result.best_residual > kGroupTreeFarResidual<Scalar>;
+            const auto msg = fmt::format("Network: the group-tree solve under {} at report step {} did not "
+                                         "converge in {} iterations; continuing with its best iterate (max "
+                                         "residual {:.3g}{}, {} control switches{}).", root.name(),
+                                         reportStepIdx, result.iterations - 1, result.best_residual,
+                                         far ? ": FAR from a network solution" : "", result.switches,
+                                         result.control_trace.empty()
+                                             ? std::string{}
+                                             : fmt::format(", controls {}", result.control_trace));
+            if (well_model_.groupStateHelper().hasDeferredLogger()) {
+                well_model_.groupStateHelper().deferredLogger().warning("NETWORK_NOT_CONVERGED", msg);
+            } else {
+                OpmLog::warning(msg);
+            }
+        }
+        result.residual = result.best_residual;
+        result.node_pressure = result.best_node_pressure;
+        result.well_rate = result.best_well_rate;
+        result.well_phase_rates = result.best_well_phase_rates;
+        result.well_bhp = result.best_well_bhp;
     }
     // With flattened branch tables, a solution with some branch on its
     // flattened stretch is one of the flattened network only: solve the real
@@ -1500,7 +1533,8 @@ solveGroupTree(const Network::ExtNetwork& network,
     // the relaxed update. --group-tree-real-table-pass=false accepts the
     // flattened solution as it is.
     std::vector<std::string> network_cliff_wells;
-    const auto flattened = real_table_pass_ ? system.flattenedNodes(result) : std::vector<int>{};
+    const auto flattened = (real_table_pass_ && result.converged) ? system.flattenedNodes(result)
+                                                                  : std::vector<int>{};
     if (!flattened.empty()) {
         std::string names;
         for (const int i : flattened) {
@@ -1600,8 +1634,9 @@ solveGroupTree(const Network::ExtNetwork& network,
             result = std::move(refined_result);
         }
     }
-    log(fmt::format("Network: solved the production network under {} via the group-tree "
+    log(fmt::format("Network: {} the production network under {} via the group-tree "
                     "balancer at report step {} in {} iterations{}.",
+                    result.converged ? "solved" : "did not solve (best iterate used)",
                     root.name(), reportStepIdx, result.iterations,
                     num_candidates > 0 ? fmt::format(" ({} reopen candidates)", num_candidates)
                                        : std::string{}));
@@ -1649,7 +1684,7 @@ solveGroupTree(const Network::ExtNetwork& network,
         log(fmt::format("GroupTreeState under {} at report step {}{}: nodes{}; wells{}", root.name(),
                         reportStepIdx, num_candidates > 0 ? " (with candidates)" : "", nodes, wells));
     }
-    for (std::size_t n = 1; n < order.size(); ++n) {
+    for (std::size_t n = 1; n < order.size() && result.converged; ++n) {
         if (fractions[n].has_value()) {
             group_tree_node_fractions_[order[n]] = *fractions[n];
         }
@@ -1703,6 +1738,11 @@ updateGroupTreeOpenSet(const Network::ExtNetwork& network,
     };
     const bool report = well_model_.comm().rank() == 0;
     bool changed = false;
+    // An unconverged solve (its best iterate, see solveGroupTree()) decides
+    // nothing about the open set.
+    if (!solved->result.converged) {
+        return false;
+    }
 
     // Reopen the candidates the solve lets flow on the real tubing curve.
     // The dynamic status (openWell()) is what the well model's own solves
