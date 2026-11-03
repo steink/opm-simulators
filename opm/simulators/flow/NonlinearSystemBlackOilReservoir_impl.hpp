@@ -37,6 +37,8 @@
 #include <opm/simulators/flow/countGlobalCells.hpp>
 
 #include <algorithm>
+#include <array>
+#include <cstdlib>
 #include <cmath>
 #include <filesystem>
 #include <functional>
@@ -49,6 +51,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -906,6 +909,9 @@ getReservoirConvergence(const double reportTime,
     // Compute the Newton convergence per cell.
     this->convergencePerCell(B_avg, dt, tol_cnv, tol_cnv_energy);
 
+    // DEBUG: print the cells with the largest CNV.
+    this->logWorstCnvCells(B_avg, dt);
+
     // Output of residuals.
     if (this->terminal_output_) {
         // Only rank 0 does print to std::cout
@@ -1034,6 +1040,184 @@ convergencePerCell(const std::vector<Scalar>& B_avg,
     OPM_END_PARALLEL_TRY_CATCH("NonlinearSystemBlackOilReservoir::convergencePerCell() failed: ",
                                this->grid_.comm());
     rst_conv.updateNewton(convNewt);
+}
+
+template <class TypeTag>
+void
+NonlinearSystemBlackOilReservoir<TypeTag>::
+logWorstCnvCells(const std::vector<Scalar>& B_avg, const double dt)
+{
+    static const int numPrint = [] {
+        const char* env = std::getenv("OPM_DEBUG_WORST_CNV");
+        return env ? std::max(0, std::atoi(env)) : 0;
+    }();
+    if (numPrint == 0) {
+        return;
+    }
+
+    // One fixed-size record per cell, so the records can be gathered on rank 0.
+    enum Field { MaxCnv, MaxComp, Rank, I, J, K, Pv, Po, Sw, So, Sg, Rs, RsSat,
+                 MeaningW, MeaningG, Dp, DXw, DXg, Cnv0 };
+    constexpr int recSize = Cnv0 + numEq;
+    using Record = std::array<double, recSize>;
+
+    const auto& model = this->simulator_.model();
+    const auto& problem = this->simulator_.problem();
+    const auto& residual = model.linearizer().residual();
+    const auto& solution = model.solution(/*timeIdx=*/0);
+    const auto& elemMapper = model.elementMapper();
+    const auto& cartMapper = this->simulator_.vanguard().cartesianIndexMapper();
+    const auto& gridView = this->simulator_.gridView();
+    const auto& comm = this->grid_.comm();
+    const auto& iterCtx = problem.iterationContext();
+    const bool havePrev = !iterCtx.isFirstGlobalIteration()
+        && prevIterSol_.size() == solution.size();
+
+    const auto cellCnv = [&](const unsigned cell_idx, const double pv, const int compIdx) {
+        return std::abs(B_avg[compIdx] * residual[cell_idx][compIdx]) * dt / pv;
+    };
+    const auto poreVolume = [&](const unsigned cell_idx) {
+        return static_cast<double>(problem.referencePorosity(cell_idx, /*timeIdx=*/0)
+                                   * model.dofTotalVolume(cell_idx));
+    };
+
+    // Local candidates: (max CNV over components, cell)
+    std::vector<std::pair<double, unsigned>> cand;
+    for (const auto& elem : elements(gridView, Dune::Partitions::interior)) {
+        const unsigned cell_idx = elemMapper.index(elem);
+        const double pv = poreVolume(cell_idx);
+        double m = 0.0;
+        for (int compIdx = 0; compIdx < numEq; ++compIdx) {
+            m = std::max(m, cellCnv(cell_idx, pv, compIdx));
+        }
+        cand.emplace_back(m, cell_idx);
+    }
+    const auto nLocal = std::min<std::size_t>(numPrint, cand.size());
+    std::partial_sort(cand.begin(), cand.begin() + nLocal, cand.end(),
+                      [](const auto& x, const auto& y) { return x.first > y.first; });
+
+    constexpr auto oilIdx = FluidSystem::oilPhaseIdx;
+    constexpr auto gasIdx = FluidSystem::gasPhaseIdx;
+    constexpr auto watIdx = FluidSystem::waterPhaseIdx;
+    const auto nan = std::numeric_limits<double>::quiet_NaN();
+
+    std::vector<Record> local(numPrint);
+    for (auto& rec : local) {
+        rec.fill(nan);
+        rec[MaxCnv] = -1.0;
+    }
+    for (std::size_t n = 0; n < nLocal; ++n) {
+        const unsigned cell_idx = cand[n].second;
+        auto& rec = local[n];
+        const double pv = poreVolume(cell_idx);
+        rec[MaxCnv] = cand[n].first;
+        rec[MaxComp] = 0;
+        for (int compIdx = 0; compIdx < numEq; ++compIdx) {
+            rec[Cnv0 + compIdx] = cellCnv(cell_idx, pv, compIdx);
+            if (rec[Cnv0 + compIdx] > rec[Cnv0 + static_cast<int>(rec[MaxComp])]) {
+                rec[MaxComp] = compIdx;
+            }
+        }
+        rec[Rank] = comm.rank();
+        std::array<int, 3> ijk{};
+        cartMapper.cartesianCoordinate(cell_idx, ijk);
+        rec[I] = ijk[0] + 1;
+        rec[J] = ijk[1] + 1;
+        rec[K] = ijk[2] + 1;
+        rec[Pv] = pv;
+
+        const auto& fs = model.intensiveQuantities(cell_idx, /*timeIdx=*/0).fluidState();
+        const auto sat = [&fs](const unsigned phaseIdx) {
+            return FluidSystem::phaseIsActive(phaseIdx)
+                ? static_cast<double>(getValue(fs.saturation(phaseIdx))) : 0.0;
+        };
+        rec[Sw] = sat(watIdx);
+        rec[So] = sat(oilIdx);
+        rec[Sg] = sat(gasIdx);
+        if (FluidSystem::phaseIsActive(oilIdx)) {
+            rec[Po] = getValue(fs.pressure(oilIdx)) / 1e5;
+            if (FluidSystem::phaseIsActive(gasIdx) && FluidSystem::enableDissolvedGas()) {
+                rec[Rs] = getValue(fs.Rs());
+                rec[RsSat] = FluidSystem::template saturatedDissolutionFactor<std::decay_t<decltype(fs)>, Scalar>(
+                    fs, oilIdx, fs.pvtRegionIndex());
+            }
+        }
+
+        const auto& pvars = solution[cell_idx];
+        rec[MeaningW] = static_cast<int>(pvars.primaryVarsMeaningWater());
+        rec[MeaningG] = static_cast<int>(pvars.primaryVarsMeaningGas());
+        if (havePrev) {
+            const auto& prev = prevIterSol_[cell_idx];
+            const auto delta = [&](const unsigned pvIdx, const bool sameMeaning) {
+                return sameMeaning ? static_cast<double>(pvars[pvIdx] - prev[pvIdx]) : nan;
+            };
+            rec[Dp] = delta(Indices::pressureSwitchIdx,
+                            pvars.primaryVarsMeaningPressure() == prev.primaryVarsMeaningPressure()) / 1e5;
+            rec[DXw] = delta(Indices::waterSwitchIdx,
+                             pvars.primaryVarsMeaningWater() == prev.primaryVarsMeaningWater());
+            rec[DXg] = delta(Indices::compositionSwitchIdx,
+                             pvars.primaryVarsMeaningGas() == prev.primaryVarsMeaningGas());
+        }
+    }
+    prevIterSol_ = solution;
+
+    std::vector<Record> all(comm.rank() == 0 ? numPrint * comm.size() : 0);
+    comm.gather(local.front().data(),
+                comm.rank() == 0 ? all.front().data() : nullptr,
+                numPrint * recSize, 0);
+    if (!this->terminal_output_) {
+        return;
+    }
+
+    std::sort(all.begin(), all.end(),
+              [](const auto& x, const auto& y) { return x[MaxCnv] > y[MaxCnv]; });
+
+    const auto waterMeaning = [](const double m) -> std::string {
+        using WM = typename PrimaryVariables::WaterMeaning;
+        switch (static_cast<WM>(static_cast<int>(m))) {
+        case WM::Sw: return "Sw";
+        case WM::Rvw: return "Rvw";
+        case WM::Rsw: return "Rsw";
+        default: return "-";
+        }
+    };
+    const auto gasMeaning = [](const double m) -> std::string {
+        using GM = typename PrimaryVariables::GasMeaning;
+        switch (static_cast<GM>(static_cast<int>(m))) {
+        case GM::Sg: return "Sg";
+        case GM::Rs: return "Rs";
+        case GM::Rv: return "Rv";
+        default: return "-";
+        }
+    };
+
+    std::string msg = fmt::format("Worst CNV cells, iteration {}  (dP, dXw, dXg: change since previous "
+                                  "iteration; nan = not available or primary variable switched)\n",
+                                  iterCtx.iteration());
+    msg += fmt::format("{:>4} {:>5} {:>5} {:>4} {:>4}", "rank", "I", "J", "K", "comp");
+    for (int compIdx = 0; compIdx < numEq; ++compIdx) {
+        msg += fmt::format(" {:>9}", fmt::format("CNV({})", this->compNames_.name(compIdx)[0]));
+    }
+    msg += fmt::format(" {:>9} {:>9} {:>6} {:>6} {:>9} {:>9} {:>9} {:>3} {:>3} {:>9} {:>9} {:>9}",
+                       "PV", "Po[bar]", "Sw", "So", "Sg", "Rs", "RsSat", "pvW", "pvG",
+                       "dP[bar]", "dXw", "dXg");
+    const auto nPrint = std::min<std::size_t>(numPrint, all.size());
+    for (std::size_t n = 0; n < nPrint && all[n][MaxCnv] >= 0.0; ++n) {
+        const auto& rec = all[n];
+        msg += fmt::format("\n{:>4} {:>5} {:>5} {:>4} {:>4}",
+                           static_cast<int>(rec[Rank]), static_cast<int>(rec[I]),
+                           static_cast<int>(rec[J]), static_cast<int>(rec[K]),
+                           this->compNames_.name(static_cast<int>(rec[MaxComp])).substr(0, 4));
+        for (int compIdx = 0; compIdx < numEq; ++compIdx) {
+            msg += fmt::format(" {:9.2e}", rec[Cnv0 + compIdx]);
+        }
+        msg += fmt::format(" {:9.3e} {:9.3f} {:6.4f} {:6.4f} {:9.2e} {:9.3f} {:9.3f} {:>3} {:>3}"
+                           " {:9.2e} {:9.2e} {:9.2e}",
+                           rec[Pv], rec[Po], rec[Sw], rec[So], rec[Sg], rec[Rs], rec[RsSat],
+                           waterMeaning(rec[MeaningW]), gasMeaning(rec[MeaningG]),
+                           rec[Dp], rec[DXw], rec[DXg]);
+    }
+    OpmLog::debug(msg);
 }
 
 template <class TypeTag>

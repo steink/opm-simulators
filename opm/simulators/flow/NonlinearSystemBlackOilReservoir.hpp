@@ -226,6 +226,11 @@ public:
                             const double tol_cnv,
                             const double tol_cnv_energy);
 
+    /// \brief DEBUG: write the cells with the largest CNV to the DBG file.
+    /// Enabled by setting the environment variable OPM_DEBUG_WORST_CNV to the
+    /// number of cells to print.
+    void logWorstCnvCells(const std::vector<Scalar>& B_avg, const double dt);
+
     ConvergenceReport
     getReservoirConvergence(const double reportTime,
                             const double dt,
@@ -302,6 +307,9 @@ protected:
     long int global_nc_;
 
     SolutionVector solUpd_;
+
+    /// \brief DEBUG: solution at the previous call of logWorstCnvCells().
+    SolutionVector prevIterSol_;
 
     std::unique_ptr<NonlinearSystemNldd<TypeTag>> nlddSolver_; //!< Non-linear DD solver
     BlackoilModelConvergenceMonitor<Scalar> conv_monitor_;
