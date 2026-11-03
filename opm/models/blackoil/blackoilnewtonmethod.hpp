@@ -42,6 +42,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <vector>
 
@@ -92,17 +93,20 @@ public:
         ParentType::finishInit();
 
         wasSwitched_.resize(this->model().numTotalDof(), false);
+        storedRs_.resize(this->model().numTotalDof(), noStoredRs);
     }
 
     void capturePrimaryVariableSwitches()
     {
         // Preserve the switching history across retries of this timestep.
         wasSwitchedAtStepStart_ = wasSwitched_;
+        storedRsAtStepStart_ = storedRs_;
     }
 
     void restorePrimaryVariableSwitches()
     {
         wasSwitched_ = wasSwitchedAtStepStart_;
+        storedRs_ = storedRsAtStepStart_;
     }
 
     /*!
@@ -452,6 +456,13 @@ protected:
             }
         }
 
+        // DEBUG (OPM_DEBUG_KEEP_RS): values before the switch, see keepRsOnSwitch_().
+        constexpr bool keepRsPossible =
+            Indices::compositionSwitchIdx != std::numeric_limits<unsigned>::max()
+            && Indices::waterEnabled;
+        // (nextValue and currentValue may be the same object, so copy.)
+        const PrimaryVariables beforeSwitch = nextValue;
+
         // switch the new primary variables to something which is physically meaningful.
         // use a threshold value after a switch to make it harder to switch back
         // immediately.
@@ -469,6 +480,10 @@ protected:
                                                                          bparams_.waterOnlyThreshold_);
         }
 
+        if constexpr (keepRsPossible) {
+            keepRsOnSwitch_(globalDofIdx, nextValue, beforeSwitch);
+        }
+
         if (wasSwitched_[globalDofIdx]) {
             ++numPriVarsSwitched_;
         }
@@ -480,6 +495,52 @@ protected:
     }
 
 private:
+    /// DEBUG: remember Rs of oil that disappears with no free gas present.
+    ///
+    /// When a cell in the Rs state reaches Sw >= WaterOnlyThreshold,
+    /// adaptPrimaryVariables() switches it to the Sg state with Sg = 0, which loses
+    /// Rs. When oil reappears (Sg -> Rs) Rs is set to RsSat, which is only right
+    /// if free gas was present. With OPM_DEBUG_KEEP_RS set, the Rs before the
+    /// water-only switch is stored and used on the next Sg -> Rs switch, as
+    /// min(RsSat, stored Rs). The stored value is dropped once free gas is present.
+    void keepRsOnSwitch_(const unsigned globalDofIdx,
+                         PrimaryVariables& nextValue,
+                         const PrimaryVariables& beforeSwitch)
+    {
+        static const bool enabled = std::getenv("OPM_DEBUG_KEEP_RS") != nullptr;
+        if (!enabled) {
+            return;
+        }
+
+        using GasMeaning = typename PrimaryVariables::GasMeaning;
+        using WaterMeaning = typename PrimaryVariables::WaterMeaning;
+        constexpr auto rsIdx = Indices::compositionSwitchIdx;
+        auto& storedRs = storedRs_[globalDofIdx];
+
+        const auto oldGas = beforeSwitch.primaryVarsMeaningGas();
+        const auto newGas = nextValue.primaryVarsMeaningGas();
+        if (oldGas == GasMeaning::Rs && newGas == GasMeaning::Sg) {
+            // Water-only switch (as opposed to gas appearing from oversaturated oil)
+            const bool waterOnly =
+                beforeSwitch.primaryVarsMeaningWater() == WaterMeaning::Sw
+                && beforeSwitch[Indices::waterSwitchIdx] >= bparams_.waterOnlyThreshold_;
+            storedRs = waterOnly ? std::max(beforeSwitch[rsIdx], Scalar{0.0}) : noStoredRs;
+        }
+        else if (oldGas == GasMeaning::Sg && newGas == GasMeaning::Rs) {
+            if (storedRs != noStoredRs) {
+                // nextValue[rsIdx] is min(RsMax, RsSat) here
+                nextValue[rsIdx] = std::min(nextValue[rsIdx], storedRs);
+                storedRs = noStoredRs;
+            }
+        }
+        else if (newGas == GasMeaning::Sg && nextValue[rsIdx] > 0.0) {
+            // free gas is present, so reappearing oil is saturated
+            storedRs = noStoredRs;
+        }
+    }
+
+    static constexpr Scalar noStoredRs = -1.0;
+
     int numPriVarsSwitched_{};
 
     BlackoilNewtonParams<Scalar> bparams_{};
@@ -488,6 +549,10 @@ private:
     // to detect and hinder oscillations
     std::vector<bool> wasSwitched_{};
     std::vector<bool> wasSwitchedAtStepStart_{};
+
+    // DEBUG: Rs at the latest water-only switch, see keepRsOnSwitch_()
+    std::vector<Scalar> storedRs_{};
+    std::vector<Scalar> storedRsAtStepStart_{};
 };
 
 } // namespace Opm
