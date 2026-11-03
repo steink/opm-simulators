@@ -1293,8 +1293,8 @@ logWorstCnvCells(const std::vector<Scalar>& B_avg, const double dt)
     };
 
     const auto keepRsEvent = [](const double e) -> std::string {
-        constexpr std::array<const char*, 6> names {
-            "-", "stored", "gasAppeared", "used", "notAvail", "gasPresent"
+        constexpr std::array<const char*, 7> names {
+            "-", "stored", "gasAppeared", "used", "notAvail", "gasPresent", "upstream"
         };
         const auto i = static_cast<std::size_t>(e);
         return i < names.size() ? names[i] : "?";
