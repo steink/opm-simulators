@@ -42,6 +42,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
 #include <vector>
@@ -94,6 +95,7 @@ public:
 
         wasSwitched_.resize(this->model().numTotalDof(), false);
         storedRs_.resize(this->model().numTotalDof(), noStoredRs);
+        keepRsEvent_.resize(this->model().numTotalDof(), KeepRsEvent::None);
     }
 
     void capturePrimaryVariableSwitches()
@@ -124,6 +126,23 @@ public:
      */
     unsigned numPriVarsSwitched() const
     { return numPriVarsSwitched_; }
+
+    /// DEBUG: what keepRsOnSwitch_() last did for a cell
+    enum class KeepRsEvent : std::uint8_t {
+        None,         // nothing yet
+        Stored,       // Rs -> Sg, water-only: Rs stored
+        GasAppeared,  // Rs -> Sg, oversaturated oil: nothing stored
+        Used,         // Sg -> Rs: stored Rs used
+        NotAvailable, // Sg -> Rs: no stored Rs, RsSat used
+        GasPresent,   // Sg state with Sg > 0: stored Rs dropped
+    };
+
+    /// DEBUG: stored Rs of a cell, negative if none
+    Scalar storedRs(const unsigned globalDofIdx) const
+    { return storedRs_.empty() ? noStoredRs : storedRs_[globalDofIdx]; }
+
+    KeepRsEvent keepRsEvent(const unsigned globalDofIdx) const
+    { return keepRsEvent_.empty() ? KeepRsEvent::None : keepRsEvent_[globalDofIdx]; }
 
 protected:
     friend NewtonMethod<TypeTag>;
@@ -502,7 +521,8 @@ private:
     /// Rs. When oil reappears (Sg -> Rs) Rs is set to RsSat, which is only right
     /// if free gas was present. With OPM_DEBUG_KEEP_RS set, the Rs before the
     /// water-only switch is stored and used on the next Sg -> Rs switch, as
-    /// min(RsSat, stored Rs). The stored value is dropped once free gas is present.
+    /// min(RsSat, stored Rs). The stored value is dropped once free gas is present,
+    /// i.e. Sg > OPM_DEBUG_KEEP_RS_SG (default 1e-6).
     void keepRsOnSwitch_(const unsigned globalDofIdx,
                          PrimaryVariables& nextValue,
                          const PrimaryVariables& beforeSwitch)
@@ -511,11 +531,17 @@ private:
         if (!enabled) {
             return;
         }
+        // Sg below this counts as no free gas (round-off in the water-only state)
+        static const Scalar sgFreeGas = [] {
+            const char* env = std::getenv("OPM_DEBUG_KEEP_RS_SG");
+            return env ? static_cast<Scalar>(std::atof(env)) : Scalar{1e-6};
+        }();
 
         using GasMeaning = typename PrimaryVariables::GasMeaning;
         using WaterMeaning = typename PrimaryVariables::WaterMeaning;
         constexpr auto rsIdx = Indices::compositionSwitchIdx;
         auto& storedRs = storedRs_[globalDofIdx];
+        auto& event = keepRsEvent_[globalDofIdx];
 
         const auto oldGas = beforeSwitch.primaryVarsMeaningGas();
         const auto newGas = nextValue.primaryVarsMeaningGas();
@@ -525,17 +551,25 @@ private:
                 beforeSwitch.primaryVarsMeaningWater() == WaterMeaning::Sw
                 && beforeSwitch[Indices::waterSwitchIdx] >= bparams_.waterOnlyThreshold_;
             storedRs = waterOnly ? std::max(beforeSwitch[rsIdx], Scalar{0.0}) : noStoredRs;
+            event = waterOnly ? KeepRsEvent::Stored : KeepRsEvent::GasAppeared;
         }
         else if (oldGas == GasMeaning::Sg && newGas == GasMeaning::Rs) {
             if (storedRs != noStoredRs) {
                 // nextValue[rsIdx] is min(RsMax, RsSat) here
                 nextValue[rsIdx] = std::min(nextValue[rsIdx], storedRs);
                 storedRs = noStoredRs;
+                event = KeepRsEvent::Used;
+            }
+            else {
+                event = KeepRsEvent::NotAvailable;
             }
         }
-        else if (newGas == GasMeaning::Sg && nextValue[rsIdx] > 0.0) {
+        else if (newGas == GasMeaning::Sg && nextValue[rsIdx] > sgFreeGas) {
             // free gas is present, so reappearing oil is saturated
-            storedRs = noStoredRs;
+            if (storedRs != noStoredRs) {
+                storedRs = noStoredRs;
+                event = KeepRsEvent::GasPresent;
+            }
         }
     }
 
@@ -553,6 +587,7 @@ private:
     // DEBUG: Rs at the latest water-only switch, see keepRsOnSwitch_()
     std::vector<Scalar> storedRs_{};
     std::vector<Scalar> storedRsAtStepStart_{};
+    std::vector<KeepRsEvent> keepRsEvent_{};
 };
 
 } // namespace Opm
