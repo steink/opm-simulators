@@ -1057,8 +1057,14 @@ logWorstCnvCells(const std::vector<Scalar>& B_avg, const double dt)
 
     // One fixed-size record per cell, so the records can be gathered on rank 0.
     enum Field { MaxCnv, MaxComp, Rank, I, J, K, Pv, Po, Sw, So, Sg, Rs, RsSat,
-                 MeaningW, MeaningG, Dp, DXw, DXg, StoredRs, KeepRsEv, Cnv0 };
-    constexpr int recSize = Cnv0 + numEq;
+                 MeaningW, MeaningG, Dp, DXw, DXg, StoredRs, KeepRsEv,
+                 Kro, Krw, Pcow, SoStart, ResO, FluxO, NumFaces, Cnv0 };
+    // Per face, the largest oil fluxes first. Signs: + means out of the cell.
+    enum FaceField { FI, FJ, FK, FTrans, FDPhiO, FUpO, FQo, FCnvO, FQw, FSwNb, FKroNb,
+                     numFaceFields };
+    constexpr int maxFaces = 8;
+    constexpr int faceStart = Cnv0 + numEq;
+    constexpr int recSize = faceStart + maxFaces * numFaceFields;
     using Record = std::array<double, recSize>;
 
     const auto& model = this->simulator_.model();
@@ -1143,6 +1149,97 @@ logWorstCnvCells(const std::vector<Scalar>& B_avg, const double dt)
             }
         }
 
+        const auto& intQuants = model.intensiveQuantities(cell_idx, /*timeIdx=*/0);
+        const auto kr = [&intQuants, nan](const unsigned phaseIdx) {
+            return FluidSystem::phaseIsActive(phaseIdx)
+                ? static_cast<double>(getValue(intQuants.relativePermeability(phaseIdx))) : nan;
+        };
+        rec[Kro] = kr(oilIdx);
+        rec[Krw] = kr(watIdx);
+        if (FluidSystem::phaseIsActive(oilIdx) && FluidSystem::phaseIsActive(watIdx)) {
+            rec[Pcow] = getValue(fs.pressure(oilIdx) - fs.pressure(watIdx)) / 1e5;
+        }
+        {
+            const auto& start = model.solution(/*timeIdx=*/1)[cell_idx];
+            double swStart = 0.0;
+            double sgStart = 0.0;
+            if constexpr (Indices::waterEnabled) {
+                if (start.primaryVarsMeaningWater() == PrimaryVariables::WaterMeaning::Sw) {
+                    swStart = start[Indices::waterSwitchIdx];
+                }
+            }
+            if constexpr (Indices::compositionSwitchIdx != std::numeric_limits<unsigned>::max()) {
+                if (start.primaryVarsMeaningGas() == PrimaryVariables::GasMeaning::Sg) {
+                    sgStart = start[Indices::compositionSwitchIdx];
+                }
+            }
+            rec[SoStart] = 1.0 - swStart - sgStart;
+        }
+
+        // Oil residual split into face fluxes and the rest (accumulation minus
+        // sources, i.e. wells and aquifers), as signed CNV contributions.
+        if constexpr (requires { model.linearizer().getNeighborInfo(); }) {
+            if (FluidSystem::phaseIsActive(oilIdx) && FluidSystem::phaseIsActive(watIdx)) {
+                using RateVector = GetPropType<TypeTag, Properties::RateVector>;
+                using LocalResidual = GetPropType<TypeTag, Properties::LocalResidual>;
+                const unsigned oilEq = FluidSystem::canonicalToActiveCompIdx(
+                    FluidSystem::solventComponentIndex(oilIdx));
+                const unsigned watEq = FluidSystem::canonicalToActiveCompIdx(
+                    FluidSystem::solventComponentIndex(watIdx));
+                const double cnvScaleO = B_avg[oilEq] * dt / pv;
+                constexpr double perDay = 86400.0;
+                // SI transmissibility to cP.m3/(day.bar)
+                constexpr double transToMetric = 86400.0 * 1e3 * 1e5;
+
+                std::vector<std::array<double, numFaceFields>> faces;
+                double fluxSumO = 0.0;
+                for (const auto& nb : model.linearizer().getNeighborInfo()[cell_idx]) {
+                    const unsigned nbIdx = nb.neighbor;
+                    const auto& intQuantsNb = model.intensiveQuantities(nbIdx, /*timeIdx=*/0);
+                    RateVector flux(0.0);
+                    RateVector darcy(0.0);
+                    LocalResidual::computeFlux(flux, darcy, cell_idx, nbIdx, intQuants, intQuantsNb,
+                                               nb.res_nbinfo, problem.moduleParams());
+                    const double area = nb.res_nbinfo.faceArea;
+                    const double qO = getValue(flux[oilEq]) * area;
+                    fluxSumO += qO;
+
+                    // Oil potential of the neighbour minus this cell, as in
+                    // calculatePhasePressureDiff_(): > 0 means oil flows in.
+                    const auto& fsNb = intQuantsNb.fluidState();
+                    const double rhoAvg = 0.5 * (getValue(fs.density(oilIdx))
+                                                 + getValue(fsNb.density(oilIdx)));
+                    const double dPhiO = getValue(fsNb.pressure(oilIdx)) + rhoAvg * nb.res_nbinfo.dZg
+                        - getValue(fs.pressure(oilIdx));
+
+                    std::array<double, numFaceFields> f{};
+                    std::array<int, 3> ijkNb{};
+                    cartMapper.cartesianCoordinate(nbIdx, ijkNb);
+                    f[FI] = ijkNb[0] + 1;
+                    f[FJ] = ijkNb[1] + 1;
+                    f[FK] = ijkNb[2] + 1;
+                    f[FTrans] = nb.res_nbinfo.trans * transToMetric;
+                    f[FDPhiO] = dPhiO / 1e5;
+                    f[FUpO] = dPhiO > 0.0 ? 0.0 : 1.0;
+                    f[FQo] = qO * perDay;
+                    f[FCnvO] = qO * cnvScaleO;
+                    f[FQw] = getValue(flux[watEq]) * area * perDay;
+                    f[FSwNb] = getValue(fsNb.saturation(watIdx));
+                    f[FKroNb] = getValue(intQuantsNb.relativePermeability(oilIdx));
+                    faces.push_back(f);
+                }
+                std::ranges::sort(faces, [](const auto& x, const auto& y)
+                                  { return std::abs(x[FQo]) > std::abs(y[FQo]); });
+                const int nFaces = std::min<int>(maxFaces, faces.size());
+                for (int f = 0; f < nFaces; ++f) {
+                    std::ranges::copy(faces[f], rec.begin() + faceStart + f * numFaceFields);
+                }
+                rec[NumFaces] = nFaces;
+                rec[ResO] = residual[cell_idx][oilEq] * cnvScaleO;
+                rec[FluxO] = fluxSumO * cnvScaleO;
+            }
+        }
+
         const auto& newton = model.newtonMethod();
         rec[StoredRs] = newton.storedRs(cell_idx);
         rec[KeepRsEv] = static_cast<int>(newton.keepRsEvent(cell_idx));
@@ -1204,7 +1301,12 @@ logWorstCnvCells(const std::vector<Scalar>& B_avg, const double dt)
     };
 
     std::string msg = fmt::format("Worst CNV cells, iteration {}  (dP, dXw, dXg: change since previous "
-                                  "iteration; nan = not available or primary variable switched)\n",
+                                  "iteration; nan = not available or primary variable switched)\n"
+                                  "  resO = flux + rest: signed oil residual as CNV, split into face "
+                                  "fluxes and the rest (accumulation - wells/sources)\n"
+                                  "  face lines (largest oil flux first): dPhiO = oil potential of "
+                                  "neighbour - cell (> 0: oil flows in), up = upstream cell for oil, "
+                                  "qO/qW [sm3/day] and cnvO > 0: out of the cell\n",
                                   iterCtx.iteration());
     msg += fmt::format("{:>4} {:>5} {:>5} {:>4} {:>4}", "rank", "I", "J", "K", "comp");
     for (int compIdx = 0; compIdx < numEq; ++compIdx) {
@@ -1214,6 +1316,8 @@ logWorstCnvCells(const std::vector<Scalar>& B_avg, const double dt)
                        "PV", "Po[bar]", "Sw", "So", "Sg", "Rs", "RsSat", "pvW", "pvG",
                        "dP[bar]", "dXw", "dXg");
     msg += fmt::format(" {:>9} {:>11}", "storedRs", "keepRsEvent");
+    msg += fmt::format(" {:>9} {:>9} {:>9} {:>6} {:>10} {:>10} {:>10}",
+                       "kro", "krw", "Pcow[bar]", "SoStrt", "resO", "flux", "rest");
     const auto nPrint = std::min<std::size_t>(numPrint, all.size());
     for (std::size_t n = 0; n < nPrint && all[n][MaxCnv] >= 0.0; ++n) {
         const auto& rec = all[n];
@@ -1232,6 +1336,20 @@ logWorstCnvCells(const std::vector<Scalar>& B_avg, const double dt)
         msg += fmt::format(" {:>9} {:>11}",
                            rec[StoredRs] < 0.0 ? std::string("-") : fmt::format("{:9.3f}", rec[StoredRs]),
                            keepRsEvent(rec[KeepRsEv]));
+        msg += fmt::format(" {:9.2e} {:9.2e} {:9.4f} {:6.4f} {:+10.2e} {:+10.2e} {:+10.2e}",
+                           rec[Kro], rec[Krw], rec[Pcow], rec[SoStart],
+                           rec[ResO], rec[FluxO], rec[ResO] - rec[FluxO]);
+        const int nFaces = std::isnan(rec[NumFaces]) ? 0 : static_cast<int>(rec[NumFaces]);
+        for (int f = 0; f < nFaces; ++f) {
+            const double* face = rec.data() + faceStart + f * numFaceFields;
+            msg += fmt::format("\n      face to {:>5} {:>5} {:>4}  T[cP.m3/d/bar] {:9.3e}"
+                               "  dPhiO[bar] {:+10.3e}  up {:>4}  qO {:+10.3e}  cnvO {:+9.2e}"
+                               "  qW {:+10.3e}  SwNb {:6.4f}  kroNb {:9.2e}",
+                               static_cast<int>(face[FI]), static_cast<int>(face[FJ]),
+                               static_cast<int>(face[FK]), face[FTrans], face[FDPhiO],
+                               face[FUpO] > 0.5 ? "cell" : "nb", face[FQo], face[FCnvO],
+                               face[FQw], face[FSwNb], face[FKroNb]);
+        }
     }
     OpmLog::debug(msg);
 }
