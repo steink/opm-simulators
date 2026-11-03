@@ -270,6 +270,10 @@ protected:
         Valgrind::CheckDefined(update);
         Valgrind::CheckDefined(currentResidual);
 
+        // DEBUG (OPM_DEBUG_KEEP_RS, OPM_DEBUG_RS_CHOP): values before the update.
+        // (nextValue and currentValue may be the same object, so copy.)
+        const PrimaryVariables beforeUpdate = currentValue;
+
         // saturation delta for each phase
         Scalar deltaSw = 0.0;
         Scalar deltaSo = 0.0;
@@ -479,7 +483,9 @@ protected:
         constexpr bool keepRsPossible =
             Indices::compositionSwitchIdx != std::numeric_limits<unsigned>::max()
             && Indices::waterEnabled;
-        // (nextValue and currentValue may be the same object, so copy.)
+        if constexpr (keepRsPossible) {
+            chopRsUpdate_(nextValue, beforeUpdate);
+        }
         const PrimaryVariables beforeSwitch = nextValue;
 
         // switch the new primary variables to something which is physically meaningful.
@@ -500,7 +506,7 @@ protected:
         }
 
         if constexpr (keepRsPossible) {
-            keepRsOnSwitch_(globalDofIdx, nextValue, beforeSwitch);
+            keepRsOnSwitch_(globalDofIdx, nextValue, beforeUpdate, beforeSwitch);
         }
 
         if (wasSwitched_[globalDofIdx]) {
@@ -525,6 +531,7 @@ private:
     /// i.e. Sg > OPM_DEBUG_KEEP_RS_SG (default 1e-6).
     void keepRsOnSwitch_(const unsigned globalDofIdx,
                          PrimaryVariables& nextValue,
+                         const PrimaryVariables& beforeUpdate,
                          const PrimaryVariables& beforeSwitch)
     {
         static const bool enabled = std::getenv("OPM_DEBUG_KEEP_RS") != nullptr;
@@ -550,7 +557,13 @@ private:
             const bool waterOnly =
                 beforeSwitch.primaryVarsMeaningWater() == WaterMeaning::Sw
                 && beforeSwitch[Indices::waterSwitchIdx] >= bparams_.waterOnlyThreshold_;
-            storedRs = waterOnly ? std::max(beforeSwitch[rsIdx], Scalar{0.0}) : noStoredRs;
+            // Not the Rs after this iteration's update: with tiny So the Rs update is
+            // badly scaled (Jacobian column ~ So * bo) and close to noise. Prefer Rs at
+            // the start of the timestep, else Rs before this update.
+            const auto& stepStart = this->model().solution(/*timeIdx=*/1)[globalDofIdx];
+            const Scalar rs = stepStart.primaryVarsMeaningGas() == GasMeaning::Rs
+                ? stepStart[rsIdx] : beforeUpdate[rsIdx];
+            storedRs = waterOnly ? std::max(rs, Scalar{0.0}) : noStoredRs;
             event = waterOnly ? KeepRsEvent::Stored : KeepRsEvent::GasAppeared;
         }
         else if (oldGas == GasMeaning::Sg && newGas == GasMeaning::Rs) {
@@ -571,6 +584,24 @@ private:
                 event = KeepRsEvent::GasPresent;
             }
         }
+    }
+
+    /// DEBUG: limit the Rs change per Newton iteration in the Rs state to
+    /// OPM_DEBUG_RS_CHOP (in the model's Rs unit, sm3/sm3). Off if not set.
+    void chopRsUpdate_(PrimaryVariables& nextValue,
+                       const PrimaryVariables& beforeUpdate) const
+    {
+        static const Scalar maxDrs = [] {
+            const char* env = std::getenv("OPM_DEBUG_RS_CHOP");
+            return env ? static_cast<Scalar>(std::atof(env)) : Scalar{0.0};
+        }();
+        if (maxDrs <= 0.0
+            || beforeUpdate.primaryVarsMeaningGas() != PrimaryVariables::GasMeaning::Rs) {
+            return;
+        }
+        constexpr auto rsIdx = Indices::compositionSwitchIdx;
+        const Scalar drs = std::clamp(nextValue[rsIdx] - beforeUpdate[rsIdx], -maxDrs, maxDrs);
+        nextValue[rsIdx] = std::max(beforeUpdate[rsIdx] + drs, Scalar{0.0});
     }
 
     static constexpr Scalar noStoredRs = -1.0;
