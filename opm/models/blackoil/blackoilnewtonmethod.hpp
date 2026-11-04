@@ -36,6 +36,8 @@
 
 #include <opm/models/nonlinear/newtonmethod.hh>
 
+#include <opm/models/parallel/gridcommhandles.hh>
+
 #include <opm/models/utils/signum.hh>
 
 #include <opm/material/common/Valgrind.hpp>
@@ -45,6 +47,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <type_traits>
 #include <vector>
 
 namespace Opm::Properties {
@@ -94,21 +97,19 @@ public:
         ParentType::finishInit();
 
         wasSwitched_.resize(this->model().numTotalDof(), false);
-        storedRs_.resize(this->model().numTotalDof(), noStoredRs);
         keepRsEvent_.resize(this->model().numTotalDof(), KeepRsEvent::None);
+        appearingRs_.resize(this->model().numTotalDof(), noRs);
     }
 
     void capturePrimaryVariableSwitches()
     {
         // Preserve the switching history across retries of this timestep.
         wasSwitchedAtStepStart_ = wasSwitched_;
-        storedRsAtStepStart_ = storedRs_;
     }
 
     void restorePrimaryVariableSwitches()
     {
         wasSwitched_ = wasSwitchedAtStepStart_;
-        storedRs_ = storedRsAtStepStart_;
     }
 
     /*!
@@ -129,18 +130,12 @@ public:
 
     /// DEBUG: what keepRsOnSwitch_() last did for a cell
     enum class KeepRsEvent : std::uint8_t {
-        None,         // nothing yet
-        Stored,       // Rs -> Sg, water-only: Rs stored
-        GasAppeared,  // Rs -> Sg, oversaturated oil: nothing stored
-        Used,         // Sg -> Rs: stored Rs used
-        NotAvailable, // Sg -> Rs: no stored Rs, RsSat used
-        GasPresent,   // Sg state with Sg > 0: stored Rs dropped
-        Upstream,     // Sg -> Rs: no stored Rs, Rs of the inflowing oil used
+        None,      // nothing yet
+        Inflow,    // oil appeared: Rs from the inflowing oil only
+        OwnOil,    // oil appeared: Rs from the start-of-step oil only
+        Mixed,     // oil appeared: Rs from both
+        RsSat,     // oil appeared: no oil in place or inflow, RsSat kept
     };
-
-    /// DEBUG: stored Rs of a cell, negative if none
-    Scalar storedRs(const unsigned globalDofIdx) const
-    { return storedRs_.empty() ? noStoredRs : storedRs_[globalDofIdx]; }
 
     KeepRsEvent keepRsEvent(const unsigned globalDofIdx) const
     { return keepRsEvent_.empty() ? KeepRsEvent::None : keepRsEvent_[globalDofIdx]; }
@@ -200,6 +195,7 @@ public:
                  const GlobalEqVector& currentResidual)
     {
         const auto& comm = this->simulator_.gridView().comm();
+        std::ranges::fill(appearingRs_, noRs);
 
         int succeeded;
         try {
@@ -218,6 +214,8 @@ public:
             throw NumericalProblem("A process did not succeed in adapting the primary variables");
         }
 
+        applyAppearingRs_(nextSolution);
+
         numPriVarsSwitched_ = comm.sum(numPriVarsSwitched_);
     }
 
@@ -233,11 +231,19 @@ public:
             if (solutionUpdate[dofIdx] == zero) {
                 continue;
             }
+            appearingRs_[dofIdx] = noRs;
             updatePrimaryVariables_(dofIdx,
                                     nextSolution[dofIdx],
                                     currentSolution[dofIdx],
                                     solutionUpdate[dofIdx],
                                     currentResidual[dofIdx]);
+            if constexpr (Indices::compositionSwitchIdx != std::numeric_limits<unsigned>::max()) {
+                // NLDD subdomain solve: no ghost cells to synchronise
+                if (appearingRs_[dofIdx] != noRs) {
+                    auto& rs = nextSolution[dofIdx][Indices::compositionSwitchIdx];
+                    rs = std::min(rs, appearingRs_[dofIdx]);
+                }
+            }
         }
     }
 
@@ -480,14 +486,13 @@ protected:
             }
         }
 
-        // DEBUG (OPM_DEBUG_KEEP_RS): values before the switch, see keepRsOnSwitch_().
+        // DEBUG (OPM_DEBUG_KEEP_RS): see keepRsOnSwitch_().
         constexpr bool keepRsPossible =
             Indices::compositionSwitchIdx != std::numeric_limits<unsigned>::max()
             && Indices::waterEnabled;
         if constexpr (keepRsPossible) {
             chopRsUpdate_(nextValue, beforeUpdate);
         }
-        const PrimaryVariables beforeSwitch = nextValue;
 
         // switch the new primary variables to something which is physically meaningful.
         // use a threshold value after a switch to make it harder to switch back
@@ -507,7 +512,7 @@ protected:
         }
 
         if constexpr (keepRsPossible) {
-            keepRsOnSwitch_(globalDofIdx, nextValue, beforeUpdate, beforeSwitch);
+            keepRsOnSwitch_(globalDofIdx, nextValue, beforeUpdate);
         }
 
         if (wasSwitched_[globalDofIdx]) {
@@ -521,87 +526,65 @@ protected:
     }
 
 private:
-    /// DEBUG: remember Rs of oil that disappears with no free gas present.
+    /// DEBUG: give oil appearing in a water-only cell the Rs of that oil.
     ///
-    /// When a cell in the Rs state reaches Sw >= WaterOnlyThreshold,
-    /// adaptPrimaryVariables() switches it to the Sg state with Sg = 0, which loses
-    /// Rs. When oil reappears (Sg -> Rs) Rs is set to RsSat, which is only right
-    /// if free gas was present. With OPM_DEBUG_KEEP_RS set, the Rs before the
-    /// water-only switch is stored and used on the next Sg -> Rs switch, as
-    /// min(RsSat, stored Rs). The stored value is dropped once free gas is present,
-    /// i.e. Sg > OPM_DEBUG_KEEP_RS_SG (default 1e-6). If nothing is stored, e.g.
-    /// oil flowing into a cell that had none, the Rs of the inflowing oil is used.
+    /// A cell with Sw >= WaterOnlyThreshold is in the Sg state with Sg = 0, which has
+    /// no Rs. When oil appears there (Sg -> Rs) adaptPrimaryVariables() sets Rs to
+    /// RsSat, which is only right if free gas was present. With OPM_DEBUG_KEEP_RS
+    /// set, Rs is instead the gas/oil ratio of the oil the cell should hold,
+    /// see appearingOilRs_(), capped at RsSat. Gas disappearing from a cell that
+    /// has oil keeps RsSat. The value is only recorded here. It is applied by
+    /// applyAppearingRs_(), as ghost cells have to get it from their owner.
     void keepRsOnSwitch_(const unsigned globalDofIdx,
-                         PrimaryVariables& nextValue,
-                         const PrimaryVariables& beforeUpdate,
-                         const PrimaryVariables& beforeSwitch)
+                         const PrimaryVariables& nextValue,
+                         const PrimaryVariables& beforeUpdate)
     {
         static const bool enabled = std::getenv("OPM_DEBUG_KEEP_RS") != nullptr;
         if (!enabled) {
             return;
         }
-        // Sg below this counts as no free gas (round-off in the water-only state)
-        static const Scalar sgFreeGas = [] {
-            const char* env = std::getenv("OPM_DEBUG_KEEP_RS_SG");
-            return env ? static_cast<Scalar>(std::atof(env)) : Scalar{1e-6};
-        }();
 
         using GasMeaning = typename PrimaryVariables::GasMeaning;
-        using WaterMeaning = typename PrimaryVariables::WaterMeaning;
-        constexpr auto rsIdx = Indices::compositionSwitchIdx;
-        auto& storedRs = storedRs_[globalDofIdx];
-        auto& event = keepRsEvent_[globalDofIdx];
+        if (beforeUpdate.primaryVarsMeaningGas() != GasMeaning::Sg
+            || nextValue.primaryVarsMeaningGas() != GasMeaning::Rs
+            || !hasNoOil_(beforeUpdate)) {
+            return;
+        }
 
-        const auto oldGas = beforeSwitch.primaryVarsMeaningGas();
-        const auto newGas = nextValue.primaryVarsMeaningGas();
-        if (oldGas == GasMeaning::Rs && newGas == GasMeaning::Sg) {
-            // Water-only switch (as opposed to gas appearing from oversaturated oil)
-            const bool waterOnly =
-                beforeSwitch.primaryVarsMeaningWater() == WaterMeaning::Sw
-                && beforeSwitch[Indices::waterSwitchIdx] >= bparams_.waterOnlyThreshold_;
-            // Not the Rs after this iteration's update: with tiny So the Rs update is
-            // badly scaled (Jacobian column ~ So * bo) and close to noise. Prefer Rs at
-            // the start of the timestep, else Rs before this update.
-            // If the cell had no oil at the start of the timestep, its oil came from
-            // its neighbours, so prefer the Rs of the inflowing oil.
-            const auto& stepStart = this->model().solution(/*timeIdx=*/1)[globalDofIdx];
-            Scalar rs = beforeUpdate[rsIdx];
-            if (stepStart.primaryVarsMeaningGas() == GasMeaning::Rs) {
-                rs = stepStart[rsIdx];
+        KeepRsEvent event = KeepRsEvent::RsSat;
+        const Scalar rs = appearingOilRs_(globalDofIdx, event);
+        if (event != KeepRsEvent::RsSat) {
+            appearingRs_[globalDofIdx] = rs;
+        }
+        keepRsEvent_[globalDofIdx] = event;
+    }
+
+    /// DEBUG: apply the Rs recorded by keepRsOnSwitch_(). A ghost cell has an
+    /// incomplete stencil, so its own inflow is wrong: it takes its owner's value.
+    void applyAppearingRs_(SolutionVector& nextSolution)
+    {
+        if constexpr (Indices::compositionSwitchIdx != std::numeric_limits<unsigned>::max()
+                      && Indices::waterEnabled) {
+            static const bool enabled = std::getenv("OPM_DEBUG_KEEP_RS") != nullptr;
+            if (!enabled) {
+                return;
             }
-            else if (waterOnly && hasNoOil_(stepStart)) {
-                const Scalar rsUp = upstreamRs_(globalDofIdx);
-                if (rsUp != noStoredRs) {
-                    rs = rsUp;
+            const auto& gridView = this->simulator_.gridView();
+            if (gridView.comm().size() > 1) {
+                const auto& mapper = this->model().elementMapper();
+                using Handle = GridCommHandleGhostSync<Scalar, std::vector<Scalar>,
+                                                       std::decay_t<decltype(mapper)>, /*commCodim=*/0>;
+                Handle handle(appearingRs_, mapper);
+                gridView.communicate(handle, Dune::InteriorBorder_All_Interface,
+                                     Dune::ForwardCommunication);
+            }
+            const auto numGridDof = this->model().numGridDof();
+            for (std::size_t dofIdx = 0; dofIdx < numGridDof; ++dofIdx) {
+                if (appearingRs_[dofIdx] != noRs) {
+                    // the value here is min(RsMax, RsSat)
+                    auto& rs = nextSolution[dofIdx][Indices::compositionSwitchIdx];
+                    rs = std::min(rs, appearingRs_[dofIdx]);
                 }
-            }
-            storedRs = waterOnly ? std::max(rs, Scalar{0.0}) : noStoredRs;
-            event = waterOnly ? KeepRsEvent::Stored : KeepRsEvent::GasAppeared;
-        }
-        else if (oldGas == GasMeaning::Sg && newGas == GasMeaning::Rs) {
-            if (storedRs != noStoredRs) {
-                // nextValue[rsIdx] is min(RsMax, RsSat) here
-                nextValue[rsIdx] = std::min(nextValue[rsIdx], storedRs);
-                storedRs = noStoredRs;
-                event = KeepRsEvent::Used;
-            }
-            else if (const Scalar rsUp = hasNoOil_(beforeUpdate) ? upstreamRs_(globalDofIdx)
-                                                                 : noStoredRs;
-                     rsUp != noStoredRs) {
-                // Oil appears in a cell that had none (water-only state). Gas
-                // disappearing from a cell with oil keeps RsSat.
-                nextValue[rsIdx] = std::min(nextValue[rsIdx], rsUp);
-                event = KeepRsEvent::Upstream;
-            }
-            else {
-                event = KeepRsEvent::NotAvailable;
-            }
-        }
-        else if (newGas == GasMeaning::Sg && nextValue[rsIdx] > sgFreeGas) {
-            // free gas is present, so reappearing oil is saturated
-            if (storedRs != noStoredRs) {
-                storedRs = noStoredRs;
-                event = KeepRsEvent::GasPresent;
             }
         }
     }
@@ -617,22 +600,54 @@ private:
             && 1.0 - pv[Indices::waterSwitchIdx] - pv[Indices::compositionSwitchIdx] <= 1e-6;
     }
 
-    /// DEBUG: Rs of the oil flowing into a cell, weighted by the oil inflow over
-    /// each face (sum q_o * Rs_up / sum q_o), from the current iterate's
-    /// intensive quantities. noStoredRs if no oil flows in, or if the linearizer
-    /// does not provide per-face neighbour information (non-TPFA).
-    Scalar upstreamRs_(const unsigned globalDofIdx) const
+    /// DEBUG: gas/oil ratio of the oil a cell should hold at the end of the step:
+    ///
+    ///   Rs = (O_old * Rs_old + dt * sum q_o * Rs_up) / (O_old + dt * sum q_o)
+    ///
+    /// with O_old the oil in place at the start of the step (surface volume, using
+    /// the current bo, as it only sets a weight) and q_o the oil inflow over each face
+    /// from the current iterate's intensive quantities. A cell with free gas at the
+    /// start of the step has saturated oil, so nothing is computed for it. The O_old
+    /// term is left out if OPM_DEBUG_KEEP_RS_NO_OLD is set. Sets event to RsSat if
+    /// there is neither oil in place nor inflow, or without per-face neighbour
+    /// information (non-TPFA).
+    Scalar appearingOilRs_(const unsigned globalDofIdx, KeepRsEvent& event) const
     {
+        static const bool useOldOil = std::getenv("OPM_DEBUG_KEEP_RS_NO_OLD") == nullptr;
+
+        using GasMeaning = typename PrimaryVariables::GasMeaning;
+        using WaterMeaning = typename PrimaryVariables::WaterMeaning;
         const auto& model = this->model();
+        const auto& stepStart = model.solution(/*timeIdx=*/1)[globalDofIdx];
+        const bool startInRsState = stepStart.primaryVarsMeaningGas() == GasMeaning::Rs
+            && stepStart.primaryVarsMeaningWater() == WaterMeaning::Sw;
+        if (!startInRsState && !hasNoOil_(stepStart)) {
+            event = KeepRsEvent::RsSat;
+            return 0.0;
+        }
+
         if constexpr (requires { model.linearizer().getNeighborInfo(); }) {
             using RateVector = GetPropType<TypeTag, Properties::RateVector>;
             using LocalResidual = GetPropType<TypeTag, Properties::LocalResidual>;
             constexpr auto oilIdx = FluidSystem::oilPhaseIdx;
+            constexpr auto rsIdx = Indices::compositionSwitchIdx;
             const unsigned oilEq = FluidSystem::canonicalToActiveCompIdx(
                 FluidSystem::solventComponentIndex(oilIdx));
             const auto& intQuants = model.intensiveQuantities(globalDofIdx, /*timeIdx=*/0);
-            Scalar inflow = 0.0;
-            Scalar gasInflow = 0.0;
+            const Scalar dt = this->simulator_.timeStepSize();
+
+            Scalar oil = 0.0;
+            Scalar gas = 0.0;
+            if (useOldOil && startInRsState) {
+                const Scalar soOld = std::max(1.0 - stepStart[Indices::waterSwitchIdx], 0.0);
+                oil = soOld * getValue(intQuants.fluidState().invB(oilIdx))
+                    * this->problem().referencePorosity(globalDofIdx, /*timeIdx=*/0)
+                    * model.dofTotalVolume(globalDofIdx);
+                gas = oil * stepStart[rsIdx];
+            }
+            const bool haveOldOil = oil > 0.0;
+
+            bool haveInflow = false;
             for (const auto& nb : model.linearizer().getNeighborInfo()[globalDofIdx]) {
                 const auto& intQuantsNb = model.intensiveQuantities(nb.neighbor, /*timeIdx=*/0);
                 RateVector flux(0.0);
@@ -640,18 +655,25 @@ private:
                 LocalResidual::computeFlux(flux, darcy, globalDofIdx, nb.neighbor, intQuants,
                                            intQuantsNb, nb.res_nbinfo,
                                            this->problem().moduleParams());
-                const Scalar qO = getValue(flux[oilEq]);   // > 0: out of the cell
+                // > 0: out of the cell
+                const Scalar qO = getValue(flux[oilEq]) * nb.res_nbinfo.faceArea;
                 if (qO < 0.0) {
-                    inflow -= qO;
-                    gasInflow -= qO * getValue(intQuantsNb.fluidState().Rs());
+                    haveInflow = true;
+                    oil -= dt * qO;
+                    gas -= dt * qO * getValue(intQuantsNb.fluidState().Rs());
                 }
             }
-            if (inflow > 0.0) {
-                return gasInflow / inflow;
+            if (oil > 0.0) {
+                event = !haveInflow ? KeepRsEvent::OwnOil
+                    : haveOldOil ? KeepRsEvent::Mixed : KeepRsEvent::Inflow;
+                return gas / oil;
             }
         }
-        return noStoredRs;
+        event = KeepRsEvent::RsSat;
+        return 0.0;
     }
+
+    static constexpr Scalar noRs = -1.0;
 
     /// DEBUG: limit the Rs change per Newton iteration in the Rs state to
     /// OPM_DEBUG_RS_CHOP (in the model's Rs unit, sm3/sm3). Off if not set.
@@ -671,8 +693,6 @@ private:
         nextValue[rsIdx] = std::max(beforeUpdate[rsIdx] + drs, Scalar{0.0});
     }
 
-    static constexpr Scalar noStoredRs = -1.0;
-
     int numPriVarsSwitched_{};
 
     BlackoilNewtonParams<Scalar> bparams_{};
@@ -682,10 +702,10 @@ private:
     std::vector<bool> wasSwitched_{};
     std::vector<bool> wasSwitchedAtStepStart_{};
 
-    // DEBUG: Rs at the latest water-only switch, see keepRsOnSwitch_()
-    std::vector<Scalar> storedRs_{};
-    std::vector<Scalar> storedRsAtStepStart_{};
+    // DEBUG: what keepRsOnSwitch_() last did, for the worst-CNV print
     std::vector<KeepRsEvent> keepRsEvent_{};
+    // DEBUG: Rs for oil appearing in this update, noRs elsewhere
+    std::vector<Scalar> appearingRs_{};
 };
 
 } // namespace Opm

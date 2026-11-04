@@ -1057,7 +1057,7 @@ logWorstCnvCells(const std::vector<Scalar>& B_avg, const double dt)
 
     // One fixed-size record per cell, so the records can be gathered on rank 0.
     enum Field { MaxCnv, MaxComp, Rank, I, J, K, Pv, Po, Sw, So, Sg, Rs, RsSat,
-                 MeaningW, MeaningG, Dp, DXw, DXg, StoredRs, KeepRsEv,
+                 MeaningW, MeaningG, Dp, DXw, DXg, KeepRsEv,
                  Kro, Krw, Pcow, SoStart, ResO, FluxO, NumFaces, Cnv0 };
     // Per face, the largest oil fluxes first. Signs: + means out of the cell.
     enum FaceField { FI, FJ, FK, FTrans, FDPhiO, FUpO, FQo, FCnvO, FQw, FSwNb, FKroNb,
@@ -1240,9 +1240,7 @@ logWorstCnvCells(const std::vector<Scalar>& B_avg, const double dt)
             }
         }
 
-        const auto& newton = model.newtonMethod();
-        rec[StoredRs] = newton.storedRs(cell_idx);
-        rec[KeepRsEv] = static_cast<int>(newton.keepRsEvent(cell_idx));
+        rec[KeepRsEv] = static_cast<int>(model.newtonMethod().keepRsEvent(cell_idx));
 
         const auto& pvars = solution[cell_idx];
         rec[MeaningW] = static_cast<int>(pvars.primaryVarsMeaningWater());
@@ -1293,8 +1291,8 @@ logWorstCnvCells(const std::vector<Scalar>& B_avg, const double dt)
     };
 
     const auto keepRsEvent = [](const double e) -> std::string {
-        constexpr std::array<const char*, 7> names {
-            "-", "stored", "gasAppeared", "used", "notAvail", "gasPresent", "upstream"
+        constexpr std::array<const char*, 5> names {
+            "-", "inflow", "ownOil", "mixed", "rsSat"
         };
         const auto i = static_cast<std::size_t>(e);
         return i < names.size() ? names[i] : "?";
@@ -1315,7 +1313,7 @@ logWorstCnvCells(const std::vector<Scalar>& B_avg, const double dt)
     msg += fmt::format(" {:>9} {:>9} {:>6} {:>6} {:>9} {:>9} {:>9} {:>3} {:>3} {:>9} {:>9} {:>9}",
                        "PV", "Po[bar]", "Sw", "So", "Sg", "Rs", "RsSat", "pvW", "pvG",
                        "dP[bar]", "dXw", "dXg");
-    msg += fmt::format(" {:>9} {:>11}", "storedRs", "keepRsEvent");
+    msg += fmt::format(" {:>11}", "keepRsEvent");
     msg += fmt::format(" {:>9} {:>9} {:>9} {:>6} {:>10} {:>10} {:>10}",
                        "kro", "krw", "Pcow[bar]", "SoStrt", "resO", "flux", "rest");
     const auto nPrint = std::min<std::size_t>(numPrint, all.size());
@@ -1333,9 +1331,7 @@ logWorstCnvCells(const std::vector<Scalar>& B_avg, const double dt)
                            rec[Pv], rec[Po], rec[Sw], rec[So], rec[Sg], rec[Rs], rec[RsSat],
                            waterMeaning(rec[MeaningW]), gasMeaning(rec[MeaningG]),
                            rec[Dp], rec[DXw], rec[DXg]);
-        msg += fmt::format(" {:>9} {:>11}",
-                           rec[StoredRs] < 0.0 ? std::string("-") : fmt::format("{:9.3f}", rec[StoredRs]),
-                           keepRsEvent(rec[KeepRsEv]));
+        msg += fmt::format(" {:>11}", keepRsEvent(rec[KeepRsEv]));
         msg += fmt::format(" {:9.2e} {:9.2e} {:9.4f} {:6.4f} {:+10.2e} {:+10.2e} {:+10.2e}",
                            rec[Kro], rec[Krw], rec[Pcow], rec[SoStart],
                            rec[ResO], rec[FluxO], rec[ResO] - rec[FluxO]);
