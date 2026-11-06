@@ -53,7 +53,9 @@
 
 #include <opm/models/utils/signum.hh>
 
+#include <algorithm>
 #include <array>
+#include <cstdlib>
 
 namespace Opm {
 
@@ -360,6 +362,27 @@ public:
         const Evaluation& rhoIn = intQuantsIn.fluidState().density(phaseIdx);
         Scalar rhoEx = Toolbox::value(intQuantsEx.fluidState().density(phaseIdx));
         Evaluation rhoAvg = (rhoIn + rhoEx)/2;
+
+#if OPM_IS_INSIDE_HOST_FUNCTION
+        // DEBUG (OPM_DEBUG_SAT_WEIGHTED_RHO): weight the densities by the saturation of
+        // the phase, so that a cell with almost none of the phase does not contribute
+        // its density to the gravity term. Falls back to the arithmetic mean if
+        // neither cell has the phase.
+        static const bool satWeightedRho = std::getenv("OPM_DEBUG_SAT_WEIGHTED_RHO") != nullptr;
+        if (satWeightedRho) {
+            const Evaluation& satIn = intQuantsIn.fluidState().saturation(phaseIdx);
+            const Scalar satEx = std::max(Toolbox::value(intQuantsEx.fluidState().saturation(phaseIdx)),
+                                          Scalar{0.0});
+            if (Toolbox::value(satIn) <= 0.0) {
+                if (satEx > 0.0) {
+                    rhoAvg = rhoEx;
+                }
+            }
+            else {
+                rhoAvg = (satIn * rhoIn + satEx * rhoEx) / (satIn + satEx);
+            }
+        }
+#endif
 
         if constexpr (enableConvectiveMixing) {
             ConvectiveMixingModule::modifyAvgDensity(rhoAvg, intQuantsIn, intQuantsEx, phaseIdx, moduleParams.convectiveMixingModuleParam);

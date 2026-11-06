@@ -1207,8 +1207,18 @@ logWorstCnvCells(const std::vector<Scalar>& B_avg, const double dt)
                     // Oil potential of the neighbour minus this cell, as in
                     // calculatePhasePressureDiff_(): > 0 means oil flows in.
                     const auto& fsNb = intQuantsNb.fluidState();
-                    const double rhoAvg = 0.5 * (getValue(fs.density(oilIdx))
-                                                 + getValue(fsNb.density(oilIdx)));
+                    double rhoAvg = 0.5 * (getValue(fs.density(oilIdx))
+                                           + getValue(fsNb.density(oilIdx)));
+                    static const bool satWeightedRho =
+                        std::getenv("OPM_DEBUG_SAT_WEIGHTED_RHO") != nullptr;
+                    if (satWeightedRho) {
+                        const double satIn = std::max<double>(getValue(fs.saturation(oilIdx)), 0.0);
+                        const double satNb = std::max<double>(getValue(fsNb.saturation(oilIdx)), 0.0);
+                        if (satIn + satNb > 0.0) {
+                            rhoAvg = (satIn * getValue(fs.density(oilIdx))
+                                      + satNb * getValue(fsNb.density(oilIdx))) / (satIn + satNb);
+                        }
+                    }
                     const double dPhiO = getValue(fsNb.pressure(oilIdx)) + rhoAvg * nb.res_nbinfo.dZg
                         - getValue(fs.pressure(oilIdx));
 
