@@ -374,7 +374,10 @@ macro(opm-simulators_sources_hook)
       tests/gpuistl/test_gpu_linear_two_phase_material.cu
       tests/gpuistl/test_gpuPvt.cu
       tests/gpuistl/test_gpuConstantCompressibilityWaterPvt.cu
+      tests/gpuistl/test_gpuLiveOilPvt.cu
+      tests/gpuistl/test_gpuTabulatedFunctions.cu
       tests/gpuistl/test_gpuBlackOilFluidSystem.cu
+      tests/gpuistl/test_GpuAssemblyBridge.cu
       tests/gpuistl/test_GpuSparseMatrix.cu
       tests/gpuistl/test_GpuSparseTable.cu
       tests/gpuistl/test_MiniMatrix.cu
@@ -515,16 +518,19 @@ macro(opm-simulators_tests_hook)
                  gpu_safe_call
                  gpu_smart_pointers
                  gpuBlackOilFluidSystem
+                 GpuAssemblyBridge
                  GpuBuffer
                  gpuConstantCompressibilityWaterPvt
                  GpuDILU
                  GpuJac
+                 gpuLiveOilPvt
                  GpuOwnerOverlapCopy
                  GpuPressureTransferPolicy
                  gpuPvt
                  GpuSeqILU0
                  GpuSparseMatrix
                  GpuSparseTable
+                 gpuTabulatedFunctions
                  GpuVector
                  GpuView
                  HypreInterfaceGPU
@@ -596,6 +602,35 @@ macro(opm-simulators_tests_hook)
     if(USE_DEV_SIMULATOR_IN_TESTS)
       set(drsdt_simulator flow_blackoil)
     endif()
+    if(HAVE_OPM_TESTS)
+      find_program(REOPENING_PYTHON_EXECUTABLE NAMES python3)
+      if(TARGET summary)
+        set(reopening_summary $<TARGET_FILE:summary>)
+      else()
+        find_program(REOPENING_SUMMARY_EXECUTABLE NAMES summary
+          HINTS ${opm-common_DIR}/bin ${opm-common_PREFIX}/bin)
+        set(reopening_summary ${REOPENING_SUMMARY_EXECUTABLE})
+      endif()
+      if(TARGET rst_deck)
+        set(reopening_rst_deck $<TARGET_FILE:rst_deck>)
+      else()
+        find_program(REOPENING_RST_DECK_EXECUTABLE NAMES rst_deck
+          HINTS ${opm-common_DIR}/bin ${opm-common_PREFIX}/bin)
+        set(reopening_rst_deck ${REOPENING_RST_DECK_EXECUTABLE})
+      endif()
+      if(REOPENING_PYTHON_EXECUTABLE AND reopening_summary AND reopening_rst_deck)
+        add_test(NAME well_reopening_unrst_restart
+          COMMAND ${REOPENING_PYTHON_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/tests/check_well_reopening_restart.py
+            --flow $<TARGET_FILE:${drsdt_simulator}>
+            --summary ${reopening_summary}
+            --rst-deck ${reopening_rst_deck}
+            --deck ${OPM_TESTS_ROOT}/spe1/SPE1CASE1.DATA
+            --output ${PROJECT_BINARY_DIR}/tests/results/well_reopening_restart)
+        set_tests_properties(well_reopening_unrst_restart PROPERTIES
+          LABELS "regression;economic_limits;restart" TIMEOUT 360 PROCESSORS 1)
+      endif()
+    endif()
     add_test(
       NAME
         drsdt_initial_rs_no_free_gas
@@ -605,6 +640,20 @@ macro(opm-simulators_tests_hook)
           -i ${PROJECT_SOURCE_DIR}/tests
           -f drsdt_initial_rs
           -r ${PROJECT_BINARY_DIR}/tests/results/drsdt_initial_rs
+    )
+  endif()
+
+  if("3" IN_LIST OPM_COMPILE_COMPONENTS)
+    # Equivalent explicit saturation inputs, with temperature supplied by RTEMP.
+    add_test(
+      NAME
+        runSimulator/comp_explicit_saturation_inputs
+      COMMAND
+        ${PROJECT_SOURCE_DIR}/tests/run-comp-explicit-saturation-inputs-test.sh
+          -e $<TARGET_FILE:flow_comp>
+          -c $<TARGET_FILE:test_comp_explicit_swat_init>
+          -i ${PROJECT_SOURCE_DIR}/tests
+          -r ${PROJECT_BINARY_DIR}/tests/results/flow_comp+comp_explicit_saturation_inputs
     )
   endif()
 
@@ -719,6 +768,7 @@ macro(opm-simulators_targets_hook)
   target_sources(test_outputdir PRIVATE $<TARGET_OBJECTS:moduleVersion>)
   target_sources(test_ignore_keywords PRIVATE $<TARGET_OBJECTS:moduleVersion>)
   target_sources(test_drsdt_initial_rs PRIVATE $<TARGET_OBJECTS:moduleVersion>)
+  target_sources(test_numaquifer_equilibration PRIVATE $<TARGET_OBJECTS:moduleVersion>)
   target_sources(test_equil PRIVATE $<TARGET_OBJECTS:moduleVersion>)
   target_sources(test_group_higher_constraints PRIVATE $<TARGET_OBJECTS:moduleVersion>)
   target_sources(test_injection_topup_phase_validation PRIVATE $<TARGET_OBJECTS:moduleVersion>)
@@ -726,6 +776,11 @@ macro(opm-simulators_targets_hook)
   target_sources(test_RestartSerialization PRIVATE $<TARGET_OBJECTS:moduleVersion>)
   target_sources(test_glift1 PRIVATE $<TARGET_OBJECTS:moduleVersion>)
   target_sources(test_tpsa_localresidual PRIVATE $<TARGET_OBJECTS:moduleVersion>)
+  target_sources(test_compwell_bhp_limit PRIVATE $<TARGET_OBJECTS:moduleVersion>)
+  target_sources(test_compwell_crossflow PRIVATE $<TARGET_OBJECTS:moduleVersion>)
+  target_sources(test_compwell_pvt_region PRIVATE $<TARGET_OBJECTS:moduleVersion>)
+  target_sources(test_compwell_schedule_stop PRIVATE $<TARGET_OBJECTS:moduleVersion>)
+  target_sources(test_compwell_zero_rate_targets PRIVATE $<TARGET_OBJECTS:moduleVersion>)
   if(MPI_FOUND)
     target_sources(test_chopstep PRIVATE $<TARGET_OBJECTS:moduleVersion>)
     target_sources(test_rescoup_constraints PRIVATE $<TARGET_OBJECTS:moduleVersion>)

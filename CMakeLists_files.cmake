@@ -111,6 +111,7 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/flow/CompositionalContainer.cpp
   opm/simulators/flow/ConvergenceOutputConfiguration.cpp
   opm/simulators/flow/EclGenericWriter.cpp
+  opm/simulators/flow/ExplicitInitialSaturations.cpp
   opm/simulators/flow/ExtboContainer.cpp
   opm/simulators/flow/ExtraConvergenceOutputThread.cpp
   opm/simulators/flow/FacePropertiesTPSA.cpp
@@ -135,6 +136,7 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/flow/MixingRateControls.cpp
   opm/simulators/flow/NlddReporting.cpp
   opm/simulators/flow/NonlinearSolver.cpp
+  opm/simulators/flow/NumericalAquiferEquilibrationCheck.cpp
   opm/simulators/flow/partitionCells.cpp
   opm/simulators/flow/RFTContainer.cpp
   opm/simulators/flow/RSTConv.cpp
@@ -487,8 +489,13 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_compequil.cpp
   tests/test_compositional_cpr_weights.cpp
   tests/test_compositionalcontainer.cpp
+  tests/test_compwell_bhp_limit.cpp
+  tests/test_compwell_crossflow.cpp
   tests/test_compwell_equations.cpp
   tests/test_compwell_jacobian.cpp
+  tests/test_compwell_pvt_region.cpp
+  tests/test_compwell_schedule_stop.cpp
+  tests/test_compwell_zero_rate_targets.cpp
   tests/test_convergenceoutputconfiguration.cpp
   tests/test_convergencereport.cpp
   tests/test_deferredlogger.cpp
@@ -496,7 +503,9 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_group_control_retention.cpp
   tests/test_group_higher_constraints.cpp
   tests/test_drsdt_initial_rs.cpp
+  tests/test_numaquifer_equilibration.cpp
   tests/test_equil.cpp
+  tests/test_explicitinitialsaturations.cpp
   tests/test_extbocontainer.cpp
   tests/test_extraconvergenceoutputthread.cpp
   tests/test_extractMatrix.cpp
@@ -509,6 +518,7 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_graphcoloring.cpp
   tests/test_GroupState.cpp
   tests/test_ignore_keywords.cpp
+  tests/test_InjectedPhase.cpp
   tests/test_injection_topup_phase_validation.cpp
   tests/test_interregflows.cpp
   tests/test_invert.cpp
@@ -542,6 +552,7 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_SatfuncCheckPoint.cpp
   tests/test_SatfuncConsistencyChecks.cpp
   tests/test_SatfuncConsistencyChecks_parallel.cpp
+  tests/test_NumericalAquiferEquilibrationCheck.cpp
   tests/test_SatfuncConsistencyCheckManager.cpp
   tests/test_stoppedwells.cpp
   tests/test_ThreePointHorizontalSatfuncConsistencyChecks.cpp
@@ -582,6 +593,7 @@ if(CUDA_FOUND OR hip_FOUND)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_converttofloatadapter.cpp)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cublas_handle.cpp)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cublas_safe_call.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_GpuAssemblyBridge.cu)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_GpuBuffer.cu)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_GpuView.cu)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cusparse_safe_call.cpp)
@@ -603,6 +615,8 @@ if(CUDA_FOUND OR hip_FOUND)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_gpu_linear_two_phase_material.cu)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_gpuPvt.cu)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_gpuConstantCompressibilityWaterPvt.cu)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_gpuLiveOilPvt.cu)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_gpuTabulatedFunctions.cu)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_gpu_smart_pointers.cu)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_gpu_resources.cu)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_gpu_pointer_attributes.cpp)
@@ -635,6 +649,8 @@ if(CUDA_FOUND OR hip_FOUND)
       tests/gpuistl/test_gpu_linear_two_phase_material.cu
       tests/gpuistl/test_gpuPvt.cu
       tests/gpuistl/test_gpuConstantCompressibilityWaterPvt.cu
+      tests/gpuistl/test_gpuLiveOilPvt.cu
+      tests/gpuistl/test_gpuTabulatedFunctions.cu
       tests/gpuistl/test_gpuBlackOilFluidSystem.cu
       tests/gpuistl/test_GpuSparseMatrix.cu
       tests/gpuistl/test_GpuSparseTable.cu
@@ -687,13 +703,28 @@ endif()
 
 list (APPEND TEST_DATA_FILES
   tests/blackoilintensivequantities_gpu.DATA
+  tests/COMP_EXPLICIT_DRY_SOIL.DATA
+  tests/COMP_EXPLICIT_INVALID_TEMPERATURE.DATA
+  tests/COMP_EXPLICIT_SATURATIONS_OVERFULL.DATA
+  tests/COMP_EXPLICIT_SATURATIONS_SCALED.DATA
+  tests/COMP_EXPLICIT_SOIL_RTEMP.DATA
+  tests/COMP_EXPLICIT_SOIL_SGAS.DATA
   tests/drsdt_initial_rs.DATA
   tests/equil_base.DATA
+  tests/numaquifer_equil_immobile.DATA
+  tests/numaquifer_equil_mismatch.DATA
+  tests/numaquifer_equil_tolerance.DATA
   tests/equil_capillary.DATA
   tests/equil_capillary_overlap.DATA
   tests/equil_capillary_swatinit.DATA
   tests/equil_deadfluids.DATA
   tests/equil_pbvd_and_pdvd.DATA
+  tests/include/comp_explicit_composition.inc
+  tests/include/comp_explicit_grid.inc
+  tests/include/comp_explicit_props.inc
+  tests/include/comp_explicit_runspec.inc
+  tests/include/comp_explicit_schedule.inc
+  tests/include/comp_explicit_water.inc
   tests/VFPPROD1
   tests/VFPPROD2
   tests/msw.data
@@ -748,14 +779,22 @@ list (APPEND TEST_DATA_FILES
   tests/GROUP_HIGHER_CONSTRAINTS_NETWORK.DATA
   tests/INJECTION_TOPUP_PHASE_VALIDATION.DATA
   tests/GLIFT1.DATA
+  tests/GLIFT2.DATA
+  tests/GLIFT3.DATA
+  tests/GLIFT4.DATA
   tests/RC-01_MAST_PRED.DATA
   tests/RC_MASTER_GROUP_EXCLUSION.DATA
+  tests/RC_MASTER_GROUP_EXCLUSION_ANCESTOR.DATA
+  tests/RC_MASTER_GROUP_EXCLUSION_EFFICIENCY.DATA
+  tests/RC_MASTER_GROUP_EXCLUSION_ZERO_GUIDE_RATES.DATA
   tests/RC_MASTER_GROUP_EXCLUSION_NESTED.DATA
   tests/RC_MASTER_GROUP_EXCLUSION_SIBLINGS.DATA
+  tests/RC_MASTER_GROUP_EXCLUSION_WATER_GAS.DATA
   tests/include/rc_master_group_exclusion_controls.inc
   tests/include/rc_master_group_exclusion_model.inc
   tests/include/flowl_b_vfp.ecl
   tests/include/flowl_c_vfp.ecl
+  tests/include/glift_model.inc
   tests/include/permx_model5.grdecl
   tests/include/pvt_live_oil_dgas.ecl
   tests/include/relperm.inc
@@ -1060,6 +1099,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/flow/EclGenericWriter_impl.hpp
   opm/simulators/flow/EclWriter.hpp
   opm/simulators/flow/EquilInitializer.hpp
+  opm/simulators/flow/ExplicitInitialSaturations.hpp
   opm/simulators/flow/ExtboContainer.hpp
   opm/simulators/flow/ExtraConvergenceOutputThread.hpp
   opm/simulators/flow/FacePropertiesTPSA.hpp
@@ -1109,6 +1149,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/flow/NewtonIterationContext.hpp
   opm/simulators/flow/NlddReporting.hpp
   opm/simulators/flow/NonlinearSolver.hpp
+  opm/simulators/flow/NumericalAquiferEquilibrationCheck.hpp
   opm/simulators/flow/OutputBlackoilModule.hpp
   opm/simulators/flow/OutputCompositionalModule.hpp
   opm/simulators/flow/OutputExtractor.hpp
@@ -1326,6 +1367,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/GroupState.hpp
   opm/simulators/wells/GroupStateHelper.hpp
   opm/simulators/wells/GuideRateHandler.hpp
+  opm/simulators/wells/InjectedPhase.hpp
   opm/simulators/wells/MSWellHelpers.hpp
   opm/simulators/wells/MultisegmentWell.hpp
   opm/simulators/wells/MultisegmentWell_impl.hpp

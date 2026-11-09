@@ -46,6 +46,7 @@
 #include <opm/input/eclipse/Schedule/Group/GuideRate.hpp>
 #include <opm/input/eclipse/Schedule/Network/Balance.hpp>
 #include <opm/input/eclipse/Schedule/Network/ExtNetwork.hpp>
+#include <opm/input/eclipse/Schedule/Events.hpp>
 #include <opm/input/eclipse/Schedule/Schedule.hpp>
 #include <opm/input/eclipse/Schedule/ScheduleTypes.hpp>
 #include <opm/input/eclipse/Schedule/Well/NameOrder.hpp>
@@ -67,6 +68,7 @@
 #include <opm/simulators/wells/BlackoilWellModelRestart.hpp>
 #include <opm/simulators/wells/GasLiftStage2.hpp>
 #include <opm/simulators/wells/GroupEconomicLimitsChecker.hpp>
+#include <opm/simulators/wells/InjectedPhase.hpp>
 #include <opm/simulators/wells/ParallelWBPCalculation.hpp>
 #include <opm/simulators/wells/VFPProperties.hpp>
 #include <opm/simulators/wells/WellFilterCake.hpp>
@@ -83,6 +85,7 @@
 #include <cassert>
 #include <functional>
 #include <iterator>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
@@ -810,6 +813,24 @@ checkGroupHigherConstraints(const Group& group,
         // So when checking constraints, current groups rate must also be subtracted it's reduction rate
         std::vector<Scalar> rates_available =
             this->groupStateHelper().getGroupRatesAvailableForHigherLevelControl(group, /*is_injector=*/true);
+        // A group on individual control without any group controlled wells has its entire rate
+        // counted as reduction, i.e. nothing is 'available' and the check below can never trigger.
+        // Its wells would however respond to a higher level target if the group were released to
+        // FLD, as they do for a group under NONE control. In that case the group is checked as if
+        // under FLD control, i.e. with its full rate and participating in the guide rate
+        // distribution with all its wells. Otherwise such a group (e.g. latched on its own limit)
+        // hides all higher level targets.
+        std::optional<std::vector<Scalar>> rates_full;
+        const auto full_group_rates = [this, &group, &rates_full]() -> const std::vector<Scalar>& {
+            if (!rates_full.has_value()) {
+                rates_full.emplace(this->numPhases(), 0.0);
+                for (int phasePos = 0; phasePos < this->numPhases(); ++phasePos) {
+                    (*rates_full)[phasePos] = this->comm_.sum(
+                        this->groupStateHelper().sumWellSurfaceRates(group, phasePos, /*is_injector=*/true));
+                }
+            }
+            return *rates_full;
+        };
         for (const Phase phase : {Phase::WATER, Phase::OIL, Phase::GAS}) {
             const auto currentControl = this->groupState().injection_control(group.name(), phase);
             bool group_is_oscillating = false;
@@ -842,15 +863,22 @@ checkGroupHigherConstraints(const Group& group,
             // Check higher up only if under individual (not FLD) control.
             if (currentControl != Group::InjectionCMode::FLD && group.injectionGroupControlAvailable(phase)) {
                 const Group& parentGroup = schedule().getGroup(group.parent(), reportStepIdx);
+                const bool use_full_rates = currentControl != Group::InjectionCMode::NONE
+                    && this->groupStateHelper().groupControlledWells(
+                        group.name(), /*always_included_child=*/"", /*is_production_group=*/false, phase) == 0;
+                const std::vector<Scalar>& rates = use_full_rates
+                    ? full_group_rates()
+                    : rates_available;
                 const auto [is_changed, scaling_factor] = this->groupStateHelper().checkGroupConstraintsInj(
                     group.name(),
                     group.parent(),
                     parentGroup,
-                    rates_available.data(),
+                    rates.data(),
                     phase,
                     group.getGroupEfficiencyFactor(),
                     resv_coeff_inj,
-                    /*check_guide_rate*/true
+                    /*check_guide_rate*/true,
+                    /*assume_fld_control*/use_full_rates
                 );
                 if (is_changed) {
                     auto& group_log = switched_inj_groups_[group.name()][static_cast<std::underlying_type_t<Phase>>(phase)];
@@ -1734,6 +1762,40 @@ updateAndCommunicateGroupData(const int reportStepIdx,
 }
 
 template<typename Scalar, typename IndexTraits>
+void BlackoilWellModelGeneric<Scalar, IndexTraits>::
+closeWellForRetry(const std::string& well_name, const double simulation_time)
+{
+    this->wellTestState().close_well(well_name, WellTestConfig::Reason::PHYSICAL,
+                                   simulation_time);
+    this->retry_shut_wells_.insert(well_name);
+}
+
+template<typename Scalar, typename IndexTraits>
+void BlackoilWellModelGeneric<Scalar, IndexTraits>::
+honorOpenRequest(const std::string& well_name,
+                 Events& well_events,
+                 const double simulation_time)
+{
+    if (!this->wellTestState().well_is_closed(well_name)) {
+        return;
+    }
+
+    // Retry closures block reopening; restored closures do not.
+    const bool closed_for_retry = this->wasClosedForRetry(well_name);
+    // TODO: more checking here, to make sure this standard more specific and complete
+    // maybe there is some WCON keywords will not open the well
+    if (well_events.hasEvent(ScheduleEvents::REQUEST_OPEN_WELL)) {
+        if (!closed_for_retry) {
+            this->wellTestState().open_well(well_name);
+            this->wellTestState().open_completions(well_name);
+            this->well_open_times_.insert_or_assign(well_name, simulation_time);
+            this->well_close_times_.erase(well_name);
+        }
+        well_events.clearEvent(ScheduleEvents::REQUEST_OPEN_WELL);
+    }
+}
+
+template<typename Scalar, typename IndexTraits>
 bool BlackoilWellModelGeneric<Scalar, IndexTraits>::
 forceShutWellByName(const std::string& wellname,
                     const double simulation_time,
@@ -1769,7 +1831,7 @@ forceShutWellByName(const std::string& wellname,
                                  }
                              });
     if (it != well_container_generic_.end()) {
-        wellTestState().close_well(wellname, WellTestConfig::Reason::PHYSICAL, simulation_time);
+        this->closeWellForRetry(wellname, simulation_time);
 
         // Non-owning ranks have no snapshot entry, and do not report WPWE.
         const auto snapshot = this->wellStatusSnapshot();
@@ -2157,7 +2219,7 @@ template<typename Scalar, typename IndexTraits>
 void BlackoilWellModelGeneric<Scalar, IndexTraits>::initInjMult()
 {
     for (auto& well : this->well_container_generic_) {
-        if (well->isInjector() && well->wellEcl().getInjMultMode() != Well::InjMultMode::NONE) {
+        if (well->wellEcl().hasActiveInjMult()) {
             const auto& ws = this->wellState().well(well->indexOfWell());
             const auto& perf_data = ws.perf_data;
 
@@ -2173,20 +2235,45 @@ void BlackoilWellModelGeneric<Scalar, IndexTraits>::initInjMult()
 template<typename Scalar, typename IndexTraits>
 void BlackoilWellModelGeneric<Scalar, IndexTraits>::
 updateFiltrationModelsPostStep(const double dt,
-                               const std::size_t water_index,
+                               const InvBFunction& inv_b,
                                DeferredLogger& deferred_logger)
 {
     for (auto& well : this->well_container_generic_) {
         if (well->isInjector()) {
-            const Scalar conc = well->wellEcl().evalFilterConc(this->summaryState_);
+            // Zero unless updated below (no concentration, MULTI injector);
+            // the cake and the totals carry over.
+            auto& ws = this->wellState().well(well->indexOfWell());
+            std::ranges::fill(ws.perf_data.filtrate_data.rates, Scalar{0});
+
+            const auto& well_ecl = well->wellEcl();
+            const Scalar conc = well_ecl.evalFilterConc(this->summaryState_);
             if (conc > 0.) {
+                // Concentration on a reservoir volume basis: convert the
+                // connection surface rates of the injected phase with the
+                // formation volume factor of the connection cell.
+                std::vector<Scalar> conc_volume_factor;
+                const auto phase = injectedCanonicalPhaseIdx<IndexTraits>(well_ecl.injectorType());
+                if (well_ecl.getFilterConcBasis() == Well::FilterConcBasis::RESERVOIR
+                    && phase.has_value())
+                {
+                    const auto& perf_data = well->perforationData();
+                    conc_volume_factor.resize(well->numLocalPerfs(), Scalar{1});
+                    for (int perf = 0; perf < well->numLocalPerfs(); ++perf) {
+                        const Scalar b = inv_b(perf_data[perf].cell_index, *phase);
+                        if (b > 0.) {
+                            conc_volume_factor[perf] = 1. / b;
+                        }
+                    }
+                }
+
                 // Update filter cake build-ups (external to the wellbore)
                 auto retval = this->filter_cake_
                         .emplace(std::piecewise_construct,
                                  std::forward_as_tuple(well->name()),
                                  std::tuple{});
                 auto& fc = retval.first->second;
-                fc.updatePostStep(*well, this->wellState(), dt, conc, water_index, deferred_logger);
+                fc.updatePostStep(*well, this->wellState(), dt, conc,
+                                  conc_volume_factor, deferred_logger);
             }
         }
     }
@@ -2197,7 +2284,7 @@ void BlackoilWellModelGeneric<Scalar, IndexTraits>::
 updateInjMult(DeferredLogger& deferred_logger)
 {
     for (const auto& well : this->well_container_generic_) {
-        if (well->isInjector() && well->wellEcl().getInjMultMode() != Well::InjMultMode::NONE) {
+        if (well->wellEcl().hasActiveInjMult()) {
             well->updateInjMult(this->prev_inj_multipliers_[well->name()], deferred_logger);
         }
     }

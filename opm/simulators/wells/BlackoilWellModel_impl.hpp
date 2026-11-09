@@ -709,6 +709,7 @@ namespace Opm {
     timeStepSucceeded(const double simulationTime, const double dt)
     {
         this->closed_this_step_.clear();
+        this->retry_shut_wells_.clear();
 
         // time step is finished and we are not any more at the beginning of an report step
         this->report_step_starts_ = false;
@@ -727,15 +728,26 @@ namespace Opm {
             well->updateConnectionDFactor(simulator_, this->wellState().well(well->indexOfWell()));
         }
 
-        if (Indices::waterEnabled) {
-            if constexpr (getPropValue<TypeTag, Properties::EnableMech>()) {
-                // Split injector connection flow between matrix and fracture
-                // for wells with registered fracture contributions.
-                updateWellFractureFlowSplit<FluidSystem, Scalar>(
-                    this->simulator_, this->well_container_,
-                    this->wellState(), this->nupcolWellState());
-            }
-            this->updateFiltrationModelsPostStep(dt, FluidSystem::waterPhaseIdx, local_deferredLogger);
+        if constexpr (getPropValue<TypeTag, Properties::EnableMech>()) {
+            // Split injector connection flow between matrix and fracture
+            // for wells with registered fracture contributions.
+            updateWellFractureFlowSplit<FluidSystem, Scalar>(
+                this->simulator_, this->well_container_,
+                this->wellState(), this->nupcolWellState());
+        }
+        {
+            // Filtration (WINJDAM/WINJFCNC) is carried by the injected phase of
+            // each injector (water, gas or oil).
+            const auto inv_b = [this](const int cell_index, const unsigned canonical_phase) -> Scalar
+            {
+                if (!FluidSystem::phaseIsActive(canonical_phase)) {
+                    return Scalar{1};
+                }
+                const auto& intQuants = this->simulator_.model()
+                    .intensiveQuantities(cell_index, /*timeIdx=*/0);
+                return getValue(intQuants.fluidState().invB(canonical_phase));
+            };
+            this->updateFiltrationModelsPostStep(dt, inv_b, local_deferredLogger);
         }
 
         // WINJMULT: At the end of the time step, update the inj_multiplier saved in WellState for later use
@@ -974,36 +986,8 @@ namespace Opm {
                 }
 
                 // A new WCON keywords can re-open a well that was closed/shut due to Physical limit
-                if (this->wellTestState().well_is_closed(well_name)) {
-                    // The well was shut this timestep, we are most likely retrying
-                    // a timestep without the well in question, after it caused
-                    // repeated timestep cuts. It should therefore not be opened,
-                    // even if it was new or received new targets this report step.
-                    //
-                    // The time stamp alone cannot establish that, since a shut-in
-                    // decided at the *end* of the previous step carries that
-                    // step's end time, which coincides with the current step's
-                    // start time. Such shut-ins are the ones a new WCON keyword
-                    // may undo, and are exactly what wasDynamicallyShutThisTimeStep()
-                    // reports; mid-step ones from forceShutWellByName() are not
-                    // registered there, so they still block the re-open.
-                    const bool closed_this_step =
-                        (this->wellTestState().lastTestTime(well_name) == simulator_.time()) &&
-                        !this->wasDynamicallyShutThisTimeStep(well_name);
-                    // TODO: more checking here, to make sure this standard more specific and complete
-                    // maybe there is some WCON keywords will not open the well
-                    auto& events = this->wellState().well(w).events;
-                    if (events.hasEvent(ScheduleEvents::REQUEST_OPEN_WELL)) {
-                        if (!closed_this_step) {
-                            this->wellTestState().open_well(well_name);
-                            this->wellTestState().open_completions(well_name);
-                            this->well_open_times_.insert_or_assign(well_name,
-                                                                    this->simulator_.time());
-                            this->well_close_times_.erase(well_name);
-                        }
-                        events.clearEvent(ScheduleEvents::REQUEST_OPEN_WELL);
-                    }
-                }
+                this->honorOpenRequest(well_name, this->wellState().well(w).events,
+                                       this->simulator_.time());
 
                 // WELOPEN/COMPDAT can reopen individual connections shut at run
                 // time by physical/economic limits, without touching the rest

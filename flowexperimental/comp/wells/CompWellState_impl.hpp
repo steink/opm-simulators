@@ -17,6 +17,7 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include <algorithm>
 #include <span>
 
 namespace Opm {
@@ -36,21 +37,29 @@ init(const std::vector<Well>& wells_ecl,
      const std::vector<Scalar>& well_temperatures,
      const std::vector<std::vector<Scalar>>& cell_mole_fractions,
      const std::vector<std::vector<CompConnectionData> >& well_connection_data,
+     const ScheduleState& schedule_state,
      const SummaryState& summary_state,
      const std::vector<bool>& locally_owned_wells,
+     const WellGroupEvents& events,
      const CompWellState* prev_well_state)
 {
     this->base_init(wells_ecl, cell_pressures, well_temperatures, cell_mole_fractions,
-                    well_connection_data, summary_state,
+                    well_connection_data, schedule_state, summary_state,
                     locally_owned_wells);
 
     if (!prev_well_state) {
         return;
     }
 
+    // As for the black-oil wells, a well keeps its previous control unless
+    // the schedule updates the well at this report step.
+    constexpr auto event_mask = ScheduleEvents::WELL_STATUS_CHANGE
+                              | ScheduleEvents::PRODUCTION_UPDATE
+                              | ScheduleEvents::INJECTION_UPDATE;
     for (const auto& well_name : this->wells_.wells()) {
         if (prev_well_state->wells_.has(well_name)) {
-            this->wells_[well_name].copyRuntimeStateFrom(prev_well_state->wells_[well_name]);
+            this->wells_[well_name].copyRuntimeStateFrom(prev_well_state->wells_[well_name],
+                                                         !events.hasEvent(well_name, event_mask));
         }
     }
 }
@@ -62,6 +71,7 @@ base_init(const std::vector<Well>& wells_ecl,
           const std::vector<Scalar>& well_temperatures,
           const std::vector<std::vector<Scalar>>& cell_mole_fractions,
           const std::vector<std::vector<CompConnectionData>>& well_connection_data,
+          const ScheduleState& schedule_state,
           const SummaryState& summary_state,
           const std::vector<bool>& locally_owned_wells)
 {
@@ -76,7 +86,7 @@ base_init(const std::vector<Well>& wells_ecl,
             continue;
         }
         initSingleWell(well, cell_pressures, well_temperatures[w], cell_mole_fractions,
-                       conn_data, summary_state);
+                       conn_data, schedule_state, summary_state);
     }
 
 }
@@ -88,12 +98,18 @@ initSingleWell(const Well& well,
                const Scalar temperature,
                const std::vector<std::vector<Scalar>>& cell_mole_fractions,
                const std::vector<CompConnectionData>& conn_data,
+               const ScheduleState& schedule_state,
                const SummaryState& summary_state)
 {
     if (well.isInjector()) {
-        initSingleInjector(well, cell_pressures, temperature, conn_data, summary_state);
+        initSingleInjector(well, cell_pressures, temperature, cell_mole_fractions, conn_data,
+                           schedule_state, summary_state);
     } else {
         initSingleProducer(well, cell_pressures, temperature, cell_mole_fractions, conn_data, summary_state);
+    }
+    // The targets seed the surface rates of an open well; a stopped well has none.
+    if (well.getStatus() == WellStatus::STOP) {
+        std::ranges::fill(this->wells_[well.name()].surface_phase_rates, Scalar{0.});
     }
 
 }
@@ -103,7 +119,9 @@ void CompWellState<FluidSystem>::
 initSingleInjector(const Well& well,
                    const std::vector<Scalar>& /* cell_pressures */,
                    const Scalar temperature,
+                   const std::vector<std::vector<Scalar>>& cell_mole_fractions,
                    const std::vector<CompConnectionData>& conn_data,
+                   const ScheduleState& schedule_state,
                    const SummaryState& summary_state)
 {
     auto& ws = this->wells_.add(well.name(),
@@ -114,7 +132,7 @@ initSingleInjector(const Well& well,
                                     false) );
     ws.status = well.getStatus();
     if (ws.status != WellStatus::SHUT) {
-        ws.update_injector_targets(well, summary_state);
+        ws.update_injector_targets(well, cell_mole_fractions, schedule_state, summary_state);
     }
 }
 
@@ -187,7 +205,7 @@ report() const
         auto& well = res[ws.name];
         well.bhp = ws.bhp;
         well.temperature = ws.temperature;
-        well.dynamicStatus = ws.status;
+        well.dynamicStatus = ws.stopped ? Well::Status::STOP : ws.status;
         setSurfaceRates(well.rates, ws.surface_phase_rates);
 
         auto& curr = well.current_control;

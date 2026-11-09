@@ -32,6 +32,8 @@
 
 namespace Opm {
 
+class ScheduleState;
+
 template <typename Scalar>
 class CompConnectionData
 {
@@ -53,7 +55,8 @@ public:
     // connection_transmissibility_factor
     std::vector<Scalar> transmissibility_factor {};
     std::vector<int> satnum_id {};
-    std::vector<std::size_t> ecl_index {};
+    // local index of the connection cell
+    std::vector<std::size_t> cell_index {};
     // global Cartesian index of the connection cell
     std::vector<std::size_t> global_index {};
 };
@@ -74,10 +77,14 @@ public:
     bool producer;
 
     WellStatus status{WellStatus::OPEN};
+    // the well cannot flow at its BHP limit: zero surface rate, floating BHP
+    bool stopped{false};
     Scalar bhp{0};
     Scalar temperature{0};
 
     std::vector<Scalar> surface_phase_rates;
+    // volume fraction of water in the wellbore; stays zero without a water phase
+    Scalar wellbore_water_volume_fraction{0.};
     std::vector<Scalar> phase_fractions; // V or L
     std::vector<Scalar> reservoir_phase_rates;
     // WZMF
@@ -97,9 +104,20 @@ public:
                                  const std::vector<std::vector<Scalar>>& cell_mole_fractions,
                                  const SummaryState& st);
 
-    void update_injector_targets(const Well& well, const SummaryState& st);
+    void update_injector_targets(const Well& well,
+                                 const std::vector<std::vector<Scalar>>& cell_mole_fractions,
+                                 const ScheduleState& schedule_state,
+                                 const SummaryState& st);
 
-    void copyRuntimeStateFrom(const SingleCompWellState& other);
+    // The WELLSTRE composition an oil or gas injector injects.
+    static const std::vector<double>& injectionStream(const ScheduleState& schedule_state,
+                                                      const Well& well);
+
+    void copyRuntimeStateFrom(const SingleCompWellState& other, bool keep_control);
+
+    // stopped by the schedule or at its BHP limit: zero surface rate, floating BHP
+    bool isStopped() const
+    { return status == WellStatus::STOP || stopped; }
 
     Scalar get_total_surface_rate() const;
 };

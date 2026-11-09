@@ -27,6 +27,26 @@ add_test_compare_parallel_simulation(
 
 add_test_compare_parallel_simulation(
   CASENAME
+    equil_1d_compvd_water_gascap_row_gap
+  FILENAME
+    EQUIL_1D_COMPVD_WATER_GASCAP_ROW_GAP
+  SIMULATOR
+    flow_comp
+  # The cells in the COMPVD row gap start two-phase. The two-rank run must
+  # complete, which runSimulator/comp_equil_two_phase_warning_parallel does not
+  # check, and match the serial run within the compositional tolerances.
+  ABS_TOL
+    1e-3
+  REL_TOL
+    1e-5
+  DIR
+    compositional/equilibration
+  MPI_PROCS
+    2
+)
+
+add_test_compare_parallel_simulation(
+  CASENAME
     sshift_compositional
   FILENAME
     SIMPLE_COMP_SSHIFT
@@ -35,13 +55,13 @@ add_test_compare_parallel_simulation(
   DEV_SIMULATOR
     flow_comp3_2p
   # Check explicit ZMF distribution and wells owned by different ranks.
-  # Use the compositional tolerances for summary and restart comparisons,
-  # and a linear reduction tight enough for the parallel run to take the
-  # same Newton iterations as the sequential one.
+  # The linear reduction is tight enough for the parallel run to take the
+  # same Newton iterations as the sequential one. The smoother works per
+  # rank, so CPR pre-smoothing moves the gas-oil ratio by about 2e-5.
   ABS_TOL
     1e-3
   REL_TOL
-    1e-5
+    1e-4
   DIR
     compositional
   MPI_PROCS
@@ -291,9 +311,13 @@ add_test_compare_parallel_simulation(
     1e-5
   MPI_PROCS
     4
+  # Require two Newton iterations to reduce the risk of serial and parallel
+  # runs using different iteration counts, which changes the next time step
+  # size stored in OPMEXTRA.
   TEST_ARGS
     --solver-max-time-step-in-days=15
     --allow-distributed-wells=true
+    --newton-min-iterations=2
 )
 
 # A test for distributed multisegment wells.
@@ -885,6 +909,35 @@ add_test_compare_parallel_simulation(
     --relaxed-max-pv-fraction=0.0
 )
 
+# The first aquifer cell is on rank 0 and the other two on rank 1.
+add_test_compare_parallel_simulation(
+  CASENAME
+    numerical_aquifer_3d_1aqu_split
+  FILENAME
+    3D_1AQU_3CELLS
+  POSTFIX
+    split
+  SIMULATOR
+    flow
+  DEV_SIMULATOR
+    flow_blackoil
+  ABS_TOL
+    ${abs_tol_parallel}
+  REL_TOL
+    0.05
+  DIR
+    aquifer-num
+  MPI_PROCS
+    2
+  TEST_ARGS
+    --enable-tuning=true
+    --tolerance-cnv=0.00003
+    --time-step-control=pid
+    --linear-solver=cpr_trueimpes
+    --relaxed-max-pv-fraction=0.0
+    --external-partition=${OPM_TESTS_ROOT}/aquifer-num/3D_1AQU_3CELLS_SPLIT.partition
+)
+
 add_test_compare_parallel_simulation(
   CASENAME
     6_uda_model5_stdw
@@ -940,6 +993,10 @@ foreach(templ_case RANGE 1 6)
       ${rel_tol_parallel}
     DIR
       actionx
+    # Tighter mass balance tolerance so that serial and parallel runs do not
+    # end up on different sides of the convergence criterion.
+    TEST_ARGS
+      --tolerance-mb=1e-8
   )
 endforeach()
 
@@ -1029,6 +1086,26 @@ add_test_compare_parallel_simulation(
     winjdam_msw
   FILENAME
     WINJDAM_MSW
+  SIMULATOR
+    flow
+  DEV_SIMULATOR
+    flow_blackoil
+  ABS_TOL
+    ${abs_tol_parallel}
+  REL_TOL
+    ${rel_tol_parallel}
+  DIR
+    winjdam
+  TEST_ARGS
+    --enable-tuning=true
+    --linear-solver-reduction=1e-7
+)
+
+add_test_compare_parallel_simulation(
+  CASENAME
+    winjdam_gas_msw
+  FILENAME
+    WINJDAM_GAS_MSW
   SIMULATOR
     flow
   DEV_SIMULATOR

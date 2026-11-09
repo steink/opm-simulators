@@ -67,6 +67,7 @@ namespace Opm {
     template<typename Scalar, typename IndexTraits> class GasLiftGroupInfo;
     template<typename Scalar, typename IndexTraits> class GasLiftSingleWellGeneric;
     template<class Scalar> class GasLiftWellState;
+    class Events;
     class Group;
     class GuideRateConfig;
     class RegionVariableCollection;
@@ -285,6 +286,12 @@ public:
         this->closed_this_step_.insert(well_name);
     }
     bool wasDynamicallyShutThisTimeStep(const std::string& well_name) const;
+
+    /// A closure imposed to retry a failed timestep must survive OPEN requests.
+    bool wasClosedForRetry(const std::string& well_name) const
+    {
+        return this->retry_shut_wells_.count(well_name) != 0;
+    }
 
     void logPrimaryVars() const;
 
@@ -569,8 +576,13 @@ protected:
     void updateInjMult(DeferredLogger& deferred_logger);
     void updateInjFCMult(DeferredLogger& deferred_logger);
 
+    //! \brief Inverse formation volume factor of a canonical phase in a
+    //! (local) cell, used to convert filtration concentrations given on a
+    //! reservoir volume basis (WINJFCNC item 3 = RES).
+    using InvBFunction = std::function<Scalar(int cell_index, unsigned canonical_phase)>;
+
     void updateFiltrationModelsPostStep(const double dt,
-                                        const std::size_t water_index,
+                                        const InvBFunction& inv_b,
                                         DeferredLogger& deferred_logger);
 
     void updateFiltrationModelsPreStep(DeferredLogger& deferred_logger);
@@ -654,6 +666,21 @@ protected:
     std::vector<int> pvt_region_idx_;
 
     mutable std::unordered_set<std::string> closed_this_step_;
+
+    // Wells force-shut between attempts of the current timestep. Deliberately
+    // retained across rollback, and cleared on timestep success. Unlike a
+    // timestamp, this distinguishes retry closures from restored closures and
+    // closures made at the end of the previous accepted timestep. Checkpoints
+    // are written after success, so this transient marker is not serialized.
+    std::unordered_set<std::string> retry_shut_wells_;
+
+    void closeWellForRetry(const std::string& well_name, double simulation_time);
+
+    /// Consume an OPEN request for a closed well. Reopen the well and its
+    /// completions unless the closure was imposed to retry the current timestep.
+    void honorOpenRequest(const std::string& well_name,
+                          Events& well_events,
+                          double simulation_time);
 
     WellPerformanceEventTracker well_performance_event_tracker_;
 

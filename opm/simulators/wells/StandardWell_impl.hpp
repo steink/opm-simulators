@@ -736,7 +736,7 @@ namespace Opm
         }
 
         // if the injecting well has WINJMULT setup, we update the mobility accordingly
-        if (this->isInjector() && this->well_ecl_.getInjMultMode() != Well::InjMultMode::NONE) {
+        if (this->well_ecl_.hasActiveInjMult()) {
             const Scalar bhp = this->primary_variables_.value(Bhp);
             const Scalar perf_press = bhp +  this->connections_.pressure_diff(perf);
             const Scalar multiplier = this->getInjMult(perf, bhp, perf_press, deferred_logger);
@@ -2724,7 +2724,7 @@ namespace Opm
                 typedef typename std::decay<decltype(fs)>::type::ValueType FsValueType;
                 typename FluidSystem::template ParameterCache<FsValueType> paramCache;
                 const unsigned pvtRegionIdx = intQuants.pvtRegionIndex();
-                paramCache.setRegionIndex(pvtRegionIdx);
+                paramCache.setPvtRegionIndex(pvtRegionIdx);
                 paramCache.updatePhase(fs, phaseIdx);
 
                 const auto& rho = FluidSystem::density(fs, paramCache, phaseIdx);

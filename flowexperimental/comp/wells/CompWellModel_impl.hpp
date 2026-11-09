@@ -52,8 +52,20 @@ CompWellModel<TypeTag>::CompWellModel(Simulator& simulator, const NewtonIteratio
     , comp_config_(ecl_state_.compositionalConfig())
     , comp_well_states_(comp_config_)
     , last_valid_comp_well_states_(comp_config_)
+    , dwell_fraction_max_(wellNewtonLimit_<Parameters::DwellFractionMax<Scalar>>())
+    , dbhp_max_rel_(wellNewtonLimit_<Parameters::DbhpMaxRel<Scalar>>())
 {
     local_num_cells_ = simulator.gridView().size(0);
+}
+
+template <typename TypeTag>
+template <class Param>
+typename CompWellModel<TypeTag>::Scalar
+CompWellModel<TypeTag>::
+wellNewtonLimit_()
+{
+    return Parameters::IsSet<Param>(/*errorIfNotRegistered=*/false) ? Parameters::Get<Param>()
+                                                                    : Param::value;
 }
 
 template <typename TypeTag>
@@ -88,7 +100,7 @@ beginReportStep(unsigned report_step)
     }
 
     initWellConnectionData();
-    initWellState();
+    initWellState(report_step);
     // Save the initial accepted state for this report step.
     last_valid_comp_well_states_.copyDynamicStateFrom(comp_well_states_);
 }
@@ -142,8 +154,18 @@ createWellContainer()
             || well_connection_data_[w].empty()) {
             continue;
         }
+        // A stopped well without crossflow has no flow in any connection, as if shut.
+        if (comp_well_states_[well_name].status == WellStatus::STOP
+            && !wells_ecl_[w].getAllowCrossFlow()) {
+            continue;
+        }
 
-        well_container_.emplace_back(std::make_shared<CompWell<TypeTag>>(wells_ecl_[w], w, well_connection_data_[w]));
+        // as for the black-oil wells, the PVT region of the first connection cell
+        const unsigned pvt_region_idx
+            = simulator_.problem().pvtRegionIndex(well_connection_data_[w].front().cell_index);
+        well_container_.emplace_back(std::make_shared<CompWell<TypeTag>>(wells_ecl_[w], w, well_connection_data_[w],
+                                                                          dwell_fraction_max_, dbhp_max_rel_,
+                                                                          pvt_region_idx));
     }
 }
 
@@ -233,7 +255,7 @@ initWellConnectionData()
 template <typename TypeTag>
 void
 CompWellModel<TypeTag>::
-initWellState()
+initWellState(const unsigned report_step)
 {
     // TODO: the following might need to be adjusted based on understanding
     const auto pressIx = []()
@@ -289,16 +311,15 @@ initWellState()
         }
     }
 
-    // Start each report step from freshly initialized schedule state. Retry
-    // recovery still comes from last_valid_comp_well_states_ via
-    // restoreLastValidState()/endTimeStep(). Passing the last valid state as
-    // prev_well_state here would carry dynamic state across report steps, but
-    // that currently changes regression results, so we pass nullptr for now.
+    // Carry the wellbore inventory (pressure, water fraction and composition)
+    // across report steps, so that schedule-derived targets do not replace it.
     this->comp_well_states_.init(this->wells_ecl_,
                                  cell_pressure, well_temperatures, cell_mole_fractions, this->well_connection_data_,
+                                 this->schedule_[report_step],
                                  this->summary_state_,
                                  this->locally_owned_wells_,
-                                 /*prev_well_state=*/nullptr);
+                                 this->report_step_start_events_,
+                                 &this->last_valid_comp_well_states_);
 }
 
 
@@ -453,6 +474,21 @@ getWellConvergence() const
         converged = converged && well->getConvergence();
     }
     return comm_.min(converged) == 1;
+}
+
+template <typename TypeTag>
+bool
+CompWellModel<TypeTag>::
+updateWellStatusAtConvergence()
+{
+    const auto& summary_state = simulator_.vanguard().summaryState();
+    int changed = 0;
+    for (const auto& well : this->well_container_) {
+        if (well->updateWellStatusAtConvergence(summary_state, comp_well_states_[well->name()])) {
+            changed = 1;
+        }
+    }
+    return comm_.max(changed) == 1;
 }
 
 template <typename TypeTag>

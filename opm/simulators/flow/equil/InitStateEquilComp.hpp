@@ -166,7 +166,7 @@ public:
         fs.setPressure(FluidSystem::waterPhaseIdx, press);
 
         typename FluidSystem::template ParameterCache<Scalar> paramCache(eosType_);
-        paramCache.setRegionIndex(pvtRegion_);
+        paramCache.setPvtRegionIndex(pvtRegion_);
 
         return FluidSystem::density(fs, paramCache, FluidSystem::waterPhaseIdx) * g_;
     }
@@ -195,7 +195,8 @@ private:
  *    table uses one EOS root throughout the region. When the gas-oil contact
  *    lies inside such a region, the composition must vary over the region for
  *    the downstream flash to label phases correctly. A COMPVD table naming
- *    both phases instead defines separate gas and liquid zones; the zone
+ *    both phases instead integrates a gas zone above the effective contact with
+ *    the gas root and a liquid zone below it with the liquid root; the zone
  *    containing the datum is anchored at the datum pressure and the other at
  *    the contact;
  *  - type 3: the table provides the liquid composition below the gas-oil
@@ -205,11 +206,23 @@ private:
  *    the COMPVD vapour rows when present, or the equilibrium vapour composition
  *    of the contact liquid otherwise.
  *
- * The COMPVD phase column selects the EOS root. If its rows name both phases,
- * the vapour rows define the gas zone above the gas-oil contact and the liquid
- * rows define the liquid zone below it. For type 1 a contact outside the gap
- * between the last vapour row and the first liquid row moves to the nearest
- * edge of that gap.
+ * With EQUIL item 10 = 1, a COMPVD table naming one phase uses that phase's
+ * EOS root. If it names both phases, all rows give the total composition,
+ * interpolated also across the gap between the last vapour and first liquid
+ * rows. The gas-oil contact selects the root within that gap; if it lies
+ * outside, the effective phase boundary moves to the nearest edge with a
+ * warning. The downstream flash may split cells in the gap. With type 3,
+ * the vapour and liquid rows give separate zone compositions, and a contact
+ * outside their gap is rejected.
+ *
+ * With EQUIL item 10 = 1, each zone's pressure follows the EOS density of one
+ * hydrocarbon phase. At that pressure and temperature, a cell's mixture can
+ * split into gas and liquid. The pressure gradient then matches neither
+ * phase's density, so the gas and liquid in such a cell are not in hydrostatic
+ * equilibrium and may move up or down once the simulation starts.
+ * twoPhaseCheckRegions() marks the type-1 cells, except those below the
+ * water-oil contact when the water phase is active, and reportTwoPhaseCells()
+ * warns about those that the initial flash splits.
  *
  * Only cell-centre initialization is supported (EQUIL item 9 = 0).
  * Gas-oil contact capillary pressure must be zero: the downstream flash uses
@@ -319,12 +332,21 @@ public:
                                           numSamplePoints, r));
         }
 
+        const bool waterActive = FluidSystem::phaseIsActive(FluidSystem::waterPhaseIdx);
         fluidStates_.resize(cellCenterDepth.size());
         referencePressures_.resize(cellCenterDepth.size());
+        twoPhaseCheckRegions_.assign(cellCenterDepth.size(), -1);
         for (std::size_t cell = 0; cell < cellCenterDepth.size(); ++cell) {
+            const auto& reg = regions[eqlnum[cell]];
             const auto pvtRegion = pvtnum.empty() ? 0u : static_cast<unsigned>(pvtnum[cell]);
-            referencePressures_[cell] = assignCell(fluidStates_[cell], regions[eqlnum[cell]],
+            referencePressures_[cell] = assignCell(fluidStates_[cell], reg,
                                                    pvtRegion, cellCenterDepth[cell], cell);
+            // The type 3 gas is saturated at the contact, so the lower pressure
+            // above it splits that gas slightly. Below the water-oil contact
+            // the pore space holds water.
+            if ((reg.initType == 1) && !(waterActive && (cellCenterDepth[cell] > reg.zwoc))) {
+                twoPhaseCheckRegions_[cell] = eqlnum[cell];
+            }
         }
     }
 
@@ -339,6 +361,16 @@ public:
     /// fluidStates() retains the independently integrated phase pressures.
     const std::vector<Scalar>& referencePressures() const
     { return referencePressures_; }
+
+    /// Zero-based equilibration region of each type-1 cell whose initial flash
+    /// is checked for a split into gas and liquid, or -1 for the other cells.
+    /// With the water phase active, cells below the water-oil contact are not
+    /// checked. See reportTwoPhaseCells().
+    std::vector<int>& twoPhaseCheckRegions()
+    { return twoPhaseCheckRegions_; }
+
+    const std::vector<int>& twoPhaseCheckRegions() const
+    { return twoPhaseCheckRegions_; }
 
 private:
     using CompVec = std::array<Scalar, FluidSystem::numComponents>;
@@ -373,18 +405,17 @@ private:
         /// Nominal phase assigned to cells in a single-zone region.
         unsigned nominalPhaseIdx{FluidSystem::oilPhaseIdx};
         /// COMPVD naming both phases describes a gas zone over a liquid one,
-        /// each with its own composition and its own hydrostatic column.
+        /// each with its own EOS root and its own hydrostatic column.
         bool twoZone{false};
         /// Depth of the last vapour row of such a table. With EQUIL item 10 = 1
-        /// the rows decide the phase, so a cell at this depth stays in the gas
-        /// zone even when the contact lies on it.
+        /// the row labels bound the gas zone, so a cell at this depth stays in
+        /// it even when the contact lies on it.
         Scalar lastVaporDepth{};
-        /// Gas-zone composition for a COMPVD table that names both phases.
+        /// Gas-zone composition of a type 3 region whose COMPVD names both phases.
         std::vector<TabulatedFunction> vaporVdTable;
         /// Equilibrium vapour at the contact for type 3 without gas-zone rows.
         CompVec vaporComposition{};
-        /// Overall composition for a single-zone type 1 region, liquid composition
-        /// for type 3, or liquid-zone composition when vaporVdTable stores the gas zone.
+        /// Overall composition for type 1, or liquid composition for type 3.
         std::vector<TabulatedFunction> compositionVdTable;
         TabulatedFunction tempVdTable;
         std::optional<PressFunc> oilPressure;
@@ -410,7 +441,7 @@ private:
         return span;
     }
 
-    /// Normalized vapour-zone composition of a two-zone COMPVD region at a given depth.
+    /// Normalized gas-zone composition of a type 3 two-zone COMPVD region at a given depth.
     static CompVec vaporComposition(const Region& reg, const Scalar depth)
     {
         CompVec z{};
@@ -500,12 +531,12 @@ private:
         return rows;
     }
 
-    /// Depth at which the gas zone of a COMPVD table naming both phases meets
-    /// its liquid zone: the gas-oil contact when it lies between the last
-    /// vapour row and the first liquid row. With EQUIL item 10 = 1 the rows
-    /// give the composition versus depth, so a contact outside that gap moves
-    /// to its nearest edge and every row keeps the phase it names. Type 3 uses
-    /// the contact as its reference depth, so there the rows must agree with it.
+    /// Effective boundary between the gas and liquid zones of a COMPVD table
+    /// naming both phases. It follows the specified gas-oil contact when that
+    /// contact lies between the last vapour and first liquid rows. With type 1,
+    /// an out-of-gap contact is clamped to the nearest edge with a warning, so
+    /// every row keeps the phase it names. Type 3 uses the contact as its
+    /// reference depth and rejects a contact outside the gap.
     static Scalar zoneBoundary(const CompvdTable& compvd,
                                const std::vector<std::size_t>& vaporRows,
                                const std::vector<std::size_t>& liquidRows,
@@ -581,7 +612,8 @@ private:
         const auto first = flags.front();
         if (std::ranges::any_of(flags, [first](const auto f) { return f != first; })) {
             OpmLog::info(fmt::format("Equilibration region {}: COMPVD names both phases, "
-                                     "so the composition of each depth decides the phase.",
+                                     "so the contact and row labels determine the gas and "
+                                     "liquid zones.",
                                      regionIdx + 1));
             return std::nullopt;
         }
@@ -748,15 +780,24 @@ private:
                                  allRows(compvd.getDepthColumn().size()));
             }
             else {
-                // Both phases named: the vapour rows describe the gas zone and
-                // the liquid rows the one below the contact.
+                // Both phases named: the gas root applies above the effective
+                // contact and the liquid root below it. For type 1 all rows give
+                // the total composition, interpolated across the gap between the
+                // two phases as well. Type 3 takes the gas from the vapour rows
+                // and the liquid from the liquid rows.
                 const auto vaporRows = rowsOfPhase(compvd, CompvdTable::Phase::Vapor);
                 const auto liquidRows = rowsOfPhase(compvd, CompvdTable::Phase::Liquid);
                 reg.zgoc = zoneBoundary(compvd, vaporRows, liquidRows, reg, regionIdx);
                 reg.twoZone = true;
                 reg.lastVaporDepth = compvd.getDepthColumn()[vaporRows.back()];
-                setupComposition(reg.vaporVdTable, compvd, vaporRows);
-                setupComposition(reg.compositionVdTable, compvd, liquidRows);
+                if (reg.initType == 1) {
+                    setupComposition(reg.compositionVdTable, compvd,
+                                     allRows(compvd.getDepthColumn().size()));
+                }
+                else {
+                    setupComposition(reg.vaporVdTable, compvd, vaporRows);
+                    setupComposition(reg.compositionVdTable, compvd, liquidRows);
+                }
             }
         }
 
@@ -1003,9 +1044,9 @@ private:
     /// subsequent flash determines the phase split.
     ///
     /// A COMPVD table naming both phases describes two zones instead, each with
-    /// its own composition, EOS root and hydrostatic column. The column holding
-    /// the datum is anchored there and the other picks its pressure up at the
-    /// contact, so the datum pressure is honoured whichever zone it lies in.
+    /// its own EOS root and hydrostatic column. The column holding the datum is
+    /// anchored there and the other picks its pressure up at the contact, so the
+    /// datum pressure is honoured whichever zone it lies in.
     ///
     /// For a single zone the EOS root is the phase COMPVD names, or, when the
     /// table does not name one, the root implied by the datum's side of the
@@ -1037,10 +1078,13 @@ private:
             gasAtDatum ? FluidSystem::gasPhaseIdx : FluidSystem::oilPhaseIdx);
 
         // A gas-oil contact inside a single-zone region requires the composition
-        // to vary across it, so the flash can label the phases correctly.
-        if ((reg.zgoc > span[0]) && (reg.zgoc < span[1]) &&
+        // to vary across it, so the flash can label the phases correctly. Only
+        // the hydrocarbon above the water-oil contact needs labelling.
+        const Scalar hydrocarbonBottom = FluidSystem::phaseIsActive(FluidSystem::waterPhaseIdx)
+            ? std::min(span[1], reg.zwoc) : span[1];
+        if ((reg.zgoc > span[0]) && (reg.zgoc < hydrocarbonBottom) &&
             !compositionVariesBetween(reg, span[0], reg.zgoc) &&
-            !compositionVariesBetween(reg, reg.zgoc, span[1])) {
+            !compositionVariesBetween(reg, reg.zgoc, hydrocarbonBottom)) {
             OpmLog::warning(fmt::format("Equilibration region {}: the gas-oil contact "
                                         "at {} m lies inside a type-1 region, but the "
                                         "composition does not vary across the contact. "
@@ -1061,9 +1105,9 @@ private:
                                  regionIdx + 1, reg.compositionKeyword));
     }
 
-    /// A COMPVD region naming both phases: a gas zone above the gas-oil contact
-    /// and a liquid one below, each integrated with its own composition and EOS
-    /// root.
+    /// For type 1, a COMPVD region naming both phases uses the same total
+    /// composition profile in its gas and liquid zones. The zones meet at the
+    /// effective gas-oil contact and integrate with their respective EOS roots.
     void setupTwoZoneRegion(Region& reg,
                             const std::array<Scalar, 2>& span,
                             const Scalar gravity,
@@ -1072,10 +1116,9 @@ private:
                             const Scalar datum,
                             const Scalar datumPressure) const
     {
-        const ODE liquidOde([&reg](const Scalar depth) { return composition(reg, depth); },
-                            reg.tempVdTable, FluidSystem::oilPhaseIdx, eosType_, gravity);
-        const ODE gasOde([&reg](const Scalar depth) { return vaporComposition(reg, depth); },
-                         reg.tempVdTable, FluidSystem::gasPhaseIdx, eosType_, gravity);
+        const auto z = [&reg](const Scalar depth) { return composition(reg, depth); };
+        const ODE liquidOde(z, reg.tempVdTable, FluidSystem::oilPhaseIdx, eosType_, gravity);
+        const ODE gasOde(z, reg.tempVdTable, FluidSystem::gasPhaseIdx, eosType_, gravity);
 
         // The datum-side pressure function must reach the actual contact even
         // when it lies outside the cell span, because the other pressure function
@@ -1085,10 +1128,11 @@ private:
                                               std::max(pressureSpan[1], reg.zgoc)};
         if ((reg.zgoc < span[0]) || (reg.zgoc > span[1])) {
             OpmLog::warning(fmt::format("Equilibration region {}: the gas zone ends at {} m, "
-                                        "outside the cells of the region, so the COMPVD "
-                                        "rows of one phase describe no cell.",
+                                        "outside the cells of the region, so all of them "
+                                        "lie in the {} zone.",
                                         regionIdx + 1,
-                                        reg.zgoc));
+                                        reg.zgoc,
+                                        (reg.zgoc < span[0]) ? "liquid" : "gas"));
         }
 
         if (datum < reg.zgoc) {
@@ -1204,8 +1248,8 @@ private:
 
     /// Whether \p depth lies in the gas zone of a region that has one. A depth
     /// on the gas-oil contact belongs to the liquid zone, except the last vapour
-    /// row of a two-zone COMPVD table with EQUIL item 10 = 1, whose rows decide
-    /// the phase. That row, not the contact, bounds the exception: a contact
+    /// row of a two-zone COMPVD table with EQUIL item 10 = 1, which its label
+    /// keeps gas. That row, not the contact, bounds the exception: a contact
     /// moved down onto the first liquid row leaves that row liquid.
     static bool isInGasZone(const Region& reg, const Scalar depth)
     {
@@ -1221,7 +1265,8 @@ private:
         const bool inGasZone = isInGasZone(reg, depth);
 
         const CompVec z = [&reg, depth, inGasZone]() {
-            if (!inGasZone) {
+            // Type 1 takes the total composition on either side of the contact.
+            if (!inGasZone || (reg.initType == 1)) {
                 return composition(reg, depth);
             }
             // Type 3 holds the contact vapour above the contact; a two-zone
@@ -1290,7 +1335,91 @@ private:
     std::vector<Scalar> maxWater_;
     std::vector<FluidState> fluidStates_;
     std::vector<Scalar> referencePressures_;
+    std::vector<int> twoPhaseCheckRegions_;
 };
+
+/// Warn about the type-1 EQUIL cells that the initial flash splits into gas
+/// and liquid. For each region, a warning gives the depth range of those cells
+/// and the range of their smaller phase's share of the hydrocarbon moles,
+/// ignoring shares under 0.1%.
+///
+/// \param[in] checkRegions    Zero-based equilibration region of each checked
+///                            cell, or -1, see
+///                            InitialStateComputer::twoPhaseCheckRegions().
+/// \param[in] cellCenterDepth Depth of each cell centre.
+/// \param[in] liquidFraction  Liquid mole fraction of a checked cell's
+///                            hydrocarbon after the initial flash, 0 or 1 when
+///                            it stays one phase, given the cell index.
+/// \param[in] numRegions      Number of equilibration regions.
+/// \param[in] comm            Communicator for parallel runs.
+template <class Scalar, class LiquidFraction>
+void reportTwoPhaseCells(const std::vector<int>& checkRegions,
+                         const std::vector<Scalar>& cellCenterDepth,
+                         const LiquidFraction& liquidFraction,
+                         const std::size_t numRegions,
+                         const Parallel::Communication& comm)
+{
+    // The smallest mole fraction of the smaller phase that is reported. Gas
+    // just above a saturated gas-oil contact lies slightly below its dew point
+    // and condenses a trace of liquid well under it.
+    constexpr Scalar minReportedFraction{1.0e-3};
+
+    // Ranges of the depth and of the smaller phase's mole fraction of the split
+    // cells of each region, over all processes. A range is unaffected by the
+    // cells that several processes hold.
+    std::vector<Scalar> shallowest(numRegions, std::numeric_limits<Scalar>::max());
+    std::vector<Scalar> deepest(numRegions, std::numeric_limits<Scalar>::lowest());
+    std::vector<Scalar> leastFraction(numRegions, std::numeric_limits<Scalar>::max());
+    std::vector<Scalar> mostFraction(numRegions, std::numeric_limits<Scalar>::lowest());
+    for (std::size_t cell = 0; cell < checkRegions.size(); ++cell) {
+        if (checkRegions[cell] < 0) {
+            continue;
+        }
+        const Scalar liquid = liquidFraction(cell);
+        const Scalar fraction = std::min(liquid, Scalar{1} - liquid);
+        // Negated so that a NaN fraction is skipped too.
+        if (!(fraction >= minReportedFraction)) {
+            continue;
+        }
+        const auto r = static_cast<std::size_t>(checkRegions[cell]);
+        const Scalar depth = cellCenterDepth[cell];
+        shallowest[r] = std::min(shallowest[r], depth);
+        deepest[r] = std::max(deepest[r], depth);
+        leastFraction[r] = std::min(leastFraction[r], fraction);
+        mostFraction[r] = std::max(mostFraction[r], fraction);
+    }
+    const auto count = static_cast<int>(numRegions);
+    comm.min(shallowest.data(), count);
+    comm.max(deepest.data(), count);
+    comm.min(leastFraction.data(), count);
+    comm.max(mostFraction.data(), count);
+
+    // A single depth needs no range.
+    const auto depthRange = [](const Scalar top, const Scalar bottom) {
+        const auto shallow = fmt::format("{:.2f} m", top);
+        const auto deep = fmt::format("{:.2f} m", bottom);
+        return (shallow == deep) ? "at " + shallow : "between " + shallow + " and " + deep;
+    };
+    for (std::size_t r = 0; r < numRegions; ++r) {
+        if (shallowest[r] > deepest[r]) {
+            continue;
+        }
+        // A single share needs no range. A share lies between the cut-off and
+        // one half, so it cannot round to 0% or 100%.
+        const auto least = fmt::format("{:.3g}%", 100 * leastFraction[r]);
+        const auto most = fmt::format("{:.3g}%", 100 * mostFraction[r]);
+        OpmLog::warning(fmt::format("Equilibration region {}: cells {} split into gas and "
+                                    "liquid at their initial pressure, with the smaller phase "
+                                    "holding {} of the hydrocarbon moles. With EQUIL "
+                                    "item 10 = 1, that pressure comes from the density of a "
+                                    "single phase, so the gas and liquid in these cells are "
+                                    "not in hydrostatic equilibrium and may move up or down "
+                                    "once the simulation starts.",
+                                    r + 1,
+                                    depthRange(shallowest[r], deepest[r]),
+                                    (least == most) ? least : least + " to " + most));
+    }
+}
 
 } // namespace Opm::EQUIL::Comp
 
