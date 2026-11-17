@@ -82,6 +82,8 @@
 #include <optional>
 #include <string>
 #include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Opm {
@@ -650,6 +652,96 @@ template<class Scalar> class WellContributions;
                                                                         const double dt,
                                                                         DeferredLogger& local_deferredLogger);
 
+            /// Compute and debug-log every local predicting producer's anchor
+            /// (WellInterface::computeAnchor()); --log-well-anchors only.
+            void logWellAnchors_(const int reportStepIdx, DeferredLogger& deferred_logger);
+
+            /// True if the group-tree workflow applies at \p reportStepIdx at all:
+            /// group-tree balancer and network solver, a production network, and
+            /// none of what the workflow does not handle yet (autochoke nodes,
+            /// gas-lift optimisation, reservoir coupling). useGroupTreeWorkflow_()
+            /// adds the per-iteration conditions.
+            bool groupTreeModeActive_(const int reportStepIdx) const;
+
+            /// Producers given their initial solve in this timestep's
+            /// beginTimeStep() (initialSolveForGroupTree()): prepareTimeStep()
+            /// does not reset their state to targets.
+            std::unordered_set<std::string> group_tree_initially_solved_;
+
+            /// Producers whose initial solve did not converge (numerical
+            /// failure) in this timestep's beginTimeStep(): held stopped for the
+            /// step, kept out of the well-test state, retried next step.
+            std::unordered_set<std::string> group_tree_initial_solve_failed_;
+
+            /// Consecutive timesteps each well's initial solve has failed
+            /// numerically (globally consistent); at
+            /// --group-tree-max-initial-solve-failures the well is shut.
+            std::unordered_map<std::string, int> group_tree_initial_solve_failures_;
+
+            /// End of a timestep: count the numerical initial-solve failures and
+            /// shut wells that have reached the limit.
+            void updateInitialSolveFailures_(const double simulation_time,
+                                             DeferredLogger& deferred_logger);
+
+            /// Set by assemble() while prepareTimeStep() has just solved every
+            /// well at this reservoir state: the first round of the group-tree
+            /// workflow then skips A1.
+            bool wells_solved_this_iteration_{false};
+
+            /// True if this global iteration's well/network update uses the
+            /// group-tree workflow (timestep_workflow.md, section 3) rather than
+            /// updateWellControlsAndNetworkIteration(): group-tree balancer and
+            /// network solver, within NUPCOL, a production network to balance,
+            /// and none of what that workflow does not handle yet (autochoke
+            /// nodes, gas-lift optimisation, reservoir coupling).
+            bool useGroupTreeWorkflow_(const bool mandatory_network_balance) const;
+
+            /// One A round of the group-tree workflow, in the outer loop's place
+            /// of updateWellControlsAndNetworkIteration(): on the first round
+            /// the A1 well solves, then the IPR refresh, B (settleGroupTree_()),
+            /// B4 (commit the tree, production node pressures as THP limits) and
+            /// A3 (well solves at the committed constraints). The injection
+            /// network is left to updateWellControlsAndNetwork(), after the
+            /// rounds end. Returns the same triple as
+            /// updateWellControlsAndNetworkIteration().
+            std::tuple<bool, bool, Scalar> updateGroupTreeNetworkIteration_(const bool first_round,
+                                                                            const bool relax_network_tolerance,
+                                                                            const double dt,
+                                                                            DeferredLogger& deferred_logger);
+
+            /// B of the group-tree workflow: balance, solve the network for
+            /// that balance, change the open set by what the solve says
+            /// (updateGroupTreeOpenSet(): reopen candidates, with
+            /// \p offer_reopen_candidates, in the first pass only; stop the
+            /// worst well past its tubing-curve cliff), and repeat until the
+            /// open set is unchanged (capped). Returns the last balanced tree;
+            /// the status changes are applied to the wells as they happen.
+            ProdGroupTreeBalancer::Tree<Scalar>
+            settleGroupTree_(const int reportStepIdx,
+                             const std::vector<details::NetworkDescriptor>& active_networks,
+                             const bool offer_reopen_candidates,
+                             DeferredLogger& deferred_logger);
+
+            /// Remember the implicit IPR of every local balancer-owned producer,
+            /// as the network solve is about to use it.
+            void snapshotGroupTreeIprs_();
+
+            /// Largest relative difference, over the open producers of the last
+            /// snapshotGroupTreeIprs_() and their phases, between the rate a
+            /// well now produces and the rate the snapshot IPR gives at its
+            /// current bhp -- how far the linearisation the network solve relied
+            /// on is off at the operating point the wells actually reached.
+            /// Global over ranks; wells above a small threshold are logged.
+            Scalar groupTreeIprMismatch_(DeferredLogger& deferred_logger) const;
+
+            /// Per local producer: the implicit IPR (a, b) the last group-tree
+            /// network solve used, see snapshotGroupTreeIprs_().
+            std::unordered_map<std::string, std::pair<std::vector<Scalar>, std::vector<Scalar>>>
+                group_tree_ipr_snapshot_;
+
+            /// Local producers the last B reopened (see updateGroupTreeNetworkIteration_()).
+            std::unordered_set<std::string> group_tree_reopened_;
+
             /// Update rank's notion of intersecting wells and their
             /// associate solution variables.
             ///
@@ -728,6 +820,19 @@ template<class Scalar> class WellContributions;
             void assignWellSpeciesRates_(data::Wells& wsrpt) const;
             void assignWellTracerRates_(data::Wells& wsrpt) const;
 
+            /// @brief Reduce a rank-local {well name -> (control mode, target value)} map
+            ///   to one that is globally consistent: every rank contributes its own
+            ///   entries via comm().sum() (encoded as (mode + 1, value) so zero means
+            ///   "not set"), and every rank ends up with the same result regardless of
+            ///   which one owns which well.
+            /// @param localLimits This rank's own contributions, keyed by well name.
+            /// @param allWellNames Every well name in the schedule, same order on every
+            ///   rank -- used to build the encoding buffer.
+            /// @return The globally-reduced map, identical on every rank.
+            std::unordered_map<std::string, std::pair<int, Scalar>>
+            gatherWellLimits_(const std::unordered_map<std::string, std::pair<int, Scalar>>& localLimits,
+                              const std::vector<std::string>& allWellNames) const;
+
             /// @brief True when this process takes part in a *shared* (cross-rescoup)
             ///   network this sync step: a master with at least one master-group
             ///   network leaf, or a slave connected to the master's network.
@@ -781,6 +886,68 @@ template<class Scalar> class WellContributions;
             /// @return New value for more_network_update: true to continue the
             ///   slave's outer loop, false to exit.
             bool maybeSendSlaveGroupFlowToMaster_(const int reportStepIdx);
+
+            /// @brief Build the globally-consistent {well name -> strictest individual
+            ///   limit} map the group-tree balancer (ProdGroupTreeBalancer) needs, using
+            ///   each open producer's current production_cmode where it already gives a
+            ///   direct answer (a rate mode reads its target off the deck; a pressure
+            ///   mode uses the current rate sum as its own proxy) and otherwise falling
+            ///   back to WellInterface::estimateStrictestProductionLimitForBalancer()
+            ///   (a converged-IPR estimate). Stopped, zero-rate, and IPR-estimate-failure
+            ///   wells are simply left out of the returned map.
+            /// @param deferred_logger For IPR-update failures, logged and skipped rather
+            ///   than thrown (every rank must still reach gatherWellLimits_()'s comm.sum()).
+            /// @return The globally-consistent limits map (see gatherWellLimits_()).
+            std::unordered_map<std::string, std::pair<int, Scalar>>
+            prepareWellsForBalancing_(DeferredLogger& deferred_logger);
+
+            /// @brief The balancer's candidates at the start of a timestep
+            ///   (WellInterface::estimateStrictestProductionLimitFromPotentials()):
+            ///   every open, predicting producer with positive potentials and
+            ///   current rates. The potentials give the pressure limit's
+            ///   capacity only; the tree is built on the wells' current rates,
+            ///   as the groups' rates are their sums.
+            /// @return The globally consistent limits map.
+            std::unordered_map<std::string, std::pair<int, Scalar>>
+            prepareWellsForBalancingFromPotentials_();
+
+            /// @brief Start-of-timestep balance of the group tree on the wells'
+            ///   potentials, committed (categorization and targets, no rates)
+            ///   so that the wells' first solves of the timestep use the
+            ///   balancer's targets; the balancer owns production from here.
+            ///   Without candidates, the standard targets are kept.
+            void balanceGroupTreeFromPotentials_(const int reportStepIdx,
+                                                 DeferredLogger& deferred_logger);
+
+            /// @brief True if \p well's control is currently the balancer's to
+            ///   decide rather than standard switching's: a prediction-mode
+            ///   producer while balancerOwnsProduction() is set. History-mode
+            ///   producers are never group-controlled, so they stay with standard
+            ///   switching regardless.
+            bool balancerOwnsProductionControl_(const WellInterface<TypeTag>& well) const
+            {
+                return this->balancerOwnsProduction() && well.isProducer()
+                    && well.wellEcl().predictionMode();
+            }
+
+            /// @brief Commit a balanced tree to the wells and groups (see
+            ///   ProdGroupTreeBalancer::applyTreeToState()) and remember each local
+            ///   producer's committed control, for localSolvesDisagreeWithBalancer_().
+            /// @return True, on every rank, if the commit changed any well's or
+            ///   group's production control.
+            bool commitBalancedTree_(const ProdGroupTreeBalancer::Tree<Scalar>& tree,
+                                     bool commitRates,
+                                     DeferredLogger& deferred_logger);
+
+            /// @brief True, on every rank, if a local well solve since the last
+            ///   commitBalancedTree_() ended any balancer-owned producer on a
+            ///   different control than the one committed -- the balancer's
+            ///   categorization no longer matches what the wells can do.
+            bool localSolvesDisagreeWithBalancer_() const;
+
+            /// Each local balancer-owned producer's production control as of the
+            /// last commitBalancedTree_(); cleared at the start of each timestep.
+            std::unordered_map<std::string, Well::ProducerCMode> balancer_committed_cmodes_;
 
             /// @brief Master-side: send the trailing-final is_final = true to
             ///   unblock the slave when the master's outer loop exited without

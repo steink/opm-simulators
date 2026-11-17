@@ -127,6 +127,20 @@ BlackoilModelParameters<Scalar>::BlackoilModelParameters()
     nupcol_group_rate_tolerance_ = Parameters::Get<Parameters::NupcolGroupRateTolerance<Scalar>>();
     well_group_constraints_max_iterations_ = Parameters::Get<Parameters::WellGroupConstraintsMaxIterations>();
     group_control_fraction_tolerance_ = Parameters::Get<Parameters::GroupControlFractionTolerance<Scalar>>();
+    network_solver_ = Parameters::Get<Parameters::NetworkSolver>();
+    network_analytic_jacobian_ = Parameters::Get<Parameters::NetworkAnalyticJacobian>();
+    enable_group_tree_balancer_ = Parameters::Get<Parameters::EnableGroupTreeBalancer>();
+    group_tree_balancer_tolerance_ = Parameters::Get<Parameters::GroupTreeBalancerTolerance<Scalar>>();
+    group_tree_ipr_tolerance_ = Parameters::Get<Parameters::GroupTreeIprTolerance<Scalar>>();
+    group_tree_stop_hold_ = Parameters::Get<Parameters::GroupTreeStopHold>();
+    log_well_anchors_ = Parameters::Get<Parameters::LogWellAnchors>();
+    group_tree_initialization_ = Parameters::Get<Parameters::GroupTreeInitialization>();
+    group_tree_initial_balance_ = Parameters::Get<Parameters::GroupTreeInitialBalance>();
+    group_tree_max_initial_solve_failures_ = Parameters::Get<Parameters::GroupTreeMaxInitialSolveFailures>();
+    close_stopped_wells_ = Parameters::Get<Parameters::CloseStoppedWells>();
+    group_tree_reopen_thp_margin_ = Parameters::Get<Parameters::GroupTreeReopenThpMargin<Scalar>>();
+    group_tree_branch_flattening_ = Parameters::Get<Parameters::GroupTreeBranchFlattening>();
+    group_tree_network_step_ = Parameters::Get<Parameters::GroupTreeNetworkStep>();
 }
 
 template<class Scalar>
@@ -277,6 +291,14 @@ void BlackoilModelParameters<Scalar>::registerParameters()
         ("Damping factor in the inner network pressure update iterations");
     Parameters::Register<Parameters::NetworkMaxPressureUpdateInBars<Scalar>>
         ("Maximum pressure update in the inner network pressure update iterations");
+    Parameters::Register<Parameters::NetworkSolver>
+        ("How the production network is solved: fixedpoint relaxes the node pressures against "
+         "the wells; group-tree solves the node pressures, with the wells' rates through their "
+         "IPRs, for the configuration the group-tree balancer (--enable-group-tree-balancer) "
+         "most recently decided, and falls back to the fixed point for a network it cannot model");
+    Parameters::Register<Parameters::NetworkAnalyticJacobian>
+        ("Assemble the group-tree network Jacobian from the VFP table derivatives instead of "
+         "differencing the residual");
     Parameters::Register<Parameters::NonlinearSolver>
         ("Choose nonlinear solver. Valid choices are newton or nldd.");
     Parameters::Register<Parameters::LocalSolveApproach>
@@ -334,6 +356,53 @@ void BlackoilModelParameters<Scalar>::registerParameters()
 
     Parameters::Register<Parameters::GroupControlFractionTolerance<Scalar>>
         ("Tolerance for minimal allowed fraction for controlled phase before employing a fallback control");
+
+    Parameters::Register<Parameters::EnableGroupTreeBalancer>
+        ("Run the group-tree balancer (guide-rate-based Individual/Group control and target "
+         "distribution) after well controls change, while still within NUPCOL");
+    Parameters::Register<Parameters::GroupTreeBalancerTolerance<Scalar>>
+        ("Convergence tolerance for the group-tree balancer's own guide-rate distribution");
+    Parameters::Register<Parameters::GroupTreeIprTolerance<Scalar>>
+        ("Relative well-rate tolerance on the IPRs the group-tree network solve used, measured "
+         "after the wells' own solves; above it the group-tree workflow re-balances with fresh "
+         "IPRs (--network-solver=group-tree with the group-tree balancer)");
+    Parameters::Register<Parameters::GroupTreeStopHold>
+        ("How long a well stop decided by the group-tree network solve is held in the wells' "
+         "own solves before they may reopen it: 'iteration' (one global iteration), "
+         "'timestep', or 'nupcol' (while within NUPCOL)");
+    Parameters::Register<Parameters::LogWellAnchors>
+        ("Compute every predicting producer's maximum flowing THP (its anchor) at the start of "
+         "each timestep and write it to the debug log; diagnostic only, no effect on the run");
+    Parameters::Register<Parameters::GroupTreeInitialization>
+        ("With the group-tree workflow: give producers without a valid previous solution an "
+         "initial solve at their individual limits at the start of the timestep, skip the "
+         "pre-step network rebalance, and do not re-solve the wells in the first network round "
+         "of a timestep");
+    Parameters::Register<Parameters::GroupTreeInitialBalance>
+        ("With the group-tree workflow: balance the group tree at the start of each timestep "
+         "with the wells' potentials as their limits, and use its group targets from the first "
+         "well solve of the timestep");
+    Parameters::Register<Parameters::GroupTreeMaxInitialSolveFailures>
+        ("With the group-tree workflow: a producer whose initial solve at the start of the "
+         "timestep fails to converge is stopped for that timestep and retried at the next; after "
+         "this many consecutive failures it is shut (if --shut-unsolvable-wells is true)");
+    Parameters::Register<Parameters::CloseStoppedWells>
+        ("Close a well that was stopped during a timestep because it cannot flow at its "
+         "constraints (no flow, not operable, too many re-openings, or stopped by the network) "
+         "and is still stopped at the end of the timestep: it is shut or stopped per its "
+         "auto shut-in setting until a well test or schedule event re-opens it, without "
+         "re-checking its operability");
+    Parameters::Register<Parameters::GroupTreeReopenThpMargin<Scalar>>
+        ("A stopped producer is offered to the group-tree network solve for reopening only if its "
+         "maximum flowing THP exceeds its current THP limit (the node pressure) by this margin "
+         "[bar]");
+    Parameters::Register<Parameters::GroupTreeBranchFlattening>
+        ("Group-tree network solver: solve with branch tables flattened so that a branch's "
+         "pressure drop never falls with flow (a unique network solution), then, if some branch "
+         "ended on its flattened part, solve again with the real tables from that solution");
+    Parameters::Register<Parameters::GroupTreeNetworkStep>
+        ("Group-tree network solver: step control of its Newton solve: 'full' (the full Newton "
+         "step) or 'linesearch' (halve the step until the residual norm drops)");
     // if openMP is available, use two threads per mpi rank by default
 #if _OPENMP
     Parameters::SetDefault<Parameters::ThreadsPerProcess>(2);

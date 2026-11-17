@@ -552,7 +552,7 @@ namespace Opm
         const Scalar sgn = this->isInjector() ? 1.0 : -1.0;
         if (!this->wellIsStopped()){
             if (wqTotal*sgn <= 0.0 && !fixed_status){
-                this->stopWell();
+                this->stopWell(StopReason::NoFlow);
                 return true;
             } else {
                 bool changed = false;
@@ -1044,7 +1044,7 @@ namespace Opm
                 // well can't operate using explicit fractions stop the well
                 // solve with zero rates
                 converged = solveWellWithZeroRate(simulator, dt, groupStateHelper, well_state);
-                this->stopWell();
+                this->stopWell(StopReason::Physical);
                 this->operability_status_.can_obtain_bhp_with_thp_limit = false;
                 this->operability_status_.obey_thp_limit_under_bhp_limit = false;
                 return converged;
@@ -1105,7 +1105,7 @@ namespace Opm
                 // solve with zero rate
                 // well can't operate using explicit fractions stop the well
                 converged = solveWellWithZeroRate(simulator, dt, groupStateHelper, well_state);
-                this->stopWell();
+                this->stopWell(StopReason::Physical);
                 this->operability_status_.can_obtain_bhp_with_thp_limit = false;
                 this->operability_status_.obey_thp_limit_under_bhp_limit = false;
                 return converged;
@@ -1173,6 +1173,717 @@ namespace Opm
     }
 
     template<typename TypeTag>
+    void
+    WellInterface<TypeTag>::
+    updateStoppedWellTrialIpr(const Simulator& simulator,
+                              const double dt,
+                              const GroupStateHelperType& groupStateHelper,
+                              WellStateType& well_state)
+    {
+        auto& ws = well_state.well(this->index_of_well_);
+        std::fill(ws.stopped_ipr_a.begin(), ws.stopped_ipr_a.end(), Scalar{0});
+        std::fill(ws.stopped_ipr_b.begin(), ws.stopped_ipr_b.end(), Scalar{0});
+        ws.stopped_ipr_bhp = Scalar{0};
+        std::fill(ws.stopped_composition.begin(), ws.stopped_composition.end(), Scalar{0});
+
+        // Only meaningful for a producer that is stopped (still part of the
+        // system, unlike shut): persistently (ws.status) or, far more often,
+        // dynamically by the well model (wellIsStopped()) --
+        // calculateMinimumBhpFromThp() (called via estimateOperableBhp()
+        // below) also only supports producers. Or open but without any rate
+        // yet (awaitsFlow()): reopened after a stop, not yet flowing.
+        if (!this->isProducer() || ws.status == WellStatus::SHUT
+            || (ws.status != WellStatus::STOP && !this->wellIsStopped() && !this->awaitsFlow(ws))) {
+            return;
+        }
+        // Its initial solve failed: no IPR to offer for the rest of the step.
+        if (this->isHeldStoppedForTimestep()) {
+            return;
+        }
+
+        const auto& summary_state = simulator.vanguard().summaryState();
+        auto& deferred_logger = groupStateHelper.deferredLogger();
+        const Scalar thp_limit = this->getTHPConstraint(summary_state);
+
+        // With a tubing table: the well's maximum flowing THP, refined from a
+        // solve at its THP limit (the node pressure in a network), and the IPR
+        // there. It is linearised at the marginal point, where reopen decisions
+        // are made, and needs no meaningful THP to succeed, unlike a solve at
+        // the THP limit itself (estimateOperableBhp() below).
+        if (this->well_ecl_.productionControls(summary_state).vfp_table_number > 0) {
+            const WellBhpThpCalculator calc(*this);
+            const Scalar bhp_limit = calc.mostStrictBhpFromBhpLimits(summary_state);
+            auto anchor = this->computeAnchor(simulator, dt, groupStateHelper, well_state, thp_limit);
+            using Status = typename Anchor::Status;
+            // No flow at the current THP limit: step down towards the bhp limit
+            // and search again from the first bhp where it flows. In a network
+            // the node pressure moves with the flows -- with every well under a
+            // node stopped it is that of zero flow, which a branch table falling
+            // at low flow makes its highest -- and the network solve then
+            // decides at the pressure the node actually gets. There is no
+            // lowest node pressure to go by; the steps keep the IPR as close to
+            // the current state as works.
+            bool from_lower = false;
+            const Scalar first_bhp = anchor.first_bhp;
+            if (anchor.status == Status::NoFlow) {
+                for (const Scalar lower : trialBhpSteps(first_bhp, bhp_limit)) {
+                    anchor = this->computeAnchor(simulator, dt, groupStateHelper, well_state, thp_limit, lower);
+                    from_lower = true;
+                    if (anchor.status != Status::NoFlow) {
+                        break;
+                    }
+                }
+                if (from_lower) {
+                    deferred_logger.debug(fmt::format("Stopped well {}: no flow at THP limit {:.3f} bar (bhp "
+                                                      "{:.3f} bar); searched again from bhp {:.3f} bar ({})",
+                                                      this->name(), thp_limit / unit::barsa,
+                                                      first_bhp / unit::barsa, anchor.first_bhp / unit::barsa,
+                                                      anchor.status == Status::NoFlow ? "no flow" : "flows"));
+                }
+            }
+            if (anchor.status != Status::Flows && anchor.status != Status::Capped) {
+                deferred_logger.debug(fmt::format("Stopped well {}: no trial IPR ({}; THP limit {:.3f} bar, "
+                                                  "bhp at the THP limit {:.3f} bar{}, bhp limit {:.3f} bar)",
+                                                  this->name(),
+                                                  anchor.status == Status::NoFlow
+                                                  ? (from_lower ? "no flow even at the bhp limit"
+                                                                : "no flow at the THP limit")
+                                                  : "BHP-controlled solve failed",
+                                                  thp_limit / unit::barsa, first_bhp / unit::barsa,
+                                                  from_lower ? fmt::format(", lowest bhp tried {:.3f} bar",
+                                                                           anchor.first_bhp / unit::barsa)
+                                                             : std::string{},
+                                                  bhp_limit / unit::barsa));
+                return;
+            }
+            const Scalar margin = this->param_.group_tree_reopen_thp_margin_ * unit::barsa;
+            const auto useIpr = [&](const std::vector<Scalar>& a, const std::vector<Scalar>& b,
+                                    const Scalar bhp, const std::string& where) {
+                if (!this->floIprValid(a, b, bhp, summary_state)) {
+                    deferred_logger.debug(fmt::format("Stopped well {}: IPR at bhp {:.3f} bar {} is not usable "
+                                                      "(FLO not falling with bhp, or not producing)",
+                                                      this->name(), bhp / unit::barsa, where));
+                    return false;
+                }
+                deferred_logger.debug(fmt::format("Stopped well {}: trial IPR at bhp {:.3f} bar {} (max flowing "
+                                                  "THP {:.3f} bar{}, THP limit {:.3f} bar)", this->name(),
+                                                  bhp / unit::barsa, where, anchor.thp / unit::barsa,
+                                                  anchor.status == Status::Capped ? ", capped" : "",
+                                                  thp_limit / unit::barsa));
+                ws.stopped_ipr_a = a;
+                ws.stopped_ipr_b = b;
+                ws.stopped_ipr_bhp = bhp;
+                // The network gives the candidate the composition the anchor
+                // judged its lift with, whichever point the IPR is from.
+                if (anchor.composition.size() == ws.stopped_composition.size()) {
+                    ws.stopped_composition = anchor.composition;
+                }
+                return true;
+            };
+
+            // First the current THP limit (the node pressure in a network),
+            // with a margin so that a well right at its lift limit is not
+            // reopened only to stop again. The IPR of the first solve, on the
+            // tubing curve at the THP limit, is linearised where the well would
+            // run at the current node pressure -- whether it has a lift cliff
+            // or not; the touching point can be far from there, and touching
+            // at zero rate it is the shut-in point, never an operating point.
+            // Without that solve, the anchor's IPR where it has a cliff.
+            if (anchor.thp >= thp_limit + margin) {
+                if (!from_lower && anchor.start == Anchor::Start::GivenThp && anchor.start_flows
+                    && useIpr(anchor.start_ipr_a, anchor.start_ipr_b, anchor.start_bhp,
+                              "from the solve at the THP limit")) {
+                    return;
+                }
+                if (anchor.flo > Scalar{0}
+                    && useIpr(anchor.ipr_a, anchor.ipr_b, anchor.bhp, "at its maximum flowing THP")) {
+                    return;
+                }
+            }
+
+            // It cannot flow at the current THP limit. In a network that
+            // pressure includes whatever flowed through the node when it was
+            // solved -- possibly this well's own flow before it stopped -- and
+            // the network solve decides, with the candidate's own THP row,
+            // whether it flows at the pressure the node actually gets. So offer
+            // a flowing point below it.
+            if (anchor.flo > Scalar{0}
+                && useIpr(anchor.ipr_a, anchor.ipr_b, anchor.bhp, "at its maximum flowing THP, below the THP limit")) {
+                return;
+            }
+            // Touching at zero rate: a flowing point below the maximum flowing
+            // THP, as close to it -- and so to the current pressure -- as
+            // works: the lower start that flowed, else steps down to the bhp
+            // limit from the bhp at the lower of the maximum flowing THP and
+            // the THP limit.
+            if (from_lower && anchor.start_flows
+                && useIpr(anchor.start_ipr_a, anchor.start_ipr_b, anchor.start_bhp,
+                          "from a solve below the THP limit")) {
+                return;
+            }
+            const Scalar top = std::min(anchor.thp, thp_limit);
+            const Scalar bhp_top = std::max(calc.calculateMinimumBhpAtThp(well_state, this->well_ecl_, summary_state,
+                                                                          this->getRefDensity(), top),
+                                            bhp_limit);
+            for (const Scalar bhp : trialBhpSteps(bhp_top, bhp_limit)) {
+                const auto trial = this->trialSolveAtBhp(simulator, dt, groupStateHelper, well_state, bhp);
+                if (trial.has_value()
+                    && useIpr(trial->first, trial->second, bhp,
+                              fmt::format("from a solve at bhp {:.3f} bar", bhp / unit::barsa))) {
+                    return;
+                }
+            }
+            deferred_logger.debug(fmt::format("Stopped well {}: no trial IPR (no flow below its maximum "
+                                              "flowing THP {:.3f} bar, down to the bhp limit {:.3f} bar)",
+                                              this->name(), anchor.thp / unit::barsa, bhp_limit / unit::barsa));
+            return;
+        }
+
+        // Without a tubing table: a trial solve at the well's own limits.
+        // Scratch copies of the well state and the well's own operability
+        // flag, restored whatever the outcome; the well is opened for the
+        // trial (estimateOperableBhp() reports a well that is stopped after
+        // its trial solve as having no operable bhp).
+        WellStateType well_state_copy = well_state;
+        GroupStateHelperType groupStateHelper_copy = groupStateHelper;
+        auto well_guard = groupStateHelper_copy.pushWellState(well_state_copy);
+        const auto status = this->wellStatus_;
+        const auto stop_reason = this->stop_reason_;
+        this->openWell();
+        const bool use_vfpexplicit = this->operability_status_.use_vfpexplicit;
+        this->operability_status_.use_vfpexplicit = true;
+        const auto bhp_target = estimateOperableBhp(
+            simulator, dt, groupStateHelper_copy, summary_state, well_state_copy
+        );
+        this->operability_status_.use_vfpexplicit = use_vfpexplicit;
+        this->wellStatus_ = status;
+        this->stop_reason_ = stop_reason;
+
+        if (!bhp_target.has_value()) {
+            deferred_logger.debug(fmt::format("Stopped well {}: no trial IPR (no operable bhp)",
+                                              this->name()));
+            return;
+        }
+        const auto& ws_copy = well_state_copy.well(this->index_of_well_);
+        deferred_logger.debug(fmt::format("Stopped well {}: trial IPR at bhp {:.3f} bar",
+                                          this->name(), *bhp_target / unit::barsa));
+        ws.stopped_ipr_a = ws_copy.implicit_ipr_a;
+        ws.stopped_ipr_b = ws_copy.implicit_ipr_b;
+        ws.stopped_ipr_bhp = *bhp_target;
+        this->updatePrimaryVariables(groupStateHelper);
+    }
+
+    template<typename TypeTag>
+    typename WellInterface<TypeTag>::InitialSolveResult
+    WellInterface<TypeTag>::
+    initialSolveForGroupTree(const Simulator& simulator,
+                             const GroupStateHelperType& groupStateHelper,
+                             WellStateType& well_state,
+                             const bool network_well,
+                             const bool group_controlled)
+    {
+        OPM_TIMEFUNCTION();
+        auto& deferred_logger = groupStateHelper.deferredLogger();
+        const auto& summary_state = simulator.vanguard().summaryState();
+        const double dt = simulator.timeStepSize();
+        auto& ws = well_state.well(this->index_of_well_);
+        const auto deck_controls = this->well_ecl_.productionControls(summary_state);
+        const std::optional<Scalar> node_pressure = this->getDynamicThpLimit();
+
+        // 1. The strictest individual limit: the deck's controls without the
+        //    THP limit and group control, started at the bhp limit under BHP
+        //    control (maximum drawdown, the most robust start). A well the
+        //    balancer has put on group control first keeps group control and
+        //    starts under it, at its target.
+        const auto inj_controls = Well::InjectionControls(0);
+        const WellBhpThpCalculator calc(*this);
+        const Scalar bhp_limit = calc.mostStrictBhpFromBhpLimits(summary_state);
+        auto result = InitialSolveResult::NotConverged;
+        auto solve = [&](const bool with_group) {
+            auto prod_controls = deck_controls;
+            prod_controls.skipControl(Well::ProducerCMode::THP);
+            if (with_group) {
+                ws.production_cmode = Well::ProducerCMode::GRUP;
+            } else {
+                prod_controls.skipControl(Well::ProducerCMode::GRUP);
+                ws.production_cmode = Well::ProducerCMode::BHP;
+                ws.bhp = bhp_limit;
+            }
+            this->openWell();
+            this->updatePrimaryVariables(groupStateHelper);
+            bool converged = false;
+            try {
+                converged = this->iterateWellEqWithSwitching(simulator, dt, inj_controls, prod_controls,
+                                                             groupStateHelper, well_state,
+                                                             /*fixed_control=*/false,
+                                                             /*fixed_status=*/false,
+                                                             /*solving_with_zero_rate=*/false);
+            } catch (const std::exception& e) {
+                deferred_logger.debug(fmt::format("Initial solve of well {} threw: {}", this->name(), e.what()));
+            }
+            const std::string limits = with_group ? "its group target" : "its individual limits";
+            result = !converged ? InitialSolveResult::NotConverged
+                : (this->wellIsStopped() ? InitialSolveResult::NoFlow : InitialSolveResult::Flows);
+            if (!converged || this->wellIsStopped()) {
+                deferred_logger.debug(fmt::format("Initial solve of well {}: {} at {}", this->name(),
+                                                  converged ? "no flow" : "not converged", limits));
+                return false;
+            }
+            deferred_logger.debug(fmt::format("Initial solve of well {}: converged at {} under {} control, "
+                                              "bhp {:.3f} bar", this->name(), limits,
+                                              WellProducerCMode2String(ws.production_cmode),
+                                              ws.bhp / unit::barsa));
+            return true;
+        };
+        if (!(group_controlled && solve(/*with_group=*/true)) && !solve(/*with_group=*/false)) {
+            // Failed, physically or numerically: stopped at zero rate and held
+            // for the rest of the timestep (timestep_initialization.md, 6.6).
+            this->stopWell(result == InitialSolveResult::NoFlow
+                           ? StopReason::NoFlow
+                           : StopReason::Numerical);
+            this->holdStoppedForTimestep();
+            try {
+                this->solveWellWithZeroRate(simulator, dt, groupStateHelper, well_state);
+            } catch (const std::exception& e) {
+                deferred_logger.debug(fmt::format("Initial solve of well {}: zero-rate solve threw: {}",
+                                                  this->name(), e.what()));
+            }
+            return result;
+        }
+        if (!network_well || deck_controls.vfp_table_number <= 0) {
+            return InitialSolveResult::Flows;
+        }
+
+        // 2. A network well: a THP guess, never above what the well can lift.
+        const auto& table = this->vfpProperties()->getProd()->getTable(deck_controls.vfp_table_number);
+        const Scalar rho = this->getRefDensity();
+        Scalar thp_guess = node_pressure.has_value() ? *node_pressure
+            : (deck_controls.thp_limit > 0.0 ? static_cast<Scalar>(deck_controls.thp_limit)
+                                             : static_cast<Scalar>(table.getTHPAxis().front()));
+        this->updateIPRImplicit(simulator, groupStateHelper, well_state);
+        auto rates = ws.surface_rates;
+        this->adaptRatesForVFP(rates);
+        const auto max_thp = calc.maxFlowingThp(well_state, this->well_ecl_, rates, rho, summary_state);
+        if (max_thp.flows) {
+            thp_guess = std::min(thp_guess, max_thp.thp);
+        }
+
+        if (ws.production_cmode == Well::ProducerCMode::BHP && max_thp.flows) {
+            // Only the bhp limit binds: its IPR, taken at maximum drawdown,
+            // would be extrapolated far by the network solve. Solve once more
+            // where the IPR meets the tubing curve at the THP guess.
+            this->setDynamicThpLimit(thp_guess);   // estimateStableBhp() reads the THP limit
+            const auto bhp = calc.estimateStableBhp(well_state, this->well_ecl_, rates, rho, summary_state);
+            if (bhp.has_value()) {
+                const Scalar target = std::max(*bhp, bhp_limit);
+                const bool ok = this->solveWellWithBhp(simulator, dt, target, groupStateHelper, well_state);
+                deferred_logger.debug(fmt::format("Initial solve of well {}: solve at bhp {:.3f} bar for THP "
+                                                  "guess {:.3f} bar: {}", this->name(), target / unit::barsa,
+                                                  thp_guess / unit::barsa,
+                                                  ok && !this->wellIsStopped() ? "flows"
+                                                  : (ok ? "no flow" : "not converged")));
+                if (!ok || this->wellIsStopped()) {
+                    // Back to the solution at the individual limit.
+                    this->openWell();
+                    ws.production_cmode = Well::ProducerCMode::BHP;
+                    this->solveWellWithBhp(simulator, dt, bhp_limit, groupStateHelper, well_state);
+                }
+            }
+        } else if (ws.production_cmode != Well::ProducerCMode::BHP) {
+            // A rate limit binds: the THP the well has at that solution.
+            rates = ws.surface_rates;
+            this->adaptRatesForVFP(rates);
+            thp_guess = std::max(calc.calculateThpFromBhp(rates, ws.bhp, rho, this->getALQ(well_state),
+                                                          thp_guess, deferred_logger),
+                                 static_cast<Scalar>(table.getTHPAxis().front()));
+        }
+
+        // 3. Without a node pressure, the THP guess becomes the dynamic THP
+        //    limit until the first network solve replaces it.
+        if (node_pressure.has_value()) {
+            this->setDynamicThpLimit(*node_pressure);
+        } else {
+            this->setDynamicThpLimit(thp_guess);
+            ws.thp = thp_guess;
+            deferred_logger.debug(fmt::format("Initial solve of well {}: dynamic THP limit {:.3f} bar "
+                                              "until the network is solved", this->name(),
+                                              thp_guess / unit::barsa));
+        }
+        return InitialSolveResult::Flows;
+    }
+
+    template<typename TypeTag>
+    void
+    WellInterface<TypeTag>::
+    seedTrialRates(WellStateType& well_state) const
+    {
+        auto& ws = well_state.well(this->index_of_well_);
+        const auto nonzero = [](const std::vector<Scalar>& q) {
+            return std::any_of(q.begin(), q.end(), [](const Scalar r) { return r != Scalar{0}; });
+        };
+        if (nonzero(ws.surface_rates)) {
+            return;
+        }
+        // The rates it last flowed with (production negative), else its
+        // potentials (positive), else a nominal rate in every phase.
+        if (nonzero(ws.prev_surface_rates)) {
+            ws.surface_rates = ws.prev_surface_rates;
+        } else if (nonzero(ws.well_potentials)) {
+            for (std::size_t p = 0; p < ws.surface_rates.size(); ++p) {
+                ws.surface_rates[p] = -std::abs(ws.well_potentials[p]);
+            }
+        } else {
+            std::fill(ws.surface_rates.begin(), ws.surface_rates.end(), Scalar{-1} / unit::day);
+        }
+    }
+
+    template<typename TypeTag>
+    std::vector<typename WellInterface<TypeTag>::Scalar>
+    WellInterface<TypeTag>::
+    trialBhpSteps(const Scalar bhp, const Scalar bhp_limit)
+    {
+        std::vector<Scalar> out;
+        const Scalar step = std::max(Scalar{1} * unit::barsa, (bhp - bhp_limit) / Scalar{5});
+        for (Scalar b = bhp - step; ; b -= step) {
+            if (b <= bhp_limit + Scalar{1e-3} * unit::barsa) {
+                if (bhp > bhp_limit + Scalar{1e-3} * unit::barsa) {
+                    out.push_back(bhp_limit);
+                }
+                break;
+            }
+            out.push_back(b);
+        }
+        return out;
+    }
+
+    template<typename TypeTag>
+    std::optional<std::pair<std::vector<typename WellInterface<TypeTag>::Scalar>,
+                            std::vector<typename WellInterface<TypeTag>::Scalar>>>
+    WellInterface<TypeTag>::
+    trialSolveAtBhp(const Simulator& simulator,
+                    const double dt,
+                    const GroupStateHelperType& groupStateHelper,
+                    const WellStateType& well_state,
+                    const Scalar bhp)
+    {
+        // Scratch copies, as in computeAnchor(); the well object's own state
+        // is restored whatever happens.
+        WellStateType well_state_copy = well_state;
+        GroupStateHelperType groupStateHelper_copy = groupStateHelper;
+        auto well_guard = groupStateHelper_copy.pushWellState(well_state_copy);
+        const auto status = this->wellStatus_;
+        const auto stop_reason = this->stop_reason_;
+        const auto operability = this->operability_status_;
+        this->openWell();
+        this->operability_status_.use_vfpexplicit = true;
+
+        std::optional<std::pair<std::vector<Scalar>, std::vector<Scalar>>> out;
+        try {
+            this->seedTrialRates(well_state_copy);
+            if (this->solveWellWithBhp(simulator, dt, bhp, groupStateHelper_copy, well_state_copy)
+                && !this->wellIsStopped()) {
+                this->updateIPRImplicit(simulator, groupStateHelper_copy, well_state_copy);
+                const auto& ws = well_state_copy.well(this->index_of_well_);
+                out = std::make_pair(ws.implicit_ipr_a, ws.implicit_ipr_b);
+            }
+        } catch (const std::exception&) {
+            out.reset();
+        }
+
+        this->wellStatus_ = status;
+        this->stop_reason_ = stop_reason;
+        this->operability_status_ = operability;
+        this->updatePrimaryVariables(groupStateHelper);
+        return out;
+    }
+
+    template<typename TypeTag>
+    typename WellInterface<TypeTag>::Anchor
+    WellInterface<TypeTag>::
+    computeAnchor(const Simulator& simulator,
+                  const double dt,
+                  const GroupStateHelperType& groupStateHelper,
+                  const WellStateType& well_state,
+                  const std::optional<Scalar> start_thp,
+                  const std::optional<Scalar> start_bhp)
+    {
+        OPM_TIMEFUNCTION();
+        Anchor out;
+        const auto& summary_state = simulator.vanguard().summaryState();
+        if (!this->isProducer() || !this->well_ecl_.predictionMode()) {
+            return out;
+        }
+        const auto& controls = this->well_ecl_.productionControls(summary_state);
+        if (controls.vfp_table_number <= 0) {
+            return out;
+        }
+        const auto& table = this->vfpProperties()->getProd()->getTable(controls.vfp_table_number);
+
+        // Is the well flowing in well_state, with a usable IPR? Then its own
+        // operating point is the best place to start. It still takes a solve
+        // there: the well's equations need not be assembled at that state
+        // (fresh well objects at the start of a timestep), and the IPR of a
+        // multisegment well cannot be linearised without them.
+        const auto& ws_in = well_state.well(this->index_of_well_);
+        const bool flowing_now = !this->wellIsStopped()
+            && ws_in.status == WellStatus::OPEN
+            && std::any_of(ws_in.surface_rates.begin(), ws_in.surface_rates.end(),
+                           [](const Scalar q) { return q < Scalar{0}; })
+            && std::any_of(ws_in.implicit_ipr_b.begin(), ws_in.implicit_ipr_b.end(),
+                           [](const Scalar b) { return b > Scalar{0}; });
+
+        // Scratch copies, as in updateStoppedWellTrialIpr(); the well object's
+        // own state is restored at the end, whatever happens.
+        WellStateType well_state_copy = well_state;
+        GroupStateHelperType groupStateHelper_copy = groupStateHelper;
+        auto well_guard = groupStateHelper_copy.pushWellState(well_state_copy);
+        const auto status = this->wellStatus_;
+        const auto stop_reason = this->stop_reason_;
+        const auto operability = this->operability_status_;
+        this->openWell();
+        this->operability_status_.use_vfpexplicit = true;
+
+        const WellBhpThpCalculator calc(*this);
+        const Scalar rho = this->getRefDensity();
+        const Scalar bhp_limit = calc.mostStrictBhpFromBhpLimits(summary_state);
+        const Scalar thp_tol = Scalar{0.1} * unit::barsa;
+        const Scalar bhp_tol = Scalar{0.1} * unit::barsa;
+        constexpr int max_rounds = 12;
+
+        // Where to start: the well's own operating point, else a solve at the
+        // given bhp, else on the tubing curve at the given THP, else at the
+        // table's lowest THP (the
+        // last resort: usually the bhp limit, far from the lift limit).
+        Scalar bhp = bhp_limit;
+        if (flowing_now) {
+            out.start = Anchor::Start::CurrentState;
+            bhp = ws_in.bhp;
+        } else if (start_bhp.has_value()) {
+            out.start = Anchor::Start::GivenBhp;
+            bhp = std::max(*start_bhp, bhp_limit);
+        } else {
+            out.start = start_thp.has_value() ? Anchor::Start::GivenThp : Anchor::Start::TableLowestThp;
+            const Scalar thp0 = start_thp.value_or(static_cast<Scalar>(table.getTHPAxis().front()));
+            bhp = std::max(calc.calculateMinimumBhpAtThp(well_state_copy, this->well_ecl_,
+                                                         summary_state, rho, thp0),
+                           bhp_limit);
+        }
+        out.first_bhp = bhp;
+
+        // The touching bhp comes from an IPR linearised at the last flowing
+        // state and can be far off when that state was far away (a solve
+        // there may then not flow at all). Keep a bracket of the highest bhp
+        // at which the well was seen to flow and the lowest at which it did
+        // not, and bisect inside it whenever the linearised step leaves it.
+        constexpr Scalar nan = std::numeric_limits<Scalar>::quiet_NaN();
+        Scalar flows_at = nan;
+        Scalar stops_at = nan;
+        std::optional<std::vector<Scalar>> lift_rates;   // see the first flowing round
+        bool found = false;
+        auto& deferred_logger = groupStateHelper.deferredLogger();
+        const auto& pu = this->phaseUsage();
+        const auto rate = [&pu](const std::vector<Scalar>& q, const int canonical) {
+            return pu.phaseIsActive(canonical)
+                ? -q[pu.canonicalToActivePhaseIdx(canonical)] * unit::day : Scalar{0};
+        };
+        const auto logState = [&](const std::string& what, const Scalar at_bhp,
+                                  const bool converged, const bool stopped) {
+            const auto& q = well_state_copy.well(this->index_of_well_).surface_rates;
+            deferred_logger.debug(fmt::format(
+                "Anchor: well {} {}: bhp {:.3f} bar: {}{}, oil {:.4g} / gas {:.4g} / water {:.4g} m3/day",
+                this->name(), what, at_bhp / unit::barsa,
+                converged ? "converged" : "not converged", stopped ? ", stopped" : "",
+                rate(q, IndexTraits::oilPhaseIdx), rate(q, IndexTraits::gasPhaseIdx),
+                rate(q, IndexTraits::waterPhaseIdx)));
+        };
+        try {
+            for (int round = 1; round <= max_rounds; ++round) {
+                out.rounds = round;
+                {
+                    this->openWell();
+                    this->seedTrialRates(well_state_copy);
+                    const bool converged = this->solveWellWithBhp(simulator, dt, bhp,
+                                                                  groupStateHelper_copy, well_state_copy);
+                    const bool stopped = this->wellIsStopped();
+                    logState(fmt::format("round {}: solve at", round), bhp, converged, stopped);
+                    if (!converged && std::isnan(flows_at)) {
+                        out.status = Anchor::Status::SolveFailed;
+                        break;
+                    }
+                    // Past a bhp where the well was seen to flow, a solve that
+                    // does not converge is treated like one that stops: the
+                    // well is close to its shut-in there, and the bracket is
+                    // narrowed.
+                    if (stopped || !converged) {
+                        stops_at = std::isnan(stops_at) ? bhp : std::min(stops_at, bhp);
+                        if (std::isnan(flows_at)) {
+                            out.status = Anchor::Status::NoFlow;   // no flow at the first bhp tried
+                            break;
+                        }
+                        if (stops_at - flows_at < bhp_tol) {
+                            break;
+                        }
+                        bhp = Scalar{0.5} * (flows_at + stops_at);
+                        continue;
+                    }
+                }
+                this->updateIPRImplicit(simulator, groupStateHelper_copy, well_state_copy);
+                const auto& ws = well_state_copy.well(this->index_of_well_);
+                // Flowing, but so close to shut-in that its IPR is degenerate
+                // (a phase with the wrong sign): no use as a linearisation, so
+                // treated like a stop, narrowing the bracket from above.
+                if (!this->floIprValid(ws.implicit_ipr_a, ws.implicit_ipr_b, bhp, summary_state)) {
+                    deferred_logger.debug(fmt::format("Anchor: well {} round {}: IPR at bhp {:.3f} bar is not "
+                                                      "usable (FLO not falling with bhp, or not producing); "
+                                                      "treated as no flow", this->name(), round, bhp / unit::barsa));
+                    stops_at = std::isnan(stops_at) ? bhp : std::min(stops_at, bhp);
+                    if (std::isnan(flows_at)) {
+                        out.status = Anchor::Status::NoFlow;
+                        break;
+                    }
+                    if (stops_at - flows_at < bhp_tol) {
+                        break;
+                    }
+                    bhp = Scalar{0.5} * (flows_at + stops_at);
+                    continue;
+                }
+                flows_at = std::isnan(flows_at) ? bhp : std::max(flows_at, bhp);
+                if (round == 1) {
+                    out.start_flows = true;
+                    out.start_bhp = bhp;
+                    out.start_ipr_a = ws.implicit_ipr_a;
+                    out.start_ipr_b = ws.implicit_ipr_b;
+                }
+                // The lift margin is evaluated with one composition per anchor:
+                // that of its first flowing solve. Before it there are no
+                // rates and the explicit fractions are all there is (the start
+                // bhp); after it they would only add a lag (they are the rates
+                // at the start of the timestep, or when the well last flowed).
+                // Not each round's own: rounds move towards the touching point,
+                // near shut-in for a well without a lift cliff, where the
+                // composition degenerates to that of its last producing layer.
+                // Below the table's first FLO value the lookup still falls back
+                // to the explicit fractions.
+                if (!lift_rates.has_value()) {
+                    out.composition = ws.surface_rates;
+                    auto first = ws.surface_rates;
+                    this->adaptRatesForVFP(first);
+                    lift_rates = first;
+                    this->operability_status_.use_vfpexplicit = false;
+                }
+                const auto& rates = *lift_rates;
+                const auto max_thp = calc.maxFlowingThp(well_state_copy, this->well_ecl_,
+                                                        rates, rho, summary_state);
+                deferred_logger.debug(fmt::format(
+                    "Anchor: well {} round {}: {}max flowing THP {:.3f} bar, touching at bhp {:.3f} bar, "
+                    "FLO {:.4g} m3/day", this->name(), round,
+                    max_thp.flows ? (max_thp.capped ? "capped, " : "") : "cannot flow; ",
+                    max_thp.thp / unit::barsa, max_thp.bhp / unit::barsa, max_thp.flo * unit::day));
+                if (!max_thp.flows) {
+                    if (!found) {
+                        out.status = Anchor::Status::NoFlow;
+                    }
+                    break;
+                }
+
+                const Scalar previous_thp = found ? out.thp : nan;
+                found = true;
+                out.status = max_thp.capped ? Anchor::Status::Capped : Anchor::Status::Flows;
+                out.thp = max_thp.thp;
+                out.bhp = max_thp.bhp;
+                out.flo = max_thp.flo;
+                out.ipr_a = ws.implicit_ipr_a;
+                out.ipr_b = ws.implicit_ipr_b;
+                out.rates.resize(ws.surface_rates.size());
+                for (std::size_t p = 0; p < out.rates.size(); ++p) {
+                    out.rates[p] = out.ipr_b[p] * out.bhp - out.ipr_a[p];
+                }
+                // Settled: the touching point is where this linearisation was
+                // taken (unless it is at zero rate, the shut-in bhp, which no
+                // flowing state can reach -- then a THP that no longer moves).
+                const Scalar touching = std::max(max_thp.bhp, bhp_limit);
+                const bool at_zero_rate = !(max_thp.flo > Scalar{0});
+                if (max_thp.capped
+                    || (!at_zero_rate && std::abs(touching - bhp) < bhp_tol)
+                    || (at_zero_rate && std::abs(max_thp.thp - previous_thp) < thp_tol)) {
+                    break;
+                }
+                Scalar next = touching;
+                if (!std::isnan(stops_at) && next >= stops_at) {
+                    next = Scalar{0.5} * (flows_at + stops_at);
+                }
+                bhp = next;
+            }
+
+            // One more solve for the rates, IPR and THP the well actually has
+            // at the touching bhp. Only there: the anchor's THP, FLO, bhp and
+            // IPR all describe one point. Where no flowing solve exists there
+            // (past a bhp already seen not to flow), or it fails or its IPR is
+            // not usable, the last valid round's values stand -- its IPR, and
+            // the touching point found from it.
+            if (found) {
+                std::vector<Scalar> candidates;
+                const Scalar touching = std::max(out.bhp, bhp_limit);
+                if (std::isnan(stops_at) || touching < stops_at) {
+                    candidates.push_back(touching);
+                }
+                for (const Scalar final_bhp : candidates) {
+                    bool converged = false;
+                    std::string failure;
+                    this->openWell();
+                    this->seedTrialRates(well_state_copy);
+                    try {
+                        converged = this->solveWellWithBhp(simulator, dt, final_bhp,
+                                                           groupStateHelper_copy, well_state_copy);
+                    } catch (const std::exception& e) {
+                        failure = std::string("exception: ") + e.what();
+                    }
+                    const bool stopped = this->wellIsStopped();
+                    logState("final: solve at", final_bhp, converged, stopped);
+                    if (failure.empty() && !converged) {
+                        failure = "not converged";
+                    } else if (failure.empty() && stopped) {
+                        failure = "well stopped (no flow at that bhp)";
+                    }
+                    if (!failure.empty()) {
+                        out.final_failure = failure;
+                        continue;
+                    }
+                    this->updateIPRImplicit(simulator, groupStateHelper_copy, well_state_copy);
+                    const auto& ws = well_state_copy.well(this->index_of_well_);
+                    if (!this->floIprValid(ws.implicit_ipr_a, ws.implicit_ipr_b, final_bhp, summary_state)) {
+                        out.final_failure = "IPR not usable";
+                        continue;
+                    }
+                    out.final_solved = true;
+                    out.final_failure.clear();
+                    out.bhp = ws.bhp;
+                    out.rates = ws.surface_rates;
+                    out.ipr_a = ws.implicit_ipr_a;
+                    out.ipr_b = ws.implicit_ipr_b;
+                    auto rates = ws.surface_rates;
+                    this->adaptRatesForVFP(rates);
+                    out.final_thp = calc.calculateThpFromBhp(rates, ws.bhp, rho,
+                                                             this->getALQ(well_state_copy), out.thp,
+                                                             deferred_logger);
+                    break;
+                }
+            }
+        } catch (const std::exception& e) {
+            if (!found) {
+                out.status = Anchor::Status::SolveFailed;
+            }
+            out.final_failure = std::string("exception: ") + e.what();
+        }
+
+        this->wellStatus_ = status;
+        this->stop_reason_ = stop_reason;
+        this->operability_status_ = operability;
+        this->updatePrimaryVariables(groupStateHelper);
+        return out;
+    }
+
+    template<typename TypeTag>
     bool
     WellInterface<TypeTag>::
     solveWellWithBhp(const Simulator& simulator,
@@ -1232,9 +1943,10 @@ namespace Opm
     {
         OPM_TIMEFUNCTION();
 
-        // Solve a well as stopped with isolation (empty group state for assembly)
+        // Solve a well as stopped with isolation (empty group state for assembly).
+        // Only the status changes here: the stop reason is left as it is.
         const auto well_status_orig = this->wellStatus_;
-        this->stopWell();
+        this->wellStatus_ = Well::Status::STOP;
 
         auto inj_controls = Well::InjectionControls(0);
         auto prod_controls = Well::ProductionControls(0);
@@ -1437,6 +2149,19 @@ namespace Opm
         auto& deferred_logger = groupStateHelper.deferredLogger();
         const bool old_well_operable = this->operability_status_.isOperableAndSolvable();
 
+        // A stop the group-tree workflow committed: keep it for the rest of this
+        // global iteration, same treatment as a well kept stopped for too many
+        // re-openings below, but not counted as one.
+        if (this->isHeldStopped()) {
+            if (!this->wellIsStopped()) {
+                this->stopWell(StopReason::Network);
+            }
+            this->solveWellWithZeroRate(simulator, dt, groupStateHelper, well_state);
+            this->changed_to_open_this_step_ = false;
+            changed_to_stopped_this_step_ = false;
+            return;
+        }
+
         if (this->param_.check_well_operability_iter_)
             checkWellOperability(simulator, well_state, groupStateHelper);
 
@@ -1462,7 +2187,7 @@ namespace Opm
                 } else {
                     changed_to_stopped_this_step_ = false;
                 }
-                this->stopWell();
+                this->stopWell(StopReason::ReopenLimit);
                 bool converged_zero_rate = this->solveWellWithZeroRate(
                     simulator, dt, groupStateHelper, well_state
                 );
@@ -1521,7 +2246,8 @@ namespace Opm
 
         const bool well_operable = this->operability_status_.isOperableAndSolvable();
         if (!well_operable) {
-            this->stopWell();
+            this->stopWell(this->operability_status_.solvable ? StopReason::Physical
+                                                              : StopReason::Numerical);
             try {
                 this->solveWellWithZeroRate(
                     simulator, dt, groupStateHelper, well_state

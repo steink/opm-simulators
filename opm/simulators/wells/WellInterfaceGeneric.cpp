@@ -55,6 +55,7 @@
 #include <fmt/format.h>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
@@ -125,7 +126,7 @@ WellInterfaceGeneric(const Well& well,
 
     this->wellStatus_ = Well::Status::OPEN;
     if (well.getStatus() == Well::Status::STOP) {
-        this->wellStatus_ = Well::Status::STOP;
+        this->stopWell(StopReason::Schedule);
     }
 
     wsolvent_ = 0.0;
@@ -164,6 +165,42 @@ const std::vector<PerforationData<Scalar>>&
 WellInterfaceGeneric<Scalar, IndexTraits>::perforationData() const
 {
     return *perf_data_;
+}
+
+template<typename Scalar, typename IndexTraits>
+bool WellInterfaceGeneric<Scalar, IndexTraits>::
+awaitsFlow(const SingleWellState<Scalar, IndexTraits>& ws) const
+{
+    return this->isProducer() && ws.status == Well::Status::OPEN && !this->wellIsStopped()
+        && std::ranges::all_of(ws.surface_rates, [](const Scalar q) { return q == Scalar{0}; });
+}
+
+template<typename Scalar, typename IndexTraits>
+bool WellInterfaceGeneric<Scalar, IndexTraits>::
+floIprValid(const std::vector<Scalar>& ipr_a, const std::vector<Scalar>& ipr_b,
+            const Scalar bhp, const SummaryState& summary_state) const
+{
+    const auto& pu = this->phaseUsage();
+    // Water, oil, gas (aqua, liquid, vapour); production negative.
+    const auto pick = [&pu](const std::vector<Scalar>& v, const int canonical) {
+        return pu.phaseIsActive(canonical) ? v[pu.canonicalToActivePhaseIdx(canonical)] : Scalar{0};
+    };
+    std::array<Scalar, 3> slope{};
+    std::array<Scalar, 3> rate{};
+    const std::array<int, 3> phases{IndexTraits::waterPhaseIdx, IndexTraits::oilPhaseIdx,
+                                    IndexTraits::gasPhaseIdx};
+    for (int i = 0; i < 3; ++i) {
+        slope[i] = pick(ipr_b, phases[i]);
+        rate[i] = slope[i] * bhp - pick(ipr_a, phases[i]);
+    }
+    const int table_id = this->isProducer()
+        ? this->well_ecl_.productionControls(summary_state).vfp_table_number : 0;
+    if (table_id <= 0 || this->vfpProperties() == nullptr) {
+        return slope[0] + slope[1] + slope[2] > Scalar{0} && rate[0] + rate[1] + rate[2] < Scalar{0};
+    }
+    const auto& table = this->vfpProperties()->getProd()->getTable(table_id);
+    return detail::getFlo(table, slope[0], slope[1], slope[2]) > Scalar{0}
+        && detail::getFlo(table, rate[0], rate[1], rate[2]) < Scalar{0};
 }
 
 template<typename Scalar, typename IndexTraits>
@@ -370,6 +407,17 @@ updateWellTestState(const SingleWellState<Scalar, IndexTraits>& ws,
     }
 
     // TODO: well can be shut/closed due to other reasons
+}
+
+template<typename Scalar, typename IndexTraits>
+void WellInterfaceGeneric<Scalar, IndexTraits>::
+closeStoppedWellPhysically(const double simulationTime,
+                           WellTestState& wellTestState,
+                           DeferredLogger& deferred_logger) const
+{
+    WellTest<Scalar, IndexTraits>(*this).updateWellTestStatePhysical(simulationTime,
+                                                                     /*write_message_to_opmlog=*/true,
+                                                                     wellTestState, deferred_logger);
 }
 
 template<typename Scalar, typename IndexTraits>

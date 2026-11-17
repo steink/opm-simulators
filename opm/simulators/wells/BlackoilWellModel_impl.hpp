@@ -46,6 +46,7 @@
 #include <opm/simulators/wells/GuideRateHandler.hpp>
 #include <opm/simulators/wells/ParallelPAvgDynamicSourceData.hpp>
 #include <opm/simulators/wells/ParallelWBPCalculation.hpp>
+#include <opm/simulators/wells/ProdGroupTreeBalancer.hpp>
 #include <opm/simulators/wells/VFPProperties.hpp>
 #include <opm/simulators/wells/WellFractureFlowSplit.hpp>
 #include <opm/simulators/wells/GroupStateHelper.hpp>
@@ -64,6 +65,7 @@
 #include <cstddef>
 #include <iomanip>
 #include <optional>
+#include <unordered_set>
 #include <utility>
 
 #include <fmt/format.h>
@@ -548,7 +550,21 @@ namespace Opm {
             OPM_PARALLEL_CATCH_CLAUSE(exc_type, exc_msg);
         }
 
+        // The balancer only owns production control within an outer iteration
+        // that decided so (see updateWellControlsAndNetworkIteration()); until
+        // then this timestep starts from the standard targets.
+        this->setBalancerOwnsProduction(false);
+        balancer_committed_cmodes_.clear();
         this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
+        group_tree_initially_solved_.clear();
+        group_tree_initial_solve_failed_.clear();
+        if (param_.group_tree_initial_balance_ && this->wellsActive()
+            && this->groupTreeModeActive_(reportStepIdx)) {
+            this->balanceGroupTreeFromPotentials_(reportStepIdx, local_deferredLogger);
+        }
+        const bool group_tree_mode = param_.group_tree_initialization_
+            && this->groupTreeModeActive_(reportStepIdx);
+        const auto& production_network = this->schedule()[reportStepIdx].network();
         try {
             // Compute initial well solution for new wells and injectors that change injection type i.e. WAG.
             for (auto& well : well_container_) {
@@ -562,7 +578,53 @@ namespace Opm {
                 const bool dyn_status_change = this->wellState().well(well->name()).status
                         != this->prevWellState().well(well->name()).status;
 
-                if (event || dyn_status_change || slave_needs_well_solution) {
+                // A well whose initial solve failed numerically at the previous
+                // step still has no valid solution: try again.
+                const bool retry = group_tree_mode
+                    && group_tree_initial_solve_failures_.count(well->name()) > 0;
+
+                if (event || dyn_status_change || slave_needs_well_solution || retry) {
+                    // Group-tree workflow: a producer without a valid previous
+                    // solution gets the initial solve of
+                    // timestep_initialization.md, 6.2, instead.
+                    if (group_tree_mode && well->isProducer() && well->wellEcl().predictionMode()) {
+                        try {
+                            well->scaleSegmentRatesAndPressure(this->wellState());
+                            well->calculateExplicitQuantities(simulator_, this->groupStateHelper());
+                            well->updateWellStateWithTarget(simulator_, this->groupStateHelper(), this->wellState());
+                            const bool network_well = production_network.active()
+                                && production_network.has_node(well->wellEcl().groupName());
+                            // Committed to group control by the start-of-step balance.
+                            const auto& ws = this->wellState().well(well->indexOfWell());
+                            const bool group_controlled = this->balancerOwnsProduction()
+                                && ws.production_cmode == Well::ProducerCMode::GRUP
+                                && (ws.use_group_target_fallback ? ws.group_target_fallback.has_value()
+                                                                 : ws.group_target.has_value());
+                            using Result = typename WellInterface<TypeTag>::InitialSolveResult;
+                            const auto result = well->initialSolveForGroupTree(
+                                simulator_, this->groupStateHelper(), this->wellState(),
+                                network_well, group_controlled);
+                            if (result == Result::Flows) {
+                                group_tree_initially_solved_.insert(well->name());
+                            } else if (result == Result::NotConverged) {
+                                group_tree_initial_solve_failed_.insert(well->name());
+                                local_deferredLogger.warning("WELL_INITIAL_SOLVE_FAILED",
+                                    "Initial solve of well " + well->name() + " did not converge; "
+                                    "the well is stopped for this timestep");
+                            } else {
+                                local_deferredLogger.info("Well " + well->name() + " cannot flow at "
+                                    "its limits at the start of this timestep; it is stopped");
+                            }
+                        } catch (const std::exception& e) {
+                            well->stopWell(WellInterface<TypeTag>::StopReason::Numerical);
+                            well->holdStoppedForTimestep();
+                            group_tree_initial_solve_failed_.insert(well->name());
+                            local_deferredLogger.warning("WELL_INITIAL_SOLVE_FAILED",
+                                "Initial solve of well " + well->name() + " failed: " + e.what()
+                                + "; the well is stopped for this timestep");
+                        }
+                        continue;
+                    }
                     try {
                         well->scaleSegmentRatesAndPressure(this->wellState());
                         well->calculateExplicitQuantities(simulator_, this->groupStateHelper());
@@ -608,6 +670,10 @@ namespace Opm {
             local_deferredLogger.warning("WELL_INITIAL_SOLVE_FAILED", msg);
         }
 
+        if (param_.log_well_anchors_) {
+            this->logWellAnchors_(reportStepIdx, local_deferredLogger);
+        }
+
         const auto& comm = simulator_.vanguard().grid().comm();
         logAndCheckForExceptionsAndThrow(local_deferredLogger,
                                          exc_type, "beginTimeStep() failed: " + exc_msg, this->terminal_output_, comm);
@@ -628,6 +694,73 @@ namespace Opm {
     advanceTimeLevel()
     {
         this->BlackoilWellModelGeneric<Scalar, IndexTraits>::advanceTimeLevel();
+    }
+
+    template<typename TypeTag>
+    void
+    BlackoilWellModel<TypeTag>::
+    logWellAnchors_(const int reportStepIdx, DeferredLogger& deferred_logger)
+    {
+        using Status = typename WellInterface<TypeTag>::Anchor::Status;
+        const auto statusName = [](const Status s) {
+            switch (s) {
+            case Status::Flows:       return "flows";
+            case Status::Capped:      return "capped at the table's highest THP";
+            case Status::NoFlow:      return "cannot flow in the table's THP range";
+            case Status::SolveFailed: return "BHP-controlled solve failed";
+            }
+            return "?";
+        };
+        const auto& pu = this->phaseUsage();
+        const auto phaseRate = [&pu](const std::vector<Scalar>& rates, const int canonical) {
+            const int a = pu.phaseIsActive(canonical) ? pu.canonicalToActivePhaseIdx(canonical) : -1;
+            return (a >= 0 && a < static_cast<int>(rates.size())) ? -rates[a] * unit::day : Scalar{0};
+        };
+        for (const auto& well : well_container_) {
+            if (!well->isProducer() || !well->wellEcl().predictionMode()
+                || well->wellEcl().productionControls(this->summaryState()).vfp_table_number <= 0) {
+                continue;
+            }
+            // Every rank holding part of a distributed well takes part in its
+            // solves; only the owner reports.
+            // The THP the well currently sees (the node pressure, or its deck
+            // limit) is the start for a well that is not flowing.
+            std::optional<Scalar> start_thp;
+            if (well->wellHasTHPConstraints(this->summaryState())) {
+                start_thp = well->getTHPConstraint(this->summaryState());
+            }
+            const auto anchor = well->computeAnchor(simulator_, simulator_.timeStepSize(),
+                                                    this->groupStateHelper(), this->wellState(),
+                                                    start_thp);
+            if (!well->parallelWellInfo().isOwner()) {
+                continue;
+            }
+            const Scalar thp_limit = well->getTHPConstraint(this->summaryState());
+            std::string where = anchor.final_failure.empty()
+                ? std::string("no anchor") : "no anchor (" + anchor.final_failure + ")";
+            if (anchor.status == Status::Flows || anchor.status == Status::Capped) {
+                const std::string final_solve = anchor.final_solved
+                    ? fmt::format("final solve: THP {:.3f} bar", anchor.final_thp / unit::barsa)
+                    : "final solve failed (" + anchor.final_failure + "), rates from the IPR";
+                where = fmt::format("max flowing THP {:.3f} bar; {}; bhp {:.3f} bar, oil {:.4g} / "
+                                    "gas {:.4g} / water {:.4g} m3/day; THP limit {:.3f} bar ({}), "
+                                    "margin {:.3f} bar",
+                                    anchor.thp / unit::barsa, final_solve, anchor.bhp / unit::barsa,
+                                    phaseRate(anchor.rates, IndexTraits::oilPhaseIdx),
+                                    phaseRate(anchor.rates, IndexTraits::gasPhaseIdx),
+                                    phaseRate(anchor.rates, IndexTraits::waterPhaseIdx),
+                                    thp_limit / unit::barsa,
+                                    well->getDynamicThpLimit().has_value() ? "network" : "deck",
+                                    (anchor.thp - thp_limit) / unit::barsa);
+            }
+            using Start = typename WellInterface<TypeTag>::Anchor::Start;
+            const char* start = anchor.start == Start::CurrentState ? "current state"
+                : (anchor.start == Start::GivenThp ? "THP limit" : "table's lowest THP");
+            deferred_logger.debug(fmt::format("Anchor: well {} at report step {}: {} after {} round(s) "
+                                              "from the {}; {}",
+                                              well->name(), reportStepIdx, statusName(anchor.status),
+                                              anchor.rounds, start, where));
+        }
     }
 
     template<typename TypeTag>
@@ -803,6 +936,7 @@ namespace Opm {
         const double closure_time = simulationTime + dt;
 
         updateWellTestState(closure_time, this->wellTestState());
+        this->updateInitialSolveFailures_(closure_time, local_deferredLogger);
 
         // check group sales limits at the end of the timestep
         const Group& fieldGroup = this->schedule_.getGroup("FIELD", reportStepIdx);
@@ -1102,7 +1236,7 @@ namespace Opm {
                 well_container_.emplace_back(this->createWellPointer(w, report_step));
 
                 if (ws.status == Well::Status::STOP) {
-                    well_container_.back()->stopWell();
+                    well_container_.back()->stopWell(WellInterface<TypeTag>::StopReason::Schedule);
                     this->well_close_times_.erase(well_name);
                     this->well_open_times_.erase(well_name);
                 }
@@ -1271,6 +1405,12 @@ namespace Opm {
 
         Dune::Timer networkTimer;
         networkTimer.start();
+        // prepareTimeStep() has just solved every well at this reservoir state
+        // (the first global iteration): the group-tree workflow's first round
+        // need not solve them again.
+        wells_solved_this_iteration_ = param_.group_tree_initialization_
+            && iterCtx.needsTimestepInit() && this->wellsActive()
+            && param_.solve_welleq_initially_;
         const bool well_group_control_changed = updateWellControlsAndNetwork(
                             /*mandatory_network_balance=*/false,
                             dt,
@@ -1280,6 +1420,7 @@ namespace Opm {
         const double network_time = networkTimer.stop();
         last_report_.well_control_network_time += network_time;
         last_report_.well_facility_time += network_time;
+        wells_solved_this_iteration_ = false;
 
         // even when there is no wells active, the network nodal pressure still need to be updated through updateWellControlsAndNetwork()
         // but there is no need to assemble the well equations
@@ -1368,6 +1509,29 @@ namespace Opm {
         const std::size_t max_iteration = param_.network_max_outer_iterations_;
         std::size_t network_update_iteration = 0;
         network_needs_more_balancing_force_another_newton_iteration_ = false;
+        // Decided once for the whole loop: the group-tree workflow's A rounds
+        // take the place of the ordinary outer iterations.
+        const bool group_tree_workflow = this->useGroupTreeWorkflow_(mandatory_network_balance);
+        // How long a group-tree stop is held (timestep_workflow.md, Q3). Well
+        // objects are recreated every timestep, so "timestep" needs no release
+        // here at all.
+        {
+            const auto& hold = param_.group_tree_stop_hold_;
+            if (hold != "iteration" && hold != "timestep" && hold != "nupcol") {
+                OPM_DEFLOG_THROW(std::runtime_error,
+                                 "Invalid value '" + hold + "' for --group-tree-stop-hold; "
+                                 "expected iteration, timestep or nupcol", local_deferredLogger);
+            }
+            const int reportStepIdx = simulator_.episodeIndex();
+            const bool release = hold == "iteration"
+                || (hold == "nupcol" && !simulator_.problem().iterationContext()
+                        .withinNupcol(this->schedule()[reportStepIdx].nupcol()));
+            if (release) {
+                for (const auto& well : well_container_) {
+                    well->holdStopped(false);
+                }
+            }
+        }
         while (do_network_update) {
             if (!this->isRescoupSlaveCoupledNetworkIteration_()
                 && network_update_iteration >= max_iteration ) {
@@ -1406,9 +1570,26 @@ namespace Opm {
             const bool relax_network_balance = network_update_iteration >= iteration_to_relax;
             // Never optimize gas lift in last iteration, to allow network convergence (unless max_iter < 2)
             const bool optimize_gas_lift = ( (network_update_iteration + 1) < std::max(max_iteration, static_cast<std::size_t>(2)) );
-            std::tie(well_group_control_changed, do_network_update, network_imbalance) =
+            if (group_tree_workflow) {
+                // A1 on the first round, unless prepareTimeStep() has just
+                // solved every well at this reservoir state.
+                std::tie(well_group_control_changed, do_network_update, network_imbalance) =
+                    updateGroupTreeNetworkIteration_(network_update_iteration == 0
+                                                         && !wells_solved_this_iteration_,
+                                                     relax_network_balance, dt, local_deferredLogger);
+            } else {
+                std::tie(well_group_control_changed, do_network_update, network_imbalance) =
                     updateWellControlsAndNetworkIteration(mandatory_network_balance, relax_network_balance, optimize_gas_lift, dt,local_deferredLogger);
+            }
             ++network_update_iteration;
+        }
+        if (group_tree_workflow) {
+            // The injection networks only once production has settled: with the
+            // reservoir frozen, production feeds injection (VREP / REIN) one way
+            // and nothing flows back (timestep_workflow.md, Q5).
+            this->network_.update(mandatory_network_balance, local_deferredLogger,
+                                  /*relax_network_tolerance=*/false,
+                                  details::DomainScope::Injection);
         }
         if (this->isRescoupMasterCoupledNetworkIteration_()) {
             this->sendSlaveNetworkLoopTerminationSignal_();
@@ -1442,6 +1623,31 @@ namespace Opm {
 #endif
         Dune::Timer groupTimer;
         groupTimer.start();
+        const auto& iterCtx = simulator_.problem().iterationContext();
+        const int nupcol = this->schedule()[reportStepIdx].nupcol();
+        const auto active_networks = details::activeNetworks(this->schedule(), reportStepIdx);
+        const bool has_production_network = std::any_of(
+            active_networks.begin(), active_networks.end(),
+            [](const auto& n) { return n.domain == details::NetworkDomain::Production; });
+        const bool group_tree_network = has_production_network && this->network().usesGroupTreeSolver();
+
+        // Within NUPCOL the group-tree balancer is the single authority for
+        // production control wherever its output is actually committed to the
+        // wells: with no production network, or with the group-tree network
+        // solver. There, standard production switching and the standard producer
+        // group-target update are bypassed (see balancerOwnsProduction()), the
+        // balancer runs every outer iteration, and local well solves are left to
+        // converge to whatever their constraints dictate -- a local solve ending
+        // on a different control than the one committed is reported below as a
+        // control change, not overridden. With fixedpoint/newton on a network the
+        // balancer's tree is only cached, so standard switching stays in charge.
+        // Set before the group-data update and updateWellControls() below, which
+        // both consult it.
+        const bool balancer_commits = param_.enable_group_tree_balancer_
+            && iterCtx.withinNupcol(nupcol)
+            && (!has_production_network || group_tree_network);
+        this->setBalancerOwnsProduction(balancer_commits);
+
         this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
         // We need to call updateWellControls before we update the network as
         // network updates are only done on thp controlled wells.
@@ -1452,6 +1658,30 @@ namespace Opm {
 
         Dune::Timer networkBalanceTimer;
         networkBalanceTimer.start();
+
+        // Group-tree balancer, group-tree-solver case: settle the network-side
+        // cliff-diagnosis stopping decisions (Part 3/4g) for the *current* set
+        // of well IPRs before network_.update() runs below, and before well
+        // equations get re-solved again next outer iteration (which would
+        // refresh those IPRs out from under an in-progress settling pass).
+        // Runs every outer iteration within NUPCOL: the balancer owns
+        // production control there, so there is no standard switching whose
+        // "changed" flag could gate it. The final, settled tree is committed to
+        // the wells (control modes, targets, group control modes -- not rates,
+        // which come from the network solve and the local well solves).
+        bool group_tree_cliff_diagnosis_ran = false;
+        bool balancer_changed = false;
+        if (balancer_commits && group_tree_network) {
+            group_tree_cliff_diagnosis_ran = true;
+            const auto final_tree = settleGroupTree_(reportStepIdx, active_networks,
+                                                     /*offer_reopen_candidates=*/false,
+                                                     local_deferredLogger);
+            balancer_changed = commitBalancedTree_(final_tree, /*commitRates=*/false,
+                                                   local_deferredLogger);
+            this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
+
+        }
+
         const auto [more_inner_network_update, network_imbalance] =
                 this->network_.update(mandatory_network_balance,
                                       local_deferredLogger,
@@ -1499,6 +1729,52 @@ namespace Opm {
                                        "updateWellControlsAndNetworkIteration() failed: ",
                                        this->terminal_output_, grid().comm());
 
+
+        // A local solve (network_.update()'s re-solves or
+        // prepareWellsBeforeAssembling() just above) is free to end on a
+        // different control than the balancer committed, or to stop/reopen the
+        // well; the configuration is then not settled, so report it as a
+        // change to the outer loop and the global Newton.
+        // Compared against the last commit, which for the no-network case is
+        // the previous outer iteration's (it happens below, after the solves).
+        const bool local_solves_disagree = balancer_commits && localSolvesDisagreeWithBalancer_();
+
+        // Group-tree balancer, every other combination: re-categorize
+        // Individual/Group control and redistribute group targets once well
+        // controls have actually moved, while still within NUPCOL. Skipped when
+        // the group-tree-solver loop above already ran: it did this exact
+        // balance-and-cache sequence itself.
+        //  - No production network: the balancer owns production control, runs
+        //    every outer iteration and commits the full tree, rates included.
+        //  - fixedpoint/newton network: the tree is only cached; standard
+        //    switching stays in charge, so it is still gated on
+        //    well_group_control_changed.
+        if (param_.enable_group_tree_balancer_ && !group_tree_cliff_diagnosis_ran
+            && iterCtx.withinNupcol(nupcol)
+            && (balancer_commits || well_group_control_changed)) {
+            const auto balancerLimits = prepareWellsForBalancing_(local_deferredLogger);
+            this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ false);
+
+            auto balanced = ProdGroupTreeBalancer::balanceGroupTree(
+                *this,
+                this->summaryState(),
+                reportStepIdx,
+                param_.group_tree_balancer_tolerance_,
+                balancerLimits,
+                local_deferredLogger);
+
+            if (has_production_network) {
+                this->network().setBalancedGroupTree(balanced.tree);
+            } else {
+                balancer_changed = commitBalancedTree_(balanced.tree, /*commitRates=*/true,
+                                                       local_deferredLogger);
+            }
+
+            this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
+        }
+        well_group_control_changed = well_group_control_changed || balancer_changed
+            || local_solves_disagree;
+
         // update guide rates
         if (alq_updated || BlackoilWellModelGuideRates(*this).
                               guideRateUpdateIsNeeded(reportStepIdx)) {
@@ -1532,6 +1808,578 @@ namespace Opm {
         }
 
         return {well_group_control_changed, more_network_update, network_imbalance};
+    }
+
+    template<typename TypeTag>
+    std::unordered_map<std::string, std::pair<int, typename BlackoilWellModel<TypeTag>::Scalar>>
+    BlackoilWellModel<TypeTag>::
+    gatherWellLimits_(const std::unordered_map<std::string, std::pair<int, Scalar>>& localLimits,
+                      const std::vector<std::string>& allWellNames) const
+    {
+        const int n_global = static_cast<int>(allWellNames.size());
+
+        // Build name -> global-index map (same schedule order on all ranks).
+        std::unordered_map<std::string, int> globalIndex;
+        globalIndex.reserve(n_global);
+        for (int i = 0; i < n_global; ++i) {
+            globalIndex.emplace(allWellNames[i], i);
+        }
+
+        // Encode into flat buffer: [mode+1, value] per well.
+        // Zero means "not set" (avoids ambiguity with CMODE_UNDEFINED which is -1).
+        constexpr int stride = 2;
+        std::vector<Scalar> buf(n_global * stride, Scalar(0));
+        for (const auto& [name, modeVal] : localLimits) {
+            if (const auto it = globalIndex.find(name); it != globalIndex.end()) {
+                buf[it->second * stride + 0] = static_cast<Scalar>(modeVal.first + 1);
+                buf[it->second * stride + 1] = modeVal.second;
+            }
+        }
+
+        simulator_.vanguard().grid().comm().sum(buf.data(), static_cast<int>(buf.size()));
+
+        // Decode into result map -- identical on every rank after the reduction.
+        std::unordered_map<std::string, std::pair<int, Scalar>> result;
+        result.reserve(n_global);
+        for (int gi = 0; gi < n_global; ++gi) {
+            const Scalar encodedMode = buf[gi * stride + 0];
+            if (encodedMode > Scalar(0)) {
+                result[allWellNames[gi]] = {
+                    static_cast<int>(std::round(encodedMode)) - 1,
+                    buf[gi * stride + 1]
+                };
+            }
+        }
+        return result;
+    }
+
+    template<typename TypeTag>
+    bool
+    BlackoilWellModel<TypeTag>::
+    useGroupTreeWorkflow_(const bool mandatory_network_balance) const
+    {
+        const int reportStepIdx = simulator_.episodeIndex();
+        if (!this->groupTreeModeActive_(reportStepIdx)) {
+            return false;
+        }
+        const int nupcol = this->schedule()[reportStepIdx].nupcol();
+        if (!simulator_.problem().iterationContext().withinNupcol(nupcol)) {
+            return false;
+        }
+        return this->network_.shouldBalance(reportStepIdx) || mandatory_network_balance;
+    }
+
+    template<typename TypeTag>
+    bool
+    BlackoilWellModel<TypeTag>::
+    groupTreeModeActive_(const int reportStepIdx) const
+    {
+        if (!param_.enable_group_tree_balancer_ || param_.network_solver_ != "group-tree") {
+            return false;
+        }
+        if (this->isReservoirCouplingMaster() || this->isReservoirCouplingSlave()
+            || this->schedule().glo(reportStepIdx).active()) {
+            return false;
+        }
+        const auto& network = this->schedule()[reportStepIdx].network();
+        if (!network.active()) {
+            return false;
+        }
+        const auto names = network.node_names();
+        return std::none_of(names.begin(), names.end(),
+                            [&network](const std::string& name)
+                            { return network.node(name).as_choke(); });
+    }
+
+    template<typename TypeTag>
+    std::tuple<bool, bool, typename BlackoilWellModel<TypeTag>::Scalar>
+    BlackoilWellModel<TypeTag>::
+    updateGroupTreeNetworkIteration_(const bool first_round,
+                                     const bool relax_network_tolerance,
+                                     const double dt,
+                                     DeferredLogger& deferred_logger)
+    {
+        OPM_TIMEFUNCTION();
+        const int reportStepIdx = simulator_.episodeIndex();
+        const auto active_networks = details::activeNetworks(this->schedule(), reportStepIdx);
+
+        this->setBalancerOwnsProduction(true);
+        this->network_.configureSolvers(deferred_logger);
+
+        // Standard switching, which with the balancer owning production covers
+        // the injectors only.
+        this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
+        bool well_group_control_changed = updateWellControls(deferred_logger);
+
+        // A1: the reservoir has moved since the wells were last solved, so
+        // solve them once per global iteration before anything uses their
+        // IPRs. Later rounds start from the previous round's A3 instead.
+        if (first_round) {
+            OPM_BEGIN_PARALLEL_TRY_CATCH();
+            prepareWellsBeforeAssembling(dt);
+            OPM_END_PARALLEL_TRY_CATCH_LOG(deferred_logger,
+                                           "updateGroupTreeNetworkIteration_() failed: ",
+                                           this->terminal_output_, grid().comm());
+            this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
+        }
+        this->network_.refreshWellNetworkData(dt, details::DomainScope::Production);
+        this->snapshotGroupTreeIprs_();
+
+        // B: balance and settle the open set, IPRs frozen; stopped wells with
+        // a trial IPR are offered for reopening. B decides the open set: every
+        // producer it leaves stopped stays stopped in the local solves for the
+        // rest of this global iteration (held) -- the wells' own operability
+        // check does not overrule it -- and every well it reopens is checked
+        // in A3 (groupTreeIprMismatch_()).
+        std::unordered_set<std::string> stopped_before;
+        for (const auto& well : well_container_) {
+            if (well->wellIsStopped() || well->awaitsFlow(this->wellState().well(well->indexOfWell()))) {
+                stopped_before.insert(well->name());
+            }
+        }
+        const auto tree = this->settleGroupTree_(reportStepIdx, active_networks,
+                                                 /*offer_reopen_candidates=*/true, deferred_logger);
+        group_tree_reopened_.clear();
+        for (const auto& well : well_container_) {
+            if (!this->balancerOwnsProductionControl_(*well)) {
+                continue;
+            }
+            if (well->wellIsStopped()) {
+                well->holdStopped(true);
+            } else if (stopped_before.count(well->name()) > 0) {
+                // Reopened by B: its IPR for the A3 check is the trial IPR
+                // the network solve used (now in implicit_ipr_a/b).
+                group_tree_reopened_.insert(well->name());
+                const auto& ws = this->wellState().well(well->indexOfWell());
+                group_tree_ipr_snapshot_[well->name()] = {ws.implicit_ipr_a, ws.implicit_ipr_b};
+            }
+        }
+
+        // B4: commit the categorization and targets, and hand the production
+        // node pressures to the wells as THP limits (group-tree nodes
+        // undamped; a tree the solve gave up on keeps the fixed-point update,
+        // which then needs further rounds).
+        const bool balancer_changed = commitBalancedTree_(tree, /*commitRates=*/false, deferred_logger);
+        this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
+        const Scalar network_imbalance = grid().comm().max(
+            this->network_.updatePressures(reportStepIdx,
+                                           param_.network_pressure_update_damping_factor_,
+                                           param_.network_max_pressure_update_in_bars_ * unit::barsa,
+                                           details::DomainScope::Production));
+
+        // A3: solve the wells at the committed constraints.
+        OPM_BEGIN_PARALLEL_TRY_CATCH();
+        prepareWellsBeforeAssembling(dt);
+        OPM_END_PARALLEL_TRY_CATCH_LOG(deferred_logger,
+                                       "updateGroupTreeNetworkIteration_() failed: ",
+                                       this->terminal_output_, grid().comm());
+        this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
+
+        // How far the IPRs B used are off at the operating point the wells
+        // reached: above tolerance, B's answer rests on a stale linearisation
+        // and another round re-balances with A3's fresh IPRs.
+        const Scalar ipr_mismatch = this->groupTreeIprMismatch_(deferred_logger);
+        if (this->terminal_output_) {
+            deferred_logger.debug(fmt::format("GroupTreeWorkflow: report step {} round done: "
+                                              "node pressure change {:.3g} bar, IPR mismatch {:.3g}, "
+                                              "categorization changed {}",
+                                              reportStepIdx, network_imbalance / unit::barsa,
+                                              ipr_mismatch, balancer_changed));
+        }
+
+        const bool local_solves_disagree = this->localSolvesDisagreeWithBalancer_();
+        well_group_control_changed = well_group_control_changed || balancer_changed
+            || local_solves_disagree;
+
+        if (BlackoilWellModelGuideRates(*this).guideRateUpdateIsNeeded(reportStepIdx)) {
+            this->guide_rate_handler_.updateGuideRates(
+                reportStepIdx, simulator_.time(), this->wellState(), this->groupState()
+            );
+        }
+
+        const auto& balance = this->schedule()[reportStepIdx].network_balance();
+        constexpr Scalar relaxation_factor = 10.0;
+        const Scalar tolerance = relax_network_tolerance
+            ? relaxation_factor * balance.pressure_tolerance()
+            : balance.pressure_tolerance();
+        // Node pressures still moving covers a tree the group-tree solve gave
+        // up on (relaxed update); for a solved tree the IPR mismatch is the
+        // actual convergence measure.
+        const bool more_network_update = this->network_.active()
+            && (network_imbalance > tolerance || ipr_mismatch > param_.group_tree_ipr_tolerance_);
+        return {well_group_control_changed, more_network_update, network_imbalance};
+    }
+
+    template<typename TypeTag>
+    void
+    BlackoilWellModel<TypeTag>::
+    snapshotGroupTreeIprs_()
+    {
+        group_tree_ipr_snapshot_.clear();
+        for (const auto& well : well_container_) {
+            if (!this->balancerOwnsProductionControl_(*well)) {
+                continue;
+            }
+            const auto& ws = this->wellState().well(well->indexOfWell());
+            group_tree_ipr_snapshot_.emplace(well->name(),
+                                             std::make_pair(ws.implicit_ipr_a, ws.implicit_ipr_b));
+        }
+    }
+
+    template<typename TypeTag>
+    typename BlackoilWellModel<TypeTag>::Scalar
+    BlackoilWellModel<TypeTag>::
+    groupTreeIprMismatch_(DeferredLogger& deferred_logger) const
+    {
+        // Rates below this (about 0.01 m3/day) carry no information.
+        constexpr Scalar kRateFloor = 1.0e-7;
+        constexpr Scalar kLogThreshold = 1.0e-3;
+        Scalar worst = 0.0;
+        for (const auto& well : well_container_) {
+            const auto it = group_tree_ipr_snapshot_.find(well->name());
+            if (it == group_tree_ipr_snapshot_.end() || !well->parallelWellInfo().isOwner()) {
+                continue;
+            }
+            if (well->wellIsStopped()) {
+                // A well B reopened that its own solve stops again: B's
+                // decision does not hold up, which is as far off as it gets.
+                if (group_tree_reopened_.count(well->name()) > 0) {
+                    deferred_logger.debug(fmt::format("GroupTreeWorkflow: well {} was reopened by "
+                                                      "the network but stopped in its own solve",
+                                                      well->name()));
+                    worst = 1.0;
+                }
+                continue;
+            }
+            const auto& ws = this->wellState().well(well->indexOfWell());
+            if (ws.status != WellStatus::OPEN) {
+                continue;
+            }
+            const auto& [ipr_a, ipr_b] = it->second;
+            Scalar well_worst = 0.0;
+            for (std::size_t p = 0; p < ws.surface_rates.size() && p < ipr_a.size(); ++p) {
+                // q = b * bhp - a, production negative.
+                const Scalar predicted = ipr_b[p] * ws.bhp - ipr_a[p];
+                const Scalar actual = ws.surface_rates[p];
+                const Scalar scale = std::max(std::abs(predicted), std::abs(actual));
+                if (scale > kRateFloor) {
+                    well_worst = std::max(well_worst, std::abs(actual - predicted) / scale);
+                }
+            }
+            if (well_worst > kLogThreshold) {
+                deferred_logger.debug(fmt::format("GroupTreeWorkflow: well {} IPR mismatch {:.3g} "
+                                                  "(bhp {:.3f} bar, cmode {})",
+                                                  well->name(), well_worst, ws.bhp / unit::barsa,
+                                                  WellProducerCMode2String(ws.production_cmode)));
+            }
+            worst = std::max(worst, well_worst);
+        }
+        return grid().comm().max(worst);
+    }
+
+    template<typename TypeTag>
+    ProdGroupTreeBalancer::Tree<typename BlackoilWellModel<TypeTag>::Scalar>
+    BlackoilWellModel<TypeTag>::
+    settleGroupTree_(const int reportStepIdx,
+                     const std::vector<details::NetworkDescriptor>& active_networks,
+                     const bool offer_reopen_candidates,
+                     DeferredLogger& deferred_logger)
+    {
+        // Variant B-ii (see timestep_workflow.md, Q7): rebalance after every
+        // change of the open set, so each stop decision is made against a
+        // categorization that accounts for the wells already stopped or
+        // reopened. Stopped wells are offered for reopening in the first pass
+        // only, so after it the open set only shrinks and the loop ends.
+        // The whole anti-oscillation net for v1 (per the implementation
+        // plan): cap the number of stop-and-rebalance rounds rather than
+        // building a real cycle-breaker.
+        constexpr int kMaxCliffDiagnosisIters = 10;
+        bool open_set_changed = false;
+        int diagnosis_iters = 0;
+        ProdGroupTreeBalancer::Tree<Scalar> final_tree;
+        do {
+            const auto balancerLimits = prepareWellsForBalancing_(deferred_logger);
+            this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ false);
+            auto balanced = ProdGroupTreeBalancer::balanceGroupTree(
+                *this,
+                this->summaryState(),
+                reportStepIdx,
+                param_.group_tree_balancer_tolerance_,
+                balancerLimits,
+                deferred_logger);
+            this->network().setBalancedGroupTree(balanced.tree);
+
+            open_set_changed = false;
+            for (const auto& network : active_networks) {
+                if (network.domain != details::NetworkDomain::Production) {
+                    continue;
+                }
+                for (const auto& tree : BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>::
+                                            independentRoots(network.network.get())) {
+                    open_set_changed |= this->network().updateGroupTreeOpenSet(
+                        network.network.get(), reportStepIdx, tree.get(), balanced.tree,
+                        /*offerReopenCandidates=*/diagnosis_iters == 0 && offer_reopen_candidates,
+                        deferred_logger);
+                }
+            }
+            final_tree = std::move(balanced.tree);
+            ++diagnosis_iters;
+        } while (open_set_changed && diagnosis_iters < kMaxCliffDiagnosisIters);
+        if (open_set_changed) {
+            deferred_logger.warning(
+                "GroupTreeCliffDiagnosisNotStable",
+                fmt::format("Network: group-tree cliff diagnosis did not stabilize "
+                           "within {} rounds at report step {}; proceeding with the "
+                           "current stopping configuration.",
+                           kMaxCliffDiagnosisIters, reportStepIdx));
+        }
+        return final_tree;
+    }
+
+    template<typename TypeTag>
+    bool
+    BlackoilWellModel<TypeTag>::
+    commitBalancedTree_(const ProdGroupTreeBalancer::Tree<Scalar>& tree,
+                        const bool commitRates,
+                        DeferredLogger& deferred_logger)
+    {
+        const bool changed = ProdGroupTreeBalancer::applyTreeToState(tree, *this, deferred_logger,
+                                                                     commitRates);
+        balancer_committed_cmodes_.clear();
+        for (const auto& well : well_container_) {
+            if (this->balancerOwnsProductionControl_(*well)) {
+                balancer_committed_cmodes_.emplace(
+                    well->name(), this->wellState().well(well->indexOfWell()).production_cmode);
+            }
+        }
+        return grid().comm().max(static_cast<int>(changed)) > 0;
+    }
+
+    template<typename TypeTag>
+    bool
+    BlackoilWellModel<TypeTag>::
+    localSolvesDisagreeWithBalancer_() const
+    {
+        bool disagree = false;
+        for (const auto& well : well_container_) {
+            if (!this->balancerOwnsProductionControl_(*well)) {
+                continue;
+            }
+            const auto it = balancer_committed_cmodes_.find(well->name());
+            if (it == balancer_committed_cmodes_.end()) {
+                continue;
+            }
+            if (this->wellState().well(well->indexOfWell()).production_cmode != it->second) {
+                disagree = true;
+                break;
+            }
+        }
+        return grid().comm().max(static_cast<int>(disagree)) > 0;
+    }
+
+    template<typename TypeTag>
+    std::unordered_map<std::string, std::pair<int, typename BlackoilWellModel<TypeTag>::Scalar>>
+    BlackoilWellModel<TypeTag>::
+    prepareWellsForBalancing_(DeferredLogger& deferred_logger)
+    {
+        OPM_TIMEFUNCTION();
+        const int reportStep = this->reportStepIndex();
+        const auto& allWellNames = this->schedule().wellNames(reportStep);
+        if (allWellNames.empty()) return {};  // globally empty -- safe collective exit
+
+        std::unordered_map<std::string, std::pair<int, Scalar>> localLimits;
+        localLimits.reserve(well_container_.size());
+
+        for (auto& well : well_container_) {
+            const auto widx = well->indexOfWell();
+            auto& ws = this->wellState().well(widx);
+            if (!well->wellEcl().isProducer() || ws.status != WellStatus::OPEN || well->wellIsStopped())
+                continue;
+            // If well has zero rates, but still open, we have a problematic well. One could
+            // include it using potentials as a proxy, but for now, we leave it out of the balancing.
+            const auto sumRates = std::accumulate(ws.surface_rates.begin(), ws.surface_rates.end(), Scalar(0));
+            if (sumRates == Scalar(0)) continue;
+
+            // After a local Newton solve, production_cmode reflects the tightest
+            // binding constraint the solver converged to.  For individually-controlled
+            // rate/pressure modes we can skip the IPR computation:
+            //   Rate modes (ORAT/WRAT/GRAT/LRAT/RESV): read target directly from controls.
+            //   Pressure modes (BHP/THP): current surface_rates are the maximum feasible
+            //     production at that pressure -- use their sum as the rate proxy.
+            // Only GRUP-controlled wells and CMODE_UNDEFINED still require the IPR path.
+            const auto cmode = ws.production_cmode;
+            if (cmode != Well::ProducerCMode::GRUP &&
+                cmode != Well::ProducerCMode::CMODE_UNDEFINED)
+            {
+                Scalar target = Scalar(-1);
+                switch (cmode) {
+                case Well::ProducerCMode::ORAT: {
+                    const auto controls = well->wellEcl().productionControls(this->summaryState());
+                    target = static_cast<Scalar>(controls.oil_rate);
+                    break;
+                }
+                case Well::ProducerCMode::WRAT: {
+                    const auto controls = well->wellEcl().productionControls(this->summaryState());
+                    target = static_cast<Scalar>(controls.water_rate);
+                    break;
+                }
+                case Well::ProducerCMode::GRAT: {
+                    const auto controls = well->wellEcl().productionControls(this->summaryState());
+                    target = static_cast<Scalar>(controls.gas_rate);
+                    break;
+                }
+                case Well::ProducerCMode::LRAT: {
+                    const auto controls = well->wellEcl().productionControls(this->summaryState());
+                    target = static_cast<Scalar>(controls.liquid_rate);
+                    break;
+                }
+                case Well::ProducerCMode::RESV: {
+                    const auto controls = well->wellEcl().productionControls(this->summaryState());
+                    target = static_cast<Scalar>(controls.resv_rate);
+                    break;
+                }
+                case Well::ProducerCMode::BHP:
+                case Well::ProducerCMode::THP:
+                    // Pressure-constrained: sum all phase rates (sign: surface_rates < 0 for producers).
+                    target = Scalar(0);
+                    for (const Scalar r : ws.surface_rates)
+                        target += -r;
+                    break;
+                default:
+                    break;  // NONE or unknown -- fall through to IPR path
+                }
+                if (target >= Scalar(0)) {
+                    localLimits[well->name()] = {static_cast<int>(cmode), target};
+                    continue;
+                }
+            }
+
+            // IPR path: refresh coefficients, then compute strictest limit.
+            if (param_.use_implicit_ipr_) {
+                try {
+                    well->updateIPRImplicit(
+                        simulator_, this->groupStateHelper(), this->wellState());
+                } catch (const std::exception& e) {
+                    // Catch locally so all ranks still reach the subsequent comm.sum() inside gatherWellLimits_.
+                    deferred_logger.warning("IPR_UPDATE_FAILED",
+                        fmt::format("updateIPRImplicit failed for well {}: {}. "
+                                    "Skipping well in group-tree balancer.",
+                                    well->name(), e.what()));
+                    continue;
+                }
+            }
+
+            const auto result =
+                well->estimateStrictestProductionLimitForBalancer(
+                    this->wellState(), this->summaryState(), deferred_logger);
+
+            if (!result.has_value()) {
+                continue;
+            }
+
+            localLimits[well->name()] = {static_cast<int>(result->first), result->second};
+        }
+
+        return gatherWellLimits_(localLimits, allWellNames);
+    }
+
+    template<typename TypeTag>
+    std::unordered_map<std::string, std::pair<int, typename BlackoilWellModel<TypeTag>::Scalar>>
+    BlackoilWellModel<TypeTag>::
+    prepareWellsForBalancingFromPotentials_()
+    {
+        OPM_TIMEFUNCTION();
+        const int reportStep = this->reportStepIndex();
+        const auto& allWellNames = this->schedule().wellNames(reportStep);
+        if (allWellNames.empty()) return {};  // globally empty -- safe collective exit
+
+        std::unordered_map<std::string, std::pair<int, Scalar>> localLimits;
+        for (const auto& well : well_container_) {
+            const auto& ws = this->wellState().well(well->indexOfWell());
+            if (!well->isProducer() || !well->wellEcl().predictionMode()
+                || ws.status != WellStatus::OPEN || well->wellIsStopped()) {
+                continue;
+            }
+            const auto limit = well->estimateStrictestProductionLimitFromPotentials(
+                this->wellState(), this->summaryState());
+            if (!limit.has_value()) {
+                continue;
+            }
+            localLimits[well->name()] = {static_cast<int>(limit->first), limit->second};
+        }
+        return gatherWellLimits_(localLimits, allWellNames);
+    }
+
+    template<typename TypeTag>
+    void
+    BlackoilWellModel<TypeTag>::
+    updateInitialSolveFailures_(const double simulation_time,
+                                DeferredLogger& deferred_logger)
+    {
+        // Globally consistent: which wells failed numerically this step, and
+        // which were solved, so that every rank keeps the same counts and
+        // reaches forceShutWellByName() (collective) for the same wells.
+        const auto& names = this->schedule().wellNames(simulator_.episodeIndex());
+        std::vector<int> failed(names.size(), 0);
+        std::vector<int> solved(names.size(), 0);
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            failed[i] = group_tree_initial_solve_failed_.count(names[i]) > 0;
+            solved[i] = group_tree_initially_solved_.count(names[i]) > 0;
+        }
+        const auto& comm = grid().comm();
+        if (!names.empty()) {
+            comm.max(failed.data(), static_cast<int>(failed.size()));
+            comm.max(solved.data(), static_cast<int>(solved.size()));
+        }
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            if (solved[i]) {
+                group_tree_initial_solve_failures_.erase(names[i]);
+            }
+            if (!failed[i]) {
+                continue;
+            }
+            const int count = ++group_tree_initial_solve_failures_[names[i]];
+            if (count < param_.group_tree_max_initial_solve_failures_) {
+                continue;
+            }
+            group_tree_initial_solve_failures_.erase(names[i]);
+            if (!param_.shut_unsolvable_wells_) {
+                continue;
+            }
+            if (this->forceShutWellByName(names[i], simulation_time, /*dont_shut_grup_wells=*/false)) {
+                deferred_logger.warning("WELL_INITIAL_SOLVE_FAILED",
+                    fmt::format("Initial solve of well {} did not converge at {} consecutive "
+                                "timesteps; the well is shut", names[i], count));
+            }
+        }
+    }
+
+    template<typename TypeTag>
+    void
+    BlackoilWellModel<TypeTag>::
+    balanceGroupTreeFromPotentials_(const int reportStepIdx,
+                                    DeferredLogger& deferred_logger)
+    {
+        OPM_TIMEFUNCTION();
+        const auto limits = this->prepareWellsForBalancingFromPotentials_();
+        // Every rank sees the same limits, so they all return here together.
+        if (limits.empty()) {
+            return;
+        }
+        // Owned from here on, so the group-data update below leaves the
+        // committed targets alone.
+        this->setBalancerOwnsProduction(true);
+        const auto balanced = ProdGroupTreeBalancer::balanceGroupTree(
+            *this, this->summaryState(), reportStepIdx,
+            param_.group_tree_balancer_tolerance_, limits, deferred_logger);
+        this->commitBalancedTree_(balanced.tree, /*commitRates=*/false, deferred_logger);
+        this->updateAndCommunicateGroupData(reportStepIdx, /*update_wellgrouptarget*/ true);
+        if (this->terminal_output_) {
+            deferred_logger.debug(fmt::format("Group tree balanced on the current rates of {} wells, "
+                                              "limited by their potentials, at the start of the timestep{}",
+                                              limits.size(),
+                                              balanced.success && balanced.valid ? "" : " (not converged/valid)"));
+        }
     }
 
     template<typename TypeTag>
@@ -1914,6 +2762,9 @@ namespace Opm {
                 // We need to communicate the exception thrown to the others and rethrow.
                 OPM_BEGIN_PARALLEL_TRY_CATCH()
                     for (const auto& well : well_container_) {
+                        if (this->balancerOwnsProductionControl_(*well)) {
+                            continue;
+                        }
                         const auto mode = WellInterface<TypeTag>::IndividualOrGroup::Group;
                         const bool changed_well = well->updateWellControl(
                             simulator_, mode, this->groupStateHelper(), this->wellState()
@@ -1939,6 +2790,9 @@ namespace Opm {
                 // We need to communicate the exception thrown to the others and rethrow.
                 OPM_BEGIN_PARALLEL_TRY_CATCH()
                     for (const auto& well : well_container_) {
+                        if (this->balancerOwnsProductionControl_(*well)) {
+                            continue;
+                        }
                         const auto mode = WellInterface<TypeTag>::IndividualOrGroup::Individual;
                         const bool changed_well = well->updateWellControl(
                             simulator_, mode, this->groupStateHelper(), this->wellState()
@@ -2048,21 +2902,37 @@ namespace Opm {
         auto& local_deferredLogger = this->groupStateHelper().deferredLogger();
         for (const auto& well : well_container_) {
             const auto& wname = well->name();
+            // A numerical failure of the initial solve is not a reason to
+            // close the well: it is retried at the next timestep.
+            if (group_tree_initial_solve_failed_.count(wname) > 0) {
+                continue;
+            }
             const auto wasClosed = wellTestState.well_is_closed(wname);
-            well->checkWellOperability(simulator_,
-                                       this->wellState(),
-                                       this->groupStateHelper());
             const bool under_zero_target =
                 well->wellUnderZeroGroupRateTarget(this->groupStateHelper());
-            well->updateWellTestState(this->wellState().well(wname),
-                                      simulationTime,
-                                      /*writeMessageToOPMLog=*/ true,
-                                      /*during_well_test=*/ false,
-                                      under_zero_target,
-                                      wellTestState,
-                                      this->eclipseState().getUnits(),
-                                      this->schedule().getStartTime(),
-                                      local_deferredLogger);
+            // Accepting the timestep accepts that a well stopped cleanly
+            // during it (it cannot flow at its constraints) is still stopped:
+            // close it, without re-checking its operability.
+            if (param_.close_stopped_wells_ && well->stoppedCleanly() && !under_zero_target
+                && this->wellState().well(wname).status == WellStatus::OPEN) {
+                local_deferredLogger.debug(fmt::format("Well {} is stopped at the end of the timestep "
+                                                       "(reason: {}); closing it",
+                                                       wname, well->stopReasonToString(well->stopReason())));
+                well->closeStoppedWellPhysically(simulationTime, wellTestState, local_deferredLogger);
+            } else {
+                well->checkWellOperability(simulator_,
+                                           this->wellState(),
+                                           this->groupStateHelper());
+                well->updateWellTestState(this->wellState().well(wname),
+                                          simulationTime,
+                                          /*writeMessageToOPMLog=*/ true,
+                                          /*during_well_test=*/ false,
+                                          under_zero_target,
+                                          wellTestState,
+                                          this->eclipseState().getUnits(),
+                                          this->schedule().getStartTime(),
+                                          local_deferredLogger);
+            }
 
             if (!wasClosed && wellTestState.well_is_closed(wname)) {
                 this->closed_this_step_.insert(wname);
@@ -2218,9 +3088,13 @@ namespace Opm {
         for (const auto& well : well_container_) {
             auto& events = this->wellState().well(well->indexOfWell()).events;
             if (events.hasEvent(WellState<Scalar, IndexTraits>::event_mask)) {
-                well->updateWellStateWithTarget(
-                    simulator_, this->groupStateHelper(), this->wellState()
-                );
+                // A well given its initial solve in beginTimeStep() keeps that
+                // solution instead of being reset to its targets.
+                if (group_tree_initially_solved_.count(well->name()) == 0) {
+                    well->updateWellStateWithTarget(
+                        simulator_, this->groupStateHelper(), this->wellState()
+                    );
+                }
                 well->updatePrimaryVariables(this->groupStateHelper());
                 // There is no new well control change input within a report step,
                 // so next time step, the well does not consider to have effective events anymore.
@@ -2231,7 +3105,9 @@ namespace Opm {
                 events.clearEvent(ScheduleEvents::REQUEST_OPEN_WELL);
             }
             // solve the well equation initially to improve the initial solution of the well model
-            if (param_.solve_welleq_initially_ && well->isOperableAndSolvable()) {
+            // (not a well held stopped since its initial solve failed: it stays at zero rate)
+            if (param_.solve_welleq_initially_ && well->isOperableAndSolvable()
+                && !well->isHeldStoppedForTimestep()) {
                 try {
                     well->solveWellEquation(
                         simulator_, this->groupStateHelper(), this->wellState()
@@ -2247,8 +3123,11 @@ namespace Opm {
         }
         updatePrimaryVariables();
 
-        // Actually do the pre-step network rebalance, using the updated well states and initial solutions
-        if (do_prestep_network_rebalance) {
+        // Actually do the pre-step network rebalance, using the updated well states and initial solutions.
+        // Not with the group-tree workflow: its first round in this iteration does the same at the
+        // same reservoir state (timestep_initialization.md, 6.2a).
+        if (do_prestep_network_rebalance
+            && !(param_.group_tree_initialization_ && this->groupTreeModeActive_(episodeIdx))) {
             network_.doPreStepRebalance(deferred_logger);
         }
     }

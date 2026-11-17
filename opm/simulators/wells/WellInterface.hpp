@@ -64,6 +64,7 @@ namespace Opm {
 #include <opm/material/densead/Evaluation.hpp>
 
 #include <limits>
+#include <tuple>
 #include <vector>
 
 namespace Opm
@@ -86,6 +87,7 @@ public:
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
     using IndexTraits = typename FluidSystem::IndexTraitsType;
     using Indices = GetPropType<TypeTag, Properties::Indices>;
+    using StopReason = typename WellInterfaceGeneric<Scalar, IndexTraits>::StopReason;
     using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
     using MaterialLaw = GetPropType<TypeTag, Properties::MaterialLaw>;
     using SparseMatrixAdapter = GetPropType<TypeTag, Properties::SparseMatrixAdapter>;
@@ -241,6 +243,9 @@ public:
                                        const WellStateType& well_state,
                                        const GroupStateHelperType& groupStateHelper,
                                        std::vector<Scalar>& well_potentials) = 0;
+
+    /// Reference density used by the VFP/THP calculations.
+    Scalar refDensity() const { return this->getRefDensity(); }
 
     virtual void updateWellStateWithTarget(const Simulator& simulator,
                                            const GroupStateHelperType& groupStateHelper,
@@ -427,6 +432,147 @@ public:
     virtual void updateIPRImplicit(const Simulator& simulator,
                                    const GroupStateHelperType& groupStateHelper,
                                    WellStateType& well_state) = 0;
+
+    /// A flowing IPR for a stopped producer (persistently, Well::Status::STOP,
+    /// or dynamically, wellIsStopped(); not shut), whose real implicit_ipr_a/b
+    /// -- linearised at its zero-rate state -- is not a usable reference. With
+    /// a tubing table: the IPR at the well's maximum flowing THP
+    /// (computeAnchor(), started from a solve at the THP limit, i.e. the node
+    /// pressure in a network). If it cannot flow at its current THP limit, a
+    /// flowing point at a lower bhp, stepping down to the bhp limit
+    /// (trialBhpSteps()): in a network the node pressure moves with the
+    /// flows, and there is no lowest pressure a node can have to go by. No
+    /// trial IPR if it cannot flow even at the bhp limit. Without one: a trial
+    /// solve at the well's own limits (estimateOperableBhp()). Stored in
+    /// well_state's stopped_ipr_a/b, zeroed when there is none; the well object
+    /// itself is left as it was. The group-tree network solve offers a well
+    /// with a trial IPR as a reopen candidate.
+    void updateStoppedWellTrialIpr(const Simulator& simulator,
+                                   const double dt,
+                                   const GroupStateHelperType& groupStateHelper,
+                                   WellStateType& well_state);
+
+    /// The bhps below \p bhp to try for a stopped well that does not flow at
+    /// \p bhp: down to \p bhp_limit in equal steps of max(1 bar,
+    /// (bhp - bhp_limit) / 5), the last one the bhp limit itself. Empty if
+    /// \p bhp is at the bhp limit.
+    static std::vector<Scalar> trialBhpSteps(const Scalar bhp, const Scalar bhp_limit);
+
+    /// Give a trial solve on a scratch \p well_state a producing start when
+    /// the well has no rate there (a stopped well): the local solve checks
+    /// the well's status before its first step, and a zero total rate stops
+    /// it at once.
+    void seedTrialRates(WellStateType& well_state) const;
+
+    /// A BHP-controlled solve at \p bhp, on scratch copies: the IPR there if
+    /// the well flows, nullopt otherwise.
+    std::optional<std::pair<std::vector<Scalar>, std::vector<Scalar>>>
+    trialSolveAtBhp(const Simulator& simulator,
+                    const double dt,
+                    const GroupStateHelperType& groupStateHelper,
+                    const WellStateType& well_state,
+                    const Scalar bhp);
+
+    /// The well's anchor (timestep_initialization.md, section 6.2): the
+    /// highest THP it can flow against, and its IPR and operating point there.
+    struct Anchor
+    {
+        enum class Status
+        {
+            Flows,        ///< found; thp is the maximum flowing THP
+            Capped,       ///< still flows at the table's highest THP: thp is a lower bound
+            NoFlow,       ///< cannot flow anywhere in the table's THP range (physical)
+            SolveFailed,  ///< a BHP-controlled solve did not converge (numerical)
+        };
+        enum class Start
+        {
+            CurrentState,     ///< from a solve at the well's own bhp
+            GivenThp,         ///< from a solve at the start THP passed in
+            GivenBhp,         ///< from a solve at the start bhp passed in
+            TableLowestThp,   ///< from a solve at the table's lowest THP
+        };
+        Status status{Status::SolveFailed};
+        Start start{Start::TableLowestThp};
+        Scalar thp{0};               ///< maximum flowing THP from the search
+        Scalar bhp{0};               ///< on the IPR, where it touches the tubing curve
+        /// The FLO where it touches; zero when the maximum THP is reached at
+        /// zero rate (no lift cliff: the touching point is the shut-in point).
+        Scalar flo{0};
+        /// The first solve, at the start bhp (for Start::GivenThp the bhp on
+        /// the tubing curve at the given THP): whether the well flowed there,
+        /// and then that bhp and the IPR there.
+        bool start_flows{false};
+        Scalar start_bhp{0};
+        Scalar first_bhp{0};   ///< the bhp of the first solve, whether it flowed or not
+        /// Surface rates of the first flowing solve (production negative):
+        /// the composition the lift margin is evaluated with in every round.
+        std::vector<Scalar> composition;
+        std::vector<Scalar> start_ipr_a;
+        std::vector<Scalar> start_ipr_b;
+        /// A final BHP-controlled solve at bhp: whether it converged with the
+        /// well flowing, and then the THP the tubing table gives for its rates
+        /// and bhp. rates and ipr_a/b below are that solve's when it did, and
+        /// the search's IPR evaluated at bhp otherwise.
+        bool final_solved{false};
+        std::string final_failure;   ///< why the final solve did not count, if it did not
+        Scalar final_thp{0};
+        std::vector<Scalar> rates;   ///< surface rates (active phases, production negative)
+        std::vector<Scalar> ipr_a;   ///< implicit IPR (q = b*bhp - a)
+        std::vector<Scalar> ipr_b;
+        int rounds{0};
+    };
+
+    /// The initial solve of a producer without a valid previous solution in
+    /// the group-tree workflow (timestep_initialization.md, 6.2): solve at its
+    /// strictest individual limit (THP limit and group control left out),
+    /// started under BHP control at its bhp limit. For a well in a network with
+    /// a tubing table: when only the bhp limit binds, solve once more at the
+    /// bhp where its IPR meets the tubing curve at a THP guess (the node
+    /// pressure if known, else the deck THP limit, else the table's lowest THP,
+    /// never above the well's maximum flowing THP); and if its node has no
+    /// pressure yet, set its dynamic THP limit to the THP it now has, so the
+    /// deck THP limit no longer applies and later solves start from this
+    /// solution under the same constraint. \p well_state is updated. Returns
+    /// whether the solve at the individual limits converged with the well
+    /// flowing (Flows), converged with no flow (NoFlow: a physical result)
+    /// or did not converge (NotConverged: numerical); a well that does not
+    /// flow is stopped at zero rate and held stopped for the timestep. With \p group_controlled (the balancer has put the well on
+    /// group control and committed its target), the first solve keeps group
+    /// control and starts under it from \p well_state (set for the target by
+    /// updateWellStateWithTarget()), switching to an individual limit only if
+    /// the target can't be met; if that solve fails, the solve at the
+    /// individual limits above is the fallback.
+    enum class InitialSolveResult { Flows, NoFlow, NotConverged };
+    InitialSolveResult initialSolveForGroupTree(const Simulator& simulator,
+                                                const GroupStateHelperType& groupStateHelper,
+                                                WellStateType& well_state,
+                                                const bool network_well,
+                                                const bool group_controlled);
+
+    /// The well's maximum flowing THP, with its operating point and IPR
+    /// there, refined from the best available starting point, on a scratch
+    /// copy of \p well_state:
+    ///  - the well's own bhp, if it is flowing in \p well_state with a usable
+    ///    IPR (one solve there: the well's equations need not be assembled);
+    ///  - otherwise a solve at \p start_bhp (not below the bhp limit);
+    ///  - otherwise a solve on the tubing curve at \p start_thp (its lowest bhp
+    ///    there, not below the bhp limit), e.g. the node pressure;
+    ///  - otherwise the table's lowest THP (last resort).
+    /// From there: take the IPR, find the highest THP at which it still
+    /// reaches the tubing curve (WellBhpThpCalculator::maxFlowingThp()), solve
+    /// at the bhp where it touches, and repeat until the touching point is
+    /// where the IPR was taken. A bracket of bhps where the well was seen to
+    /// flow and to stop keeps the steps safe. A final solve gives the rates,
+    /// IPR and THP the well actually has there. Only BHP-controlled solves are
+    /// used. The well object's status, operability flags and primary
+    /// variables are restored afterwards; \p well_state is not touched.
+    /// Producers in prediction mode with a tubing table only.
+    Anchor computeAnchor(const Simulator& simulator,
+                         const double dt,
+                         const GroupStateHelperType& groupStateHelper,
+                         const WellStateType& well_state,
+                         const std::optional<Scalar> start_thp = std::nullopt,
+                         const std::optional<Scalar> start_bhp = std::nullopt);
 
     static constexpr int numResDofs = Indices::numEq;
     static constexpr int numWellDofs = numResDofs + 1;  // NB will fail for for thermal for now

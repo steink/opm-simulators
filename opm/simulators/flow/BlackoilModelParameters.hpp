@@ -158,6 +158,8 @@ template<class Scalar>
 struct NetworkPressureUpdateDampingFactor { static constexpr Scalar value = 0.1; };
 template<class Scalar>
 struct NetworkMaxPressureUpdateInBars { static constexpr Scalar value = 5.0; };
+struct NetworkSolver { static constexpr auto value = "fixedpoint"; };
+struct NetworkAnalyticJacobian { static constexpr bool value = true; };
 // Reservoir coupling: when false (default) the master exchanges node pressures
 // and slave rates with the slaves once per master inner network sub-iteration
 // (tight coupling).  When true, the exchange happens only once per master outer network
@@ -171,6 +173,21 @@ struct NewtonMinIterations { static constexpr int value = 1; };
 struct WellGroupConstraintsMaxIterations { static constexpr int value = 1; };
 template<class Scalar>
 struct GroupControlFractionTolerance { static constexpr Scalar value = 1e-4; };
+struct EnableGroupTreeBalancer { static constexpr bool value = false; };
+template<class Scalar>
+struct GroupTreeBalancerTolerance { static constexpr Scalar value = 1e-4; };
+template<class Scalar>
+struct GroupTreeIprTolerance { static constexpr Scalar value = 1e-2; };
+struct GroupTreeStopHold { static constexpr auto value = "iteration"; };
+struct LogWellAnchors { static constexpr bool value = false; };
+struct GroupTreeInitialization { static constexpr bool value = true; };
+struct GroupTreeInitialBalance { static constexpr bool value = true; };
+struct GroupTreeMaxInitialSolveFailures { static constexpr int value = 3; };
+struct CloseStoppedWells { static constexpr bool value = false; };
+template<class Scalar>
+struct GroupTreeReopenThpMargin { static constexpr Scalar value = 0.0; };
+struct GroupTreeBranchFlattening { static constexpr bool value = true; };
+struct GroupTreeNetworkStep { static constexpr auto value = "full"; };
 template<class Scalar>
 struct LocalToleranceScalingMb { static constexpr Scalar value = 1.0; };
 
@@ -374,6 +391,66 @@ public:
 
     /// Lower tolerance for the guiderate ratio or well-fraction of active phase before switching to group fallback control
     Scalar group_control_fraction_tolerance_;
+
+    /// How the production network is solved: "fixedpoint" (default) relaxes the
+    /// node pressures against the wells; "group-tree" solves them for the
+    /// group-tree balancer's configuration (GroupTreeSystem).
+    std::string network_solver_;
+
+    /// Assemble the group-tree network Jacobian from the VFP table derivatives.
+    bool network_analytic_jacobian_;
+
+    /// Run the group-tree balancer (ProdGroupTreeBalancer) after well controls change, within nupcol
+    bool enable_group_tree_balancer_;
+
+    /// Convergence tolerance for the group-tree balancer's own guide-rate distribution
+    Scalar group_tree_balancer_tolerance_;
+
+    /// Relative well-rate tolerance on the IPR linearisation the group-tree
+    /// network solve used, measured at the operating point the wells reach
+    /// in their own solves; above it the group-tree workflow does another round.
+    Scalar group_tree_ipr_tolerance_;
+
+    /// How long a stop the group-tree workflow's network solve decided is held
+    /// in the wells' own solves: "iteration" (one global iteration),
+    /// "timestep", or "nupcol" (while within NUPCOL).
+    std::string group_tree_stop_hold_;
+
+    /// Compute and log every predicting producer's anchor (maximum flowing
+    /// THP) at the start of each timestep; diagnostic only.
+    bool log_well_anchors_;
+
+    /// With the group-tree workflow: initial solve of producers without a
+    /// valid previous solution in beginTimeStep(), no pre-step network
+    /// rebalance, and no A1 in the first round of a timestep's first global
+    /// iteration (timestep_initialization.md, 6.2a).
+    bool group_tree_initialization_;
+
+    /// With the group-tree workflow: balance the group tree at the start of a
+    /// timestep with the wells' potentials as their limits, and commit its
+    /// targets before the wells are first solved.
+    bool group_tree_initial_balance_;
+
+    /// With the group-tree workflow: a well whose initial solve fails to
+    /// converge at this many consecutive timesteps is shut.
+    int group_tree_max_initial_solve_failures_;
+
+    /// A well stopped cleanly during a timestep (no flow, not operable,
+    /// re-open limit, network) and still stopped at its end is closed in the
+    /// well-test state, without re-checking its operability.
+    bool close_stopped_wells_;
+
+    /// A stopped producer is offered for reopening only if its maximum flowing
+    /// THP exceeds its current THP limit (the node pressure) by this much [bar].
+    Scalar group_tree_reopen_thp_margin_;
+
+    /// Group-tree network solver: flatten branch tables so their pressure never
+    /// falls with flow, and solve again with the real tables from that solution.
+    bool group_tree_branch_flattening_;
+
+    /// Step control of the group-tree network Newton solve: "full" or
+    /// "linesearch" (backtracking on the residual norm).
+    std::string group_tree_network_step_;
 
     /// Nonlinear solver type: newton or nldd
     std::string nonlinear_solver_;

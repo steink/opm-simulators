@@ -87,11 +87,78 @@ doPreStepRebalance(DeferredLogger& deferred_logger)
 }
 
 template<typename TypeTag>
+void
+BlackoilWellModelNetwork<TypeTag>::
+configureSolvers(DeferredLogger& deferred_logger)
+{
+    const auto& solver_mode = well_model_.param().network_solver_;
+    if (solver_mode != "fixedpoint" && solver_mode != "group-tree") {
+        OPM_DEFLOG_THROW(std::runtime_error,
+                         "Invalid value '" + solver_mode + "' for --network-solver; "
+                         "expected fixedpoint or group-tree", deferred_logger);
+    }
+    this->useGroupTreeSolver(solver_mode == "group-tree");
+    this->useAnalyticJacobian(well_model_.param().network_analytic_jacobian_);
+    this->useBranchFlattening(well_model_.param().group_tree_branch_flattening_);
+    const auto& step = well_model_.param().group_tree_network_step_;
+    if (step != "full" && step != "linesearch") {
+        OPM_DEFLOG_THROW(std::runtime_error,
+                         "Invalid value '" + step + "' for --group-tree-network-step; "
+                         "expected full or linesearch", deferred_logger);
+    }
+    this->useNetworkLineSearch(step == "linesearch");
+}
+
+template<typename TypeTag>
+void
+BlackoilWellModelNetwork<TypeTag>::
+refreshWellNetworkData(const double dt, const details::DomainScope scope)
+{
+    if (!this->group_tree_solver_ || scope == details::DomainScope::Injection) {
+        return;
+    }
+    // The group-tree solve needs every producer's rate response to its own
+    // bhp. That is the implicit IPR, which the well solve maintains only
+    // where its own control logic happens to need it. Refresh it here for
+    // all of them, or the network solve gets a well it cannot linearise
+    // (gatherWellNetworkDataForGroupTree() treats such a well as stopped).
+    for (const auto& well : well_model_) {
+        if (!well->isProducer() || !well->wellEcl().predictionMode()) {
+            continue;
+        }
+        well->updateIPRImplicit(well_model_.simulator(),
+                                well_model_.groupStateHelper(),
+                                well_model_.wellState());
+        // A stopped producer's own implicit_ipr above is linearised
+        // at its current, degenerate zero-rate state -- refresh a
+        // separate, physically-grounded trial IPR (stopped_ipr_a/b)
+        // at the same cadence; a no-op for any well not currently
+        // stopped. Not consumed here or by any network solve yet.
+        well->updateStoppedWellTrialIpr(well_model_.simulator(), dt,
+                                        well_model_.groupStateHelper(),
+                                        well_model_.wellState());
+        // The tubing table's datum is not the well's reference
+        // depth; the well's thp evaluation corrects for it and
+        // the network system has to apply the same.
+        const int table = well->wellEcl().vfp_table_number();
+        Scalar dp = 0.0;
+        if (table > 0) {
+            const auto& vfp = well_model_.getVFPProperties();
+            const Scalar datum = vfp.getProd()->getTable(table).getDatumDepth();
+            // wellhelpers::computeHydrostaticCorrection, inline.
+            dp = well->refDensity() * well->gravity() * (datum - well->refDepth());
+        }
+        this->setWellVfpDp(well->name(), dp);
+    }
+}
+
+template<typename TypeTag>
 std::tuple<bool, typename BlackoilWellModelNetwork<TypeTag>::Scalar>
 BlackoilWellModelNetwork<TypeTag>::
 update(const bool mandatory_network_balance,
        DeferredLogger& deferred_logger,
-       const bool relax_network_tolerance)
+       const bool relax_network_tolerance,
+       const details::DomainScope scope)
 {
     OPM_TIMEFUNCTION();
     const int episodeIdx = well_model_.simulator().episodeIndex();
@@ -100,6 +167,7 @@ update(const bool mandatory_network_balance,
     }
 
     const auto& comm = well_model_.simulator().vanguard().grid().comm();
+    const bool production_in_scope = scope != details::DomainScope::Injection;
 
     // network related
     Scalar network_imbalance = 0.0;
@@ -108,19 +176,23 @@ update(const bool mandatory_network_balance,
         OPM_TIMEBLOCK(BalanceNetwork);
         const double dt = well_model_.simulator().timeStepSize();
         // Calculate common THP for subsea manifold well group (item 3 of NODEPROP set to YES)
-        const bool well_group_thp_updated = computeWellGroupThp(dt, deferred_logger);
+        const bool well_group_thp_updated = production_in_scope
+            && computeWellGroupThp(dt, deferred_logger);
         const int max_number_of_sub_iterations =
             well_model_.param().network_max_sub_iterations_;
         const Scalar network_pressure_update_damping_factor =
             well_model_.param().network_pressure_update_damping_factor_;
         const Scalar network_max_pressure_update =
             well_model_.param().network_max_pressure_update_in_bars_ * unit::barsa;
+        this->configureSolvers(deferred_logger);
+        this->refreshWellNetworkData(dt, scope);
         bool more_network_sub_update = false;
         for (int i = 0; i < max_number_of_sub_iterations; i++) {
             const auto local_network_imbalance =
                 this->updatePressures(episodeIdx,
                                       network_pressure_update_damping_factor,
-                                      network_max_pressure_update);
+                                      network_max_pressure_update,
+                                      scope);
             network_imbalance = comm.max(local_network_imbalance);
             const auto& balance = well_model_.schedule()[episodeIdx].network_balance();
             constexpr Scalar relaxation_factor = 10.0;
@@ -147,7 +219,7 @@ update(const bool mandatory_network_balance,
 
                 const auto domain = details::domainForWell(*well);
 
-                if (!domain.has_value()) {
+                if (!domain.has_value() || !details::inScope(scope, *domain)) {
                     continue;
                 }
 

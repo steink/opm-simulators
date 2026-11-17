@@ -29,15 +29,22 @@
 #include <opm/output/data/Groups.hpp>
 
 #include <opm/simulators/flow/NewtonIterationContext.hpp>
+#include <opm/simulators/wells/NetworkGroupTreeSystem.hpp>
+#include <opm/simulators/wells/ProdGroupTreeBalancer.hpp>
 #include <opm/simulators/utils/ParallelCommunication.hpp>
 
+#include <algorithm>
 #include <array>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace Opm {
+    class DeferredLogger;
     class Schedule;
     class UnitSystem;
     template<class Scalar, class IndexTraits> class BlackoilWellModelGeneric;
@@ -97,6 +104,18 @@ namespace details {
     /// whether active or not.
     std::vector<NetworkDescriptor>
     networks(const Schedule& schedule, const int timeStepIdx);
+    /// Which network domains a network update covers.
+    enum class DomainScope { All, Production, Injection };
+
+    /// True if \p domain is covered by \p scope.
+    inline bool inScope(const DomainScope scope, const NetworkDomain domain)
+    {
+        switch (scope) {
+        case DomainScope::Production: return domain == NetworkDomain::Production;
+        case DomainScope::Injection:  return domain != NetworkDomain::Production;
+        default:                      return true;
+        }
+    }
 
 } // namespace details
 
@@ -160,9 +179,17 @@ public:
     /// Checks if we will perform a network re-balance on the next Newton iteration.
     bool willBalanceOnNextIteration(const int reportStepIndex) const;
 
+    /// Recompute the node pressures from the current leaf rates and move the applied
+    /// pressures towards them, damped by damping_factor and capped at
+    /// update_upper_bound. Returns the largest change over the nodes.
+    ///
+    /// \p scope restricts the update -- the evaluation, the pressure step and the
+    /// THP-limit write-back -- to the production or the injection networks; the
+    /// other domain's node pressures are left as they are.
     Scalar updatePressures(const int reportStepIdx,
                            const Scalar damping_factor,
-                           const Scalar update_upper_bound);
+                           const Scalar update_upper_bound,
+                           const details::DomainScope scope = details::DomainScope::All);
 
     void assignNodeAndBranchValues(std::map<std::string, data::NodeData>& nodevalues,
                                    std::map<std::string, data::BranchData>& branchvalues,
@@ -197,6 +224,72 @@ public:
     }
 
     bool operator==(const BlackoilWellModelNetworkGeneric<Scalar,IndexTraits>& rhs) const;
+
+    /// Solve the production network's group-tree-driven system (ProdGroupTreeBalancer
+    /// + NetworkSolve::GroupTreeSystem) instead of relaxing the node pressures against
+    /// the wells. Off by default; --network-solver=group-tree turns it on. The
+    /// fixed-point answer is still computed first, and kept for a network the
+    /// group-tree solve cannot model. Production only.
+    void useGroupTreeSolver(const bool on) { group_tree_solver_ = on; }
+    bool usesGroupTreeSolver() const { return group_tree_solver_; }
+
+    /// The balanced group tree the next group-tree network solve is built for.
+    /// Set by the caller when usesGroupTreeSolver() and a production network
+    /// are both active; otherwise unused.
+    void setBalancedGroupTree(ProdGroupTreeBalancer::Tree<Scalar> tree)
+    {
+        balanced_group_tree_ = std::move(tree);
+    }
+
+    /// The roots of \p network that head a tree of their own: each distinct
+    /// fixed-pressure node without a branch above it. ExtNetwork::roots() also
+    /// lists a fixed-pressure node that feeds a node further up (it is the
+    /// uptree node of a branch with a fixed pressure), and lists a root once
+    /// per branch below it; the group-tree solve treats the former as a
+    /// fixed-pressure node inside its parent's tree, so it is solved once, with
+    /// the group constraints spanning both.
+    static std::vector<std::reference_wrapper<const Network::Node>>
+    independentRoots(const Network::ExtNetwork& network)
+    {
+        std::vector<std::reference_wrapper<const Network::Node>> out;
+        for (const auto& root : network.roots()) {
+            const auto& name = root.get().name();
+            if (network.uptree_branch(name).has_value()) {
+                continue;
+            }
+            if (std::none_of(out.begin(), out.end(),
+                             [&name](const auto& r) { return r.get().name() == name; })) {
+                out.push_back(root);
+            }
+        }
+        return out;
+    }
+
+    /// One B2/B3 step of the group-tree workflow: solve the network for
+    /// \p balancedTree, then change the open set by what the solution says.
+    ///  - With \p offerReopenCandidates (the first pass of B), stopped wells
+    ///    with a usable trial IPR enter the solve as reopen candidates; those
+    ///    that flow on the real tubing curve are reopened (openWell()) and their
+    ///    well state seeded with the network's operating point.
+    ///  - Wells that cannot keep their branch flowing on its real table are
+    ///    stopped (stopWell(), the dynamic status).
+    /// Returns true if the open set changed, so the caller rebalances and
+    /// solves again; false if the solve did not converge or nothing changed.
+    bool updateGroupTreeOpenSet(const Network::ExtNetwork& network,
+                                const int reportStepIdx,
+                                const Network::Node& root,
+                                const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree,
+                                const bool offerReopenCandidates,
+                                DeferredLogger& deferred_logger);
+
+    /// Assemble the network Jacobian from the VFP table derivatives instead of
+    /// differencing the residual.
+    void useAnalyticJacobian(const bool on) { analytic_jacobian_ = on; }
+    void useBranchFlattening(const bool on) { branch_flattening_ = on; }
+    void useNetworkLineSearch(const bool on) { network_line_search_ = on; }
+    /// Per local well, the hydrostatic correction its tubing table needs;
+    /// computed on the typed side, where the well's density lives.
+    void setWellVfpDp(const std::string& well, const Scalar dp) { well_vfp_dp_[well] = dp; }
 
 protected:
     /// See setNodePressureOverrides().
@@ -294,6 +387,62 @@ protected:
     // Domain-scoped pressure state to avoid collisions between production and injection networks.
     std::array<std::map<std::string, Scalar>, details::domainIndex(details::NetworkDomain::Count)> domain_node_pressures_;
     std::array<std::map<std::string, data::BranchData>, details::domainIndex(details::NetworkDomain::Count)> domain_branch_data_;
+    /// Node pressures from the group-tree solve for one production network
+    /// root, or nullopt if it cannot be done (logged at debug level) -- the
+    /// caller then keeps the fixed-point result for that tree.
+    std::optional<std::map<std::string, Scalar>>
+    groupTreeProductionNodePressures(const Network::ExtNetwork& network,
+                                     const int reportStepIdx,
+                                     const Network::Node& root,
+                                     const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree) const;
+
+    /// The per-well data NetworkSolve::GroupTreeSystem::WellNetworkData needs
+    /// (vfp table, ipr_a/b, network-branch efficiency, ...), gathered MPI-safely:
+    /// replicated static facts from the schedule, dynamic facts summed once
+    /// from whichever rank owns the well, so every rank ends up with the same
+    /// answer. Keyed by well name; the caller resolves each well's node once
+    /// the topology is built. A well left out of the returned map is not an
+    /// open (or stopped) producer in prediction mode.
+    std::unordered_map<std::string, typename NetworkSolve::GroupTreeSystem<Scalar>::WellNetworkData>
+    gatherWellNetworkDataForGroupTree(const int reportStepIdx) const;
+
+    /// Everything through NetworkSolve::solve() for one production network
+    /// root, keeping the system and the result (groupTreeProductionNodePressures()
+    /// only needs the pressures; updateGroupTreeOpenSet() needs both). nullopt
+    /// on anything the group-tree solve gives up on, logged at debug level.
+    struct GroupTreeSolve {
+        NetworkSolve::GroupTreeSystem<Scalar> system;
+        std::vector<std::string> order;    // node names by index; order[0] == root.name()
+        NetworkSolve::Result<Scalar> result;
+        /// Thp wells under a node that cannot flow on its real branch table
+        /// with them (GroupTreeSystem::nodeMargin() negative): stopped by
+        /// updateGroupTreeOpenSet(), not reopened.
+        std::vector<std::string> network_cliff_wells;
+    };
+    /// With \p offerReopenCandidates, stopped wells with a usable trial IPR
+    /// enter the system as reopen candidates (see
+    /// GroupTreeSystem::addReopenCandidate()).
+    std::optional<GroupTreeSolve>
+    solveGroupTree(const Network::ExtNetwork& network,
+                   const int reportStepIdx,
+                   const Network::Node& root,
+                   const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree,
+                   const bool offerReopenCandidates = false) const;
+
+    bool group_tree_solver_ = false;
+    std::optional<ProdGroupTreeBalancer::Tree<Scalar>> balanced_group_tree_;
+    bool analytic_jacobian_ = false;
+    bool branch_flattening_ = true;   // group-tree solver: see GroupTreeSystem::setBranchFlattening()
+    bool network_line_search_ = false;   // --group-tree-network-step=linesearch
+    std::map<std::string, Scalar> well_vfp_dp_;
+    /// Each production node's (WFR, GFR) at its last converged group-tree
+    /// solve with a flow at or above its table's first FLO value: what its
+    /// table is looked up with below that value at the next solve. Updated by
+    /// solveGroupTree() (hence mutable).
+    mutable std::map<std::string, std::array<Scalar, 2>> group_tree_node_fractions_;
+
+
+
     // Nodes without a valid VFP solution in the last evaluation (per domain); not serialized,
     // recomputed on every updatePressures().
     std::array<std::set<std::string>, details::domainIndex(details::NetworkDomain::Count)> domain_invalid_nodes_;
