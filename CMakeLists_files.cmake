@@ -522,6 +522,7 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_graphcoloring.cpp
   tests/test_GroupState.cpp
   tests/test_grouptreenetwork.cpp
+  tests/test_grouptreesystembuilder.cpp
   tests/test_ignore_keywords.cpp
   tests/test_InjectedPhase.cpp
   tests/test_injection_topup_phase_validation.cpp
@@ -535,6 +536,7 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_LogOutputHelper.cpp
   tests/test_milu.cpp
   tests/test_multmatrixtransposed.cpp
+  tests/test_networkgrouptreesystem.cpp
   tests/test_networkpressure.cpp
   tests/test_nonnc.cpp
   tests/test_norne_pvt.cpp
@@ -1395,6 +1397,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/MultisegmentWellGeneric.hpp
   opm/simulators/wells/MultisegmentWellPrimaryVariables.hpp
   opm/simulators/wells/MultisegmentWellSegments.hpp
+  opm/simulators/wells/NetworkGroupTreeSystem.hpp
   opm/simulators/wells/NetworkSolve.hpp
   opm/simulators/wells/ParallelPAvgCalculator.hpp
   opm/simulators/wells/ParallelPAvgDynamicSourceData.hpp
