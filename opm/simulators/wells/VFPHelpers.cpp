@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 namespace {
@@ -307,6 +308,106 @@ interpolate(const VFPInjTable& table,
     nn[0][0] = t1*nn[0][0] + t2*nn[1][0];
 
     return nn[0][0];
+}
+
+template<class Scalar>
+detail::SlopeLimitedEvaluation<Scalar> VFPHelpers<Scalar>::
+interpolateWithSlopeLimit(const VFPProdTable& table,
+                          const Scalar flo,
+                          const detail::InterpData<Scalar>& flo_i,
+                          const detail::InterpData<Scalar>& thp_i,
+                          const detail::InterpData<Scalar>& wfr_i,
+                          const detail::InterpData<Scalar>& gfr_i,
+                          const detail::InterpData<Scalar>& alq_i,
+                          const Scalar max_slope)
+{
+    detail::SlopeLimitedEvaluation<Scalar> out;
+    out.evaluation = interpolate(table, flo_i, thp_i, wfr_i, gfr_i, alq_i);
+
+    // The common case by far: this well is operating on the friction-dominated
+    // branch, where the curve is flatter than its own IPR and there is nothing
+    // to do. A single-point FLO axis lands here too -- findInterpData() leaves
+    // inv_dist_ at zero for it, so dflo is zero, which clears any negative
+    // limit.
+    if (out.evaluation.dflo > max_slope) {
+        return out;
+    }
+
+    const auto& flo_axis = table.getFloAxis();
+    const std::size_t num_intervals = flo_axis.size() - 1;
+    // findInterpData() chops a negative query to zero rather than extrapolate
+    // the table backwards; match that here, or a shifted interval's factor
+    // would be found for a different point than flo_i itself was.
+    const Scalar q = (flo < Scalar{0}) ? Scalar{0} : flo;
+
+    // The interpolation data for one whole FLO interval, evaluated at this
+    // query's own flo -- a factor outside [0, 1] (which is what shifting to a
+    // later interval gives) is an ordinary linear extrapolation as far as
+    // interpolate() is concerned; findInterpData() itself already produces
+    // factors above 1 for a query past the end of the axis.
+    auto intervalData = [&flo_axis, q](const std::size_t j) {
+        detail::InterpData<Scalar> d;
+        d.ind_[0] = static_cast<int>(j);
+        d.ind_[1] = static_cast<int>(j + 1);
+        const Scalar start = flo_axis[j];
+        const Scalar end = flo_axis[j + 1];
+        if (end > start) {
+            d.inv_dist_ = Scalar{1} / (end - start);
+            d.factor_ = (q - start) * d.inv_dist_;
+        }
+        return d;
+    };
+
+    // Walk up the axis for the first interval flat enough to extrapolate back
+    // from. dflo is constant within an interval (it is that interval's own
+    // secant slope, blended across the other four axes), so one evaluation
+    // decides each one.
+    auto flattened = out.evaluation;
+    bool found = false;
+    for (std::size_t k = static_cast<std::size_t>(flo_i.ind_[0]); k + 1 < num_intervals; ) {
+        ++k;
+        flattened = interpolate(table, intervalData(k), thp_i, wfr_i, gfr_i, alq_i);
+        if (flattened.dflo > max_slope) {
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        // Nothing on the whole axis is flat enough. Pin the slope at the limit
+        // and anchor the value on the query interval's own left-hand end, so
+        // that value and derivative still describe one and the same line.
+        auto pinned = flo_i;
+        pinned.ind_[1] = pinned.ind_[0];
+        pinned.inv_dist_ = Scalar{0};
+        pinned.factor_ = Scalar{0};
+        out.evaluation = interpolate(table, pinned, thp_i, wfr_i, gfr_i, alq_i);
+        out.evaluation.value += max_slope * (q - flo_axis[flo_i.ind_[0]]);
+        out.evaluation.dflo = max_slope;
+        out.limit = detail::SlopeLimit::Clamped;
+        return out;
+    }
+
+    // Classify. In the ordinary U-shape the steep run reaches the very first
+    // interval; if it stops short there is a flat interval below a steep one,
+    // so the flattened curve jumps somewhere below this flo (the extrapolated
+    // line does not meet the real curve where the flat interval below hands
+    // over to the steep one). The walk below only runs when flattening
+    // triggered at all, which on a real deck is rare.
+    std::size_t run_start = static_cast<std::size_t>(flo_i.ind_[0]);
+    while (run_start > 0) {
+        const auto below = interpolate(table, intervalData(run_start - 1),
+                                       thp_i, wfr_i, gfr_i, alq_i);
+        if (below.dflo > max_slope) {
+            break;
+        }
+        --run_start;
+    }
+
+    out.evaluation = flattened;
+    out.limit = (run_start == 0) ? detail::SlopeLimit::Bridged
+                                 : detail::SlopeLimit::NonMonotone;
+    return out;
 }
 
 template<class Scalar>
@@ -631,6 +732,106 @@ intersectWithIPR(const VFPProdTable& table,
     } else {
         return std::nullopt;
     }
+}
+
+template<class Scalar>
+Scalar VFPHelpers<Scalar>::
+liftMargin(const VFPProdTable& table,
+           const Scalar thp,
+           const Scalar wfr,
+           const Scalar gfr,
+           const Scalar alq,
+           const Scalar ipr_a,
+           const Scalar ipr_b,
+           const Scalar bhp_limit,
+           const std::function<Scalar(const Scalar, const Scalar)>& adjust_bhp,
+           Scalar* flo_at_min)
+{
+    constexpr Scalar infinity = std::numeric_limits<Scalar>::infinity();
+    // The FLO the well reaches at its bhp limit; nothing past it is admissible.
+    const Scalar flo_max = ipr_a - ipr_b * bhp_limit;
+    if (!(ipr_b > Scalar{0}) || !(flo_max > Scalar{0})) {
+        return infinity;
+    }
+
+    const auto thp_i = findInterpData(thp, table.getTHPAxis());
+    const auto wfr_i = findInterpData(wfr, table.getWFRAxis());
+    const auto gfr_i = findInterpData(gfr, table.getGFRAxis());
+    const auto alq_i = findInterpData(alq, table.getALQAxis());
+
+    Scalar margin = infinity;
+    auto consider = [&](const Scalar flo) {
+        const auto flo_i = findInterpData(flo, table.getFloAxis());
+        const Scalar required = adjust_bhp(interpolate(table, flo_i, thp_i, wfr_i, gfr_i, alq_i).value, thp);
+        const Scalar available = (ipr_a - flo) / ipr_b;
+        if (required - available < margin) {
+            margin = required - available;
+            if (flo_at_min != nullptr) {
+                *flo_at_min = flo;
+            }
+        }
+    };
+    consider(Scalar{0});
+    for (const double flo : table.getFloAxis()) {
+        if (flo > 0.0 && flo < flo_max) {
+            consider(static_cast<Scalar>(flo));
+        }
+    }
+    consider(flo_max);
+    return margin;
+}
+
+template<class Scalar>
+detail::MaxFlowingThp<Scalar> VFPHelpers<Scalar>::
+maxFlowingThp(const VFPProdTable& table,
+              const Scalar wfr,
+              const Scalar gfr,
+              const Scalar alq,
+              const Scalar ipr_a,
+              const Scalar ipr_b,
+              const Scalar bhp_limit,
+              const std::function<Scalar(const Scalar, const Scalar)>& adjust_bhp)
+{
+    detail::MaxFlowingThp<Scalar> out;
+    auto margin = [&](const Scalar thp, Scalar* flo = nullptr) {
+        return liftMargin(table, thp, wfr, gfr, alq, ipr_a, ipr_b, bhp_limit, adjust_bhp, flo);
+    };
+
+    // Bracket: the highest THP knot at which the well can flow. Scanned from
+    // the top, since a table not monotone in THP can have flowing knots above
+    // non-flowing ones.
+    const auto& thps = table.getTHPAxis();
+    int k = static_cast<int>(thps.size()) - 1;
+    while (k >= 0 && margin(static_cast<Scalar>(thps[k])) > Scalar{0}) {
+        --k;
+    }
+    if (k < 0) {
+        return out;   // cannot flow anywhere in the table
+    }
+    out.flows = true;
+
+    Scalar lo = static_cast<Scalar>(thps[k]);
+    if (k == static_cast<int>(thps.size()) - 1) {
+        out.capped = true;
+    } else {
+        // Refine inside [thps[k], thps[k+1]]: margin <= 0 at lo, > 0 at hi.
+        Scalar hi = static_cast<Scalar>(thps[k + 1]);
+        const Scalar tol = Scalar{1.0e-6} * (hi - lo);
+        for (int it = 0; it < 100 && hi - lo > tol; ++it) {
+            const Scalar mid = Scalar{0.5} * (lo + hi);
+            if (margin(mid) <= Scalar{0}) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+    }
+    out.thp = lo;
+    Scalar flo = 0;
+    margin(lo, &flo);
+    out.flo = flo;
+    out.bhp = (ipr_a - flo) / ipr_b;
+    return out;
 }
 
 namespace detail {

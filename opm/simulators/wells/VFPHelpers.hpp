@@ -59,6 +59,70 @@ template<class Scalar>
 VFPEvaluation<Scalar> operator*(Scalar lhs, const VFPEvaluation<Scalar>& rhs);
 
 /**
+ * What a slope-limited lookup (VFPHelpers::interpolateWithSlopeLimit(),
+ * VFPProdProperties::bhp_with_slope_limit()) had to do to keep the tubing
+ * curve flatter than the well's own IPR.
+ *
+ * A production tubing curve is U-shaped in FLO: falling on the low-rate,
+ * liquid-loading branch, then rising once friction dominates. Where it falls
+ * faster than the well's own IPR, the two can cross more than once and the
+ * well has no stable operating point there. A slope-limited lookup replaces
+ * that stretch with the linear extrapolation of the first interval flat
+ * enough to guarantee a single crossing.
+ */
+enum class SlopeLimit
+{
+    //! Left alone: this interval is already flatter than the IPR, so the
+    //! result is exactly what the plain lookup would have given.
+    Unflattened,
+    //! Flattened, with the steep run reaching the first FLO interval -- the
+    //! ordinary U-shaped case, where the construction is continuous in FLO.
+    Bridged,
+    //! Flattened, but the steep run starts above the first interval: some
+    //! interval below this one is flat, so the curve is not U-shaped and the
+    //! flattened curve has a jump somewhere below this FLO. Still returned,
+    //! since the local value is as good as in the Bridged case, but the
+    //! caller should not trust a solve that converged here.
+    NonMonotone,
+    //! No interval up to the end of the FLO axis is flat enough; the slope is
+    //! pinned at the limit itself. The table and this well's IPR cannot be
+    //! reconciled anywhere on the axis.
+    Clamped,
+};
+
+/**
+ * A slope-limited lookup's value and derivatives, plus what it had to do.
+ */
+template<class Scalar>
+struct SlopeLimitedEvaluation
+{
+    VFPEvaluation<Scalar> evaluation{};
+    SlopeLimit limit{SlopeLimit::Unflattened};
+};
+
+/**
+ * Where a well stops being able to lift: see VFPHelpers::maxFlowingThp().
+ */
+template<class Scalar>
+struct MaxFlowingThp
+{
+    /// The well can flow at the table's lowest THP. If not, nothing below
+    /// is meaningful: the well cannot operate anywhere within the table.
+    bool flows{false};
+    /// The well can still flow at the table's highest THP: thp is then that
+    /// value, a lower bound on the true maximum the table cannot resolve.
+    bool capped{false};
+    /// The highest THP at which the well can flow.
+    Scalar thp{0};
+    /// The operating point there: FLO along the table's own (positive) axis,
+    /// and the well's bhp on its IPR. At an interior maximum this is where
+    /// the IPR just touches the tubing curve; its rate is the lowest stable
+    /// rate the well can have.
+    Scalar flo{0};
+    Scalar bhp{0};
+};
+
+/**
  * Helper struct for linear interpolation
  */
 template<class Scalar>
@@ -165,6 +229,39 @@ public:
                                                      const detail::InterpData<Scalar>& flo_i,
                                                      const detail::InterpData<Scalar>& thp_i);
 
+    /**
+     * interpolate() with the curve's own slope in FLO limited to \p max_slope
+     * -- see detail::SlopeLimit for what that means and why.
+     *
+     * \p max_slope is d(bhp)/d(FLO) of the well's own IPR, oriented along the
+     * table's own (positive, increasing) FLO axis and so negative for a
+     * producer, with whatever safety margin the caller wants already folded
+     * in: a curve exactly parallel to the IPR still admits no unique
+     * crossing, so the caller should pass a slightly *less* negative value
+     * than the bare IPR slope.
+     *
+     * Where the interval containing \p flo is already flatter than that, the
+     * result is exactly interpolate()'s, flagged Unflattened. Where it is
+     * not, the walk moves up the FLO axis to the first interval that is, and
+     * returns that interval's linear extrapolation back to \p flo -- value
+     * and all five partials from the same line, so the pair stays consistent
+     * (unlike clipping the derivative alone, which leaves the linearisation
+     * describing a different function than the value does).
+     *
+     * \p flo is the query FLO oriented along the table's own axis (positive),
+     * i.e. already sign-flipped from OPM's negative-for-production rates, and
+     * must be the same value \p flo_i was found for.
+     */
+    static detail::SlopeLimitedEvaluation<Scalar>
+    interpolateWithSlopeLimit(const VFPProdTable& table,
+                              const Scalar flo,
+                              const detail::InterpData<Scalar>& flo_i,
+                              const detail::InterpData<Scalar>& thp_i,
+                              const detail::InterpData<Scalar>& wfr_i,
+                              const detail::InterpData<Scalar>& gfr_i,
+                              const detail::InterpData<Scalar>& alq_i,
+                              const Scalar max_slope);
+
     static detail::VFPEvaluation<Scalar> bhp(const VFPProdTable& table,
                                              const Scalar aqua,
                                              const Scalar liquid,
@@ -215,6 +312,58 @@ public:
                      const Scalar ipr_a,
                      const Scalar ipr_b,
                      const std::function<Scalar(const Scalar)>& adjust_bhp);
+
+    /**
+     * How far a well is from being able to lift at \p thp:
+     *
+     *   F(thp) = min over FLO of [ adjust_bhp(table bhp(thp, FLO), thp) - bhp_IPR(FLO) ]
+     *
+     * over the FLO the well can reach without going below \p bhp_limit, where
+     * bhp_IPR is the well's IPR, in the same FLO terms intersectWithIPR() uses:
+     * flo = ipr_a - ipr_b * bhp (production positive, ipr_b > 0), so
+     * bhp_IPR(FLO) = (ipr_a - FLO) / ipr_b. F <= 0 means the IPR reaches the
+     * tubing curve somewhere, i.e. the well can flow at this THP; the more
+     * negative, the more margin.
+     *
+     * wfr, gfr and alq are held fixed. With them fixed the table is piecewise
+     * linear in FLO and the IPR is linear, so the minimum is taken over the
+     * FLO knots, FLO = 0 and the FLO at \p bhp_limit: exact, and table
+     * lookups only. \p adjust_bhp maps a table bhp to an actual bhp at a given
+     * THP (datum depth, WVFPDP), as in intersectWithIPR().
+     *
+     * \p flo_at_min, if not null, receives the FLO where the minimum is taken.
+     * Returns +infinity for an IPR that cannot produce at all above \p bhp_limit.
+     */
+    static Scalar liftMargin(const VFPProdTable& table,
+                             const Scalar thp,
+                             const Scalar wfr,
+                             const Scalar gfr,
+                             const Scalar alq,
+                             const Scalar ipr_a,
+                             const Scalar ipr_b,
+                             const Scalar bhp_limit,
+                             const std::function<Scalar(const Scalar, const Scalar)>& adjust_bhp,
+                             Scalar* flo_at_min = nullptr);
+
+    /**
+     * The highest THP within the table's THP range at which a well with this
+     * IPR can flow: the largest thp with liftMargin(thp) <= 0. See
+     * detail::MaxFlowingThp for what is returned.
+     *
+     * The table need not be monotone in THP, so F is evaluated at every THP
+     * knot first to bracket the highest one where the well can flow, and the
+     * crossing is then refined by bisection inside the interval above it.
+     * Everything is table lookups; no well solve is involved.
+     */
+    static detail::MaxFlowingThp<Scalar>
+    maxFlowingThp(const VFPProdTable& table,
+                  const Scalar wfr,
+                  const Scalar gfr,
+                  const Scalar alq,
+                  const Scalar ipr_a,
+                  const Scalar ipr_b,
+                  const Scalar bhp_limit,
+                  const std::function<Scalar(const Scalar, const Scalar)>& adjust_bhp);
 };
 
 } // namespace

@@ -795,3 +795,305 @@ const double reference[] = {
 };
 
 BOOST_AUTO_TEST_SUITE_END() // Integration tests//
+
+BOOST_AUTO_TEST_SUITE(SlopeLimitTests)
+
+namespace {
+
+// One thp row (20 bar) over flo = 10..50 m3/d, bhp = 30, 20, 15, 25, 40 bar:
+// a liquid-loading branch falling at -1 then -0.5 bar/(m3/d), a minimum at
+// flo = 30, then the friction-dominated rise at +1 and +1.5.
+const std::string kHumpedVfpProd = R"(
+VFPPROD
+     7     250.00      OIL        WCT         GOR         THP        GRAT      METRIC   BHP      /
+       10.0  20.0  30.0  40.0  50.0 /
+      20.00 /
+      0.000 /
+       100.0 /
+        0.0 /
+  1  1  1  1    30.0   20.0   15.0   25.0   40.0 /
+)";
+
+Opm::VFPProdProperties<double> humpedProps(const Opm::VFPProdTable& table)
+{
+    Opm::VFPProdProperties<double> props;
+    props.addTable(table);
+    return props;
+}
+
+// The table is in METRIC, so everything below is converted on the way in and
+// back out again on the way to a comparison.
+constexpr double m3d = 1.0 / 86400.0;          // 1 m3/day in SI
+constexpr double bar = 1.0e5;                  // 1 bar in SI
+
+// Production rates are negative in OPM, and this table's FLO type is OIL, so
+// only the oil rate matters for where on the flo axis a lookup lands.
+std::array<double, 3> oilRate(const double flo_m3d)
+{
+    return {0.0, -flo_m3d * m3d, 0.0};   // aqua, liquid, vapour
+}
+
+} // namespace
+
+// Off the falling branch the limit is inert: a limited lookup must return
+// precisely what bhp() itself does, not merely something close to it.
+BOOST_AUTO_TEST_CASE(FlatBranchIsUntouched)
+{
+    const auto deck = Opm::Parser{}.parseString(kHumpedVfpProd);
+    const Opm::VFPProdTable table(deck["VFPPROD"].front(), false, Opm::UnitSystem{});
+    const auto props = humpedProps(table);
+
+    // -1.5 bar/(m3/d) is steeper than every segment of this table, so nothing
+    // anywhere can trip the limit.
+    const double limit = -1.5 * bar / m3d;
+    for (const double flo : {12.0, 25.0, 35.0, 45.0}) {
+        const auto q = oilRate(flo);
+        const double plain = props.bhp(table.getTableNum(), q[0], q[1], q[2],
+                                       20.0 * bar, 0.0, 0.0, 0.0, false);
+        const auto limited = props.bhp_with_slope_limit(table.getTableNum(), q[0], q[1], q[2],
+                                                        20.0 * bar, 0.0, 0.0, 0.0, false, limit);
+        BOOST_CHECK_EQUAL(limited.evaluation.value, plain);
+        BOOST_CHECK(limited.limit == Opm::detail::SlopeLimit::Unflattened);
+    }
+}
+
+// On the falling branch the [10,20] segment (-1) is steeper than the limit
+// while [20,30] (-0.5) is not, so a query there must come back as the
+// backward extrapolation of [20,30]: bhp = 30 - 0.5*flo.
+BOOST_AUTO_TEST_CASE(SteepBranchExtrapolatesTheNextFlatInterval)
+{
+    const auto deck = Opm::Parser{}.parseString(kHumpedVfpProd);
+    const Opm::VFPProdTable table(deck["VFPPROD"].front(), false, Opm::UnitSystem{});
+    const auto props = humpedProps(table);
+
+    const double limit = -0.75 * bar / m3d;   // between -1 and -0.5
+    for (const double flo : {12.0, 15.0, 18.0}) {
+        const auto q = oilRate(flo);
+        const auto limited = props.bhp_with_slope_limit(table.getTableNum(), q[0], q[1], q[2],
+                                                        20.0 * bar, 0.0, 0.0, 0.0, false, limit);
+        BOOST_CHECK(limited.limit == Opm::detail::SlopeLimit::Bridged);
+        BOOST_CHECK_CLOSE(limited.evaluation.value, (30.0 - 0.5 * flo) * bar, 1e-8);
+        // The derivative must describe the same line the value came from.
+        BOOST_CHECK_CLOSE(limited.evaluation.dflo, -0.5 * bar / m3d, 1e-8);
+    }
+}
+
+// Continuity where the flattened stretch hands back over to the real curve:
+// the two one-sided limits at flo = 20 must agree, and agree with the table's
+// own value there (20 bar).
+BOOST_AUTO_TEST_CASE(ContinuousWhereFlatteningStops)
+{
+    const auto deck = Opm::Parser{}.parseString(kHumpedVfpProd);
+    const Opm::VFPProdTable table(deck["VFPPROD"].front(), false, Opm::UnitSystem{});
+    const auto props = humpedProps(table);
+
+    const double limit = -0.75 * bar / m3d;
+    const double eps = 1.0e-6;
+    const auto below = oilRate(20.0 - eps);
+    const auto above = oilRate(20.0 + eps);
+
+    const auto lo = props.bhp_with_slope_limit(table.getTableNum(), below[0], below[1], below[2],
+                                               20.0 * bar, 0.0, 0.0, 0.0, false, limit);
+    const auto hi = props.bhp_with_slope_limit(table.getTableNum(), above[0], above[1], above[2],
+                                               20.0 * bar, 0.0, 0.0, 0.0, false, limit);
+
+    BOOST_CHECK(lo.limit == Opm::detail::SlopeLimit::Bridged);
+    BOOST_CHECK(hi.limit == Opm::detail::SlopeLimit::Unflattened);
+    BOOST_CHECK_CLOSE(lo.evaluation.value, hi.evaluation.value, 1e-4);
+    BOOST_CHECK_CLOSE(lo.evaluation.value, 20.0 * bar, 1e-4);
+}
+
+// When nothing on the axis is flat enough the slope is pinned at the limit
+// itself, and the value still describes that same line.
+BOOST_AUTO_TEST_CASE(ClampedWhenNoIntervalIsFlatEnough)
+{
+    const auto deck = Opm::Parser{}.parseString(kHumpedVfpProd);
+    const Opm::VFPProdTable table(deck["VFPPROD"].front(), false, Opm::UnitSystem{});
+    const auto props = humpedProps(table);
+
+    // Flatter than every segment of this table, including the rising ones.
+    const double limit = 2.0 * bar / m3d;
+    const auto q = oilRate(15.0);
+    const auto limited = props.bhp_with_slope_limit(table.getTableNum(), q[0], q[1], q[2],
+                                                    20.0 * bar, 0.0, 0.0, 0.0, false, limit);
+    BOOST_CHECK(limited.limit == Opm::detail::SlopeLimit::Clamped);
+    BOOST_CHECK_CLOSE(limited.evaluation.dflo, limit, 1e-8);
+    // Anchored on its own interval's left-hand end: 30 bar at flo = 10.
+    BOOST_CHECK_CLOSE(limited.evaluation.value, (30.0 * bar) + limit * (5.0 * m3d), 1e-8);
+}
+
+BOOST_AUTO_TEST_SUITE_END() // SlopeLimitTests
+
+BOOST_AUTO_TEST_SUITE(MaxFlowingThpTests)
+
+namespace {
+
+// FLO = oil rate. Rows at THP 10 and 30 bar; the 30 bar row is the 10 bar row
+// + 20 bar, so the table rises by exactly 1 bar per bar of THP. Each row has a
+// minimum at FLO = 30 (bhp 20, 12, 9, 15, 26 at 10 bar), and below the first
+// knot extrapolates to 28 bar at FLO = 0.
+const std::string kTwoThpVfpProd = R"(
+VFPPROD
+     8     250.00      OIL        WCT         GOR         THP        GRAT      METRIC   BHP      /
+       10.0  20.0  30.0  40.0  50.0 /
+      10.00  30.00 /
+      0.000 /
+       100.0 /
+        0.0 /
+  1  1  1  1    20.0   12.0    9.0   15.0   26.0 /
+  2  1  1  1    40.0   32.0   29.0   35.0   46.0 /
+)";
+
+// As above, but with a THP row at 20 bar that needs *more* bhp than the one at
+// 30 bar: +25 and +15 bar over the 10 bar row.
+const std::string kNonMonotoneThpVfpProd = R"(
+VFPPROD
+     9     250.00      OIL        WCT         GOR         THP        GRAT      METRIC   BHP      /
+       10.0  20.0  30.0  40.0  50.0 /
+      10.00  20.00  30.00 /
+      0.000 /
+       100.0 /
+        0.0 /
+  1  1  1  1    20.0   12.0    9.0   15.0   26.0 /
+  2  1  1  1    45.0   37.0   34.0   40.0   51.0 /
+  3  1  1  1    35.0   27.0   24.0   30.0   41.0 /
+)";
+
+constexpr double m3d = 1.0 / 86400.0;
+constexpr double bar = 1.0e5;
+
+Opm::VFPProdTable parseTable(const std::string& text)
+{
+    const auto deck = Opm::Parser{}.parseString(text);
+    return Opm::VFPProdTable(deck["VFPPROD"].front(), false, Opm::UnitSystem{});
+}
+
+// A straight-line IPR with productivity 2 m3/day/bar and shut-in pressure
+// shutin_bar: FLO = 2 * (shutin - bhp) in the table's own (positive) sense.
+struct Ipr { double a; double b; };
+Ipr ipr(const double shutin_bar)
+{
+    return {2.0 * shutin_bar * m3d, 2.0 * m3d / bar};
+}
+
+const auto kNoAdjustment = [](const double bhp, const double) { return bhp; };
+
+Opm::detail::MaxFlowingThp<double>
+maxThp(const Opm::VFPProdTable& table, const Ipr& i, const double bhp_limit_bar,
+       const std::function<double(double, double)>& adjust = kNoAdjustment)
+{
+    return Opm::VFPHelpers<double>::maxFlowingThp(table, 0.0, 100.0, 0.0,
+                                                  i.a, i.b, bhp_limit_bar * bar, adjust);
+}
+
+// The highest THP (on a fine grid) where some admissible FLO has the table
+// bhp at or below the IPR's, found by brute force over a fine FLO grid.
+double bruteForceMaxThp(const Opm::VFPProdTable& table, const Ipr& i, const double bhp_limit_bar)
+{
+    using H = Opm::VFPHelpers<double>;
+    const double flo_max = i.a - i.b * bhp_limit_bar * bar;
+    double best = -1.0;
+    const auto& thps = table.getTHPAxis();
+    for (double thp = thps.front(); thp <= thps.back() + 1e-9; thp += 0.001 * bar) {
+        const auto thp_i = H::findInterpData(thp, thps);
+        const auto wfr_i = H::findInterpData(0.0, table.getWFRAxis());
+        const auto gfr_i = H::findInterpData(100.0, table.getGFRAxis());
+        const auto alq_i = H::findInterpData(0.0, table.getALQAxis());
+        for (int n = 0; n <= 2000; ++n) {
+            const double flo = flo_max * n / 2000.0;   // both ends included
+            const auto flo_i = H::findInterpData(flo, table.getFloAxis());
+            const double required = H::interpolate(table, flo_i, thp_i, wfr_i, gfr_i, alq_i).value;
+            if (required <= (i.a - flo) / i.b) {
+                best = thp;
+                break;
+            }
+        }
+    }
+    return best;
+}
+
+} // namespace
+
+// With shut-in at 40 bar the IPR is bhp = 40 - FLO/2. At THP t the table needs
+// row10(FLO) + (t - 10), so the well can flow while t <= 50 - FLO/2 - row10(FLO)
+// for some FLO: 22, 25, 28, 26, 15, -1 at FLO = 0, 10, ..., 50. The maximum is
+// 28 bar, touching at FLO = 20, bhp = 30 bar.
+BOOST_AUTO_TEST_CASE(InteriorMaximumTouchesAtTheBestKnot)
+{
+    const auto table = parseTable(kTwoThpVfpProd);
+    const auto r = maxThp(table, ipr(40.0), 1.0);
+    BOOST_REQUIRE(r.flows);
+    BOOST_CHECK(!r.capped);
+    BOOST_CHECK_CLOSE(r.thp, 28.0 * bar, 1e-4);
+    BOOST_CHECK_CLOSE(r.flo, 20.0 * m3d, 1e-8);
+    BOOST_CHECK_CLOSE(r.bhp, 30.0 * bar, 1e-8);
+    BOOST_CHECK_CLOSE(r.thp, bruteForceMaxThp(table, ipr(40.0), 1.0), 0.01);
+
+    // The margin itself: negative (can flow) below the maximum, positive above.
+    using H = Opm::VFPHelpers<double>;
+    const auto i = ipr(40.0);
+    BOOST_CHECK_LT(H::liftMargin(table, 27.0 * bar, 0.0, 100.0, 0.0, i.a, i.b, bar, kNoAdjustment), 0.0);
+    BOOST_CHECK_GT(H::liftMargin(table, 29.0 * bar, 0.0, 100.0, 0.0, i.a, i.b, bar, kNoAdjustment), 0.0);
+}
+
+// A strong well (shut-in 60 bar) still flows at the table's highest THP: the
+// answer is that THP, flagged as a lower bound.
+BOOST_AUTO_TEST_CASE(CappedAtTheTablesHighestThp)
+{
+    const auto table = parseTable(kTwoThpVfpProd);
+    const auto r = maxThp(table, ipr(60.0), 1.0);
+    BOOST_REQUIRE(r.flows);
+    BOOST_CHECK(r.capped);
+    BOOST_CHECK_EQUAL(r.thp, 30.0 * bar);
+}
+
+// A weak well (shut-in 15 bar) cannot reach the tubing curve even at the
+// lowest THP.
+BOOST_AUTO_TEST_CASE(CannotFlowAnywhereInTheTable)
+{
+    const auto table = parseTable(kTwoThpVfpProd);
+    const auto r = maxThp(table, ipr(40.0 - 25.0), 1.0);
+    BOOST_CHECK(!r.flows);
+    // An IPR that cannot produce above its bhp limit at all.
+    const auto s = maxThp(table, ipr(40.0), 45.0);
+    BOOST_CHECK(!s.flows);
+}
+
+// A bhp limit of 32 bar caps FLO at 2 * (40 - 32) = 16: the best admissible
+// point is then FLO = 16 itself (row10 = 15.2 there), giving
+// 50 - 8 - 15.2 = 26.8 bar, at the bhp limit.
+BOOST_AUTO_TEST_CASE(BhpLimitRestrictsTheReachableFlo)
+{
+    const auto table = parseTable(kTwoThpVfpProd);
+    const auto r = maxThp(table, ipr(40.0), 32.0);
+    BOOST_REQUIRE(r.flows);
+    BOOST_CHECK(!r.capped);
+    BOOST_CHECK_CLOSE(r.thp, 26.8 * bar, 1e-4);
+    BOOST_CHECK_CLOSE(r.bhp, 32.0 * bar, 1e-8);
+    BOOST_CHECK_CLOSE(r.thp, bruteForceMaxThp(table, ipr(40.0), 32.0), 0.01);
+}
+
+// The 20 bar row needs more bhp than the 30 bar row. The well cannot flow at
+// 20 bar but can at 30 bar, so the highest flowing THP is 30 bar; a search
+// working upwards from the lowest THP would stop short near 10 bar.
+BOOST_AUTO_TEST_CASE(TableNotMonotoneInThp)
+{
+    const auto table = parseTable(kNonMonotoneThpVfpProd);
+    const auto r = maxThp(table, ipr(40.0), 1.0);
+    BOOST_REQUIRE(r.flows);
+    BOOST_CHECK(r.capped);
+    BOOST_CHECK_EQUAL(r.thp, 30.0 * bar);
+}
+
+// Lowering every table bhp by 1 bar (a datum-depth correction, say) buys
+// exactly 1 bar of THP on this table.
+BOOST_AUTO_TEST_CASE(BhpAdjustmentShiftsTheMaximum)
+{
+    const auto table = parseTable(kTwoThpVfpProd);
+    const auto r = maxThp(table, ipr(40.0), 1.0,
+                          [](const double bhp, const double) { return bhp - 1.0 * bar; });
+    BOOST_REQUIRE(r.flows);
+    BOOST_CHECK_CLOSE(r.thp, 29.0 * bar, 1e-4);
+}
+
+BOOST_AUTO_TEST_SUITE_END() // MaxFlowingThpTests
