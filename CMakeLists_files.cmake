@@ -1392,6 +1392,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/MultisegmentWellGeneric.hpp
   opm/simulators/wells/MultisegmentWellPrimaryVariables.hpp
   opm/simulators/wells/MultisegmentWellSegments.hpp
+  opm/simulators/wells/NetworkSolve.hpp
   opm/simulators/wells/ParallelPAvgCalculator.hpp
   opm/simulators/wells/ParallelPAvgDynamicSourceData.hpp
   opm/simulators/wells/ParallelWBPCalculation.hpp
