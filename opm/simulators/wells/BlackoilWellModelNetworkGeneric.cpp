@@ -541,6 +541,18 @@ solveGroupTree(const Network::ExtNetwork& network,
         log(fmt::format("Network: solving the production network via the group-tree "
                         "balancer is not possible at report step {} ({}); using the "
                         "relaxed update.", reportStepIdx, why));
+        // TEMPORARY: the relaxed fixed-point update is to go; make every use
+        // of it visible.
+        if (well_model_.comm().rank() == 0) {
+            const auto msg = fmt::format("Network: the group-tree solve under {} gave up at report step {} "
+                                         "({}); the relaxed fixed-point update is used.",
+                                         root.name(), reportStepIdx, why);
+            if (well_model_.groupStateHelper().hasDeferredLogger()) {
+                well_model_.groupStateHelper().deferredLogger().warning("NETWORK_FIXED_POINT_FALLBACK", msg);
+            } else {
+                OpmLog::warning(msg);
+            }
+        }
         return std::optional<GroupTreeSolve>{};
     };
 
@@ -740,6 +752,82 @@ solveGroupTree(const Network::ExtNetwork& network,
             ++num_candidates;
         }
     }
+    // DEBUG: once per network root and report step, how the wells under this
+    // network's leaf groups end up (or do not end up) in the solve.
+    if (group_tree_debug_logged_.insert({root.name(), reportStepIdx}).second) {
+        const auto kindName = [](const auto kind) {
+            switch (kind) {
+            case Sys::WellKind::Pinned: return "pinned";
+            case Sys::WellKind::Group: return "group";
+            case Sys::WellKind::Thp: return "thp";
+            }
+            return "?";
+        };
+        const auto catName = [](const ProdNodeModeCategory c) {
+            switch (c) {
+            case ProdNodeModeCategory::Group: return "Group";
+            case ProdNodeModeCategory::Individual: return "Individual";
+            case ProdNodeModeCategory::None: return "None";
+            case ProdNodeModeCategory::Transparent: return "Transparent";
+            }
+            return "?";
+        };
+        log(fmt::format("GroupTreeDebug root {} step {}: {} network nodes, {} flat entries, {} wells in the solve",
+                        root.name(), reportStepIdx, order.size(), flat.size(), system.numWells()));
+        for (std::size_t n = 0; n < order.size(); ++n) {
+            std::string wells;
+            const bool is_group = schedule.hasGroup(order[n], reportStepIdx);
+            if (is_group) {
+                for (const auto& w : schedule.getGroup(order[n], reportStepIdx).wells()) {
+                    wells += " " + w;
+                }
+            }
+            log(fmt::format("GroupTreeDebug   node {} {} ({}; leaf {}){}{}", n, order[n],
+                            is_group ? "group" : "not a group",
+                            network.downtree_branches(order[n]).empty() ? "yes" : "no",
+                            wells.empty() ? "" : "; wells:", wells));
+        }
+        for (const auto& e : flat) {
+            std::string own, children;
+            for (const auto& w : e.ownWells) { own += " " + w.name; }
+            for (const auto& c : e.activeChildren) { children += " " + c.name; }
+            log(fmt::format("GroupTreeDebug   flat {} ({}, mode {}, target {:.5g}){}{}{}{}{}", e.name,
+                            e.type == ProdNodeType::Well ? "well" : "group",
+                            static_cast<int>(e.mode),
+                            e.target * unit::day,
+                            own.empty() ? "" : "; own:", own, children.empty() ? "" : "; children:", children,
+                            e.satelliteRates.has_value() ? "; satellite" : ""));
+        }
+        std::set<std::string> in_solve;
+        for (const auto& w : system.wells()) {
+            in_solve.insert(w.name);
+            log(fmt::format("GroupTreeDebug   solve well {}: {}, node {}{}", w.name, kindName(w.kind), w.node,
+                            w.reopen_candidate ? ", candidate" : ""));
+        }
+        for (std::size_t n = 1; n < order.size(); ++n) {
+            if (!schedule.hasGroup(order[n], reportStepIdx)) {
+                continue;
+            }
+            for (const auto& w : schedule.getGroup(order[n], reportStepIdx).wells()) {
+                if (in_solve.count(w) > 0) {
+                    continue;
+                }
+                const auto t = balancedTree.find(w);
+                const auto d = wellNetworkData.find(w);
+                log(fmt::format("GroupTreeDebug   NOT in solve: {} at node {}: balanced tree {}, gather {}",
+                                w, order[n],
+                                t == balancedTree.end() ? std::string("absent")
+                                    : fmt::format("{} (parent {}, rate O/W/G {:.4g}/{:.4g}/{:.4g})",
+                                                  catName(t->second.modeCategory), t->second.parent,
+                                                  -t->second.rates[0] * unit::day, -t->second.rates[1] * unit::day,
+                                                  -t->second.rates[2] * unit::day),
+                                d == wellNetworkData.end() ? std::string("absent")
+                                    : fmt::format("has_ipr {}, stopped {}, trial {}", d->second.has_ipr,
+                                                  d->second.stopped, d->second.has_trial_ipr)));
+            }
+        }
+    }
+
     // Below a node table's first FLO value the fractions of its flow at the
     // previous converged solve apply; nodes without one get their wells'
     // reference fractions in finalize().
@@ -770,7 +858,19 @@ solveGroupTree(const Network::ExtNetwork& network,
             : NetworkSolve::solve(sys, start, kGroupTreeSolveParams<Scalar>, NetworkSolve::FullStep{});
     };
     auto result = solveSystem(system, guess);
+    // DEBUG: cap switches (iterations on which some Thp well changed between
+    // its cap and its tubing row) per solve.
+    log(fmt::format("GroupTreeSwitches pass flat converged {} iterations {} switches {}",
+                    result.converged ? 1 : 0, result.iterations, result.switches));
     if (!result.converged) {
+        // TEMPORARY diagnostics of the last iterations (NetworkSolve::kDiagnosticIterations).
+        log(fmt::format("Network diag: group-tree solve under {} at report step {} failed; "
+                        "{} nodes, {} wells, {} unknowns{}",
+                        root.name(), reportStepIdx, system.numNodes(), system.numWells(),
+                        system.size(), system.usesAnalyticJacobian() ? ", analytic Jacobian" : ""));
+        for (const auto& line : result.diagnostics) {
+            log(line);
+        }
         // A failure with reopen candidates: solve once more without them, so
         // that they stay stopped this round rather than the whole tree going
         // to the relaxed update.
@@ -832,6 +932,9 @@ solveGroupTree(const Network::ExtNetwork& network,
         refined.setStartFromResult(result);
         std::vector<Scalar> from(result.node_pressure.begin() + 1, result.node_pressure.end());
         auto refined_result = solveSystem(refined, from);
+        log(fmt::format("GroupTreeSwitches pass real converged {} iterations {} switches {}",
+                        refined_result.converged ? 1 : 0, refined_result.iterations,
+                        refined_result.switches));   // DEBUG
         bool cliff = false;
         if (!refined_result.converged) {
             bool retry = false;
@@ -884,6 +987,13 @@ solveGroupTree(const Network::ExtNetwork& network,
             }
         }
         if (!cliff && !refined_result.converged) {
+            // DEBUG: the failed real-table solve's diagnostics, as for a
+            // failed first pass.
+            log(fmt::format("Network diag: real-table solve under {} at report step {} failed (branches {})",
+                            root.name(), reportStepIdx, names));
+            for (const auto& line : refined_result.diagnostics) {
+                log(line);
+            }
             if (well_model_.comm().rank() == 0) {
                 const auto msg = fmt::format("Network: branches {} under {} at report step {} ended on "
                                              "the flattened (falling, low-flow) part of their tables, and "
@@ -911,6 +1021,140 @@ solveGroupTree(const Network::ExtNetwork& network,
                     num_candidates > 0 ? fmt::format(" ({} reopen candidates)", num_candidates)
                                        : std::string{}));
     const auto fractions = system.nodeFractions(result.well_phase_rates);
+    {   // DEBUG: the node flows and per-well rates of this converged solve
+        // (wells under this root that are not in it are dropped, so they show
+        // as absent rather than with an earlier solve's rates).
+        const auto flows = system.nodeFlowsFromWellRates(result.well_phase_rates);
+        for (std::size_t n = 1; n < order.size(); ++n) {
+            if (schedule.hasGroup(order[n], reportStepIdx)) {
+                for (const auto& wname : schedule.getGroup(order[n], reportStepIdx).wells()) {
+                    group_tree_debug_well_rates_.erase(wname);
+                }
+            }
+        }
+        for (std::size_t n = 1; n < order.size(); ++n) {
+            group_tree_debug_node_flows_[order[n]] = flows[n];
+        }
+        for (int w = 0; w < system.numWells(); ++w) {
+            group_tree_debug_well_rates_[system.wells()[w].name] = result.well_phase_rates[w];
+        }
+        // DEBUG: the state this solve hands on -- node pressures (the wells'
+        // THP limits at B4) with their liquid rate and GOR, and every well's
+        // kind, oil rate and bhp.
+        std::string nodes;
+        for (std::size_t n = 1; n < order.size(); ++n) {
+            const auto& q = flows[n];
+            nodes += fmt::format(" {} {:.2f} bar (L {:.0f}, GOR {:.0f})", order[n],
+                                 result.node_pressure[n] / unit::barsa,
+                                 (q[Sys::kOil] + q[Sys::kWater]) * unit::day,
+                                 q[Sys::kOil] > Scalar{0} ? q[Sys::kGas] / q[Sys::kOil] : Scalar{0});
+        }
+        std::string wells;
+        for (int w = 0; w < system.numWells(); ++w) {
+            const auto& well = system.wells()[w];
+            const char* kind = well.reopen_candidate ? "cand"
+                : (well.kind == Sys::WellKind::Thp ? "thp"
+                   : (well.kind == Sys::WellKind::Group ? "grp" : "pin"));
+            wells += fmt::format(" {} {} O/W/G {:.0f}/{:.0f}/{:.4g} bhp {:.2f};", well.name, kind,
+                                 result.well_phase_rates[w][Sys::kOil] * unit::day,
+                                 result.well_phase_rates[w][Sys::kWater] * unit::day,
+                                 result.well_phase_rates[w][Sys::kGas] * unit::day,
+                                 result.well_bhp[w] / unit::barsa);
+        }
+        log(fmt::format("GroupTreeState under {} at report step {}{}: nodes{}; wells{}", root.name(),
+                        reportStepIdx, num_candidates > 0 ? " (with candidates)" : "", nodes, wells));
+        // DEBUG: every Active (group-constrained) group of this solve: its
+        // target against the sum its target row holds, and each member's
+        // network-solve rates next to the well state's current ones.
+        const auto& pu = well_model_.phaseUsage();
+        const auto reports = system.activeNodeReports(result.well_phase_rates);
+        // The same sums from the well state's rates (members not in the well
+        // state count with their network-solve rates).
+        const auto stateRates = [&](const std::string& name, const std::array<Scalar, 3>& fallback) {
+            if (!well_model_.wellState().has(name)) {
+                return fallback;
+            }
+            const auto& ws = well_model_.wellState().well(name);
+            return std::array<Scalar, 3>{
+                -ws.surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx)],
+                -ws.surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx)],
+                -ws.surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx)]};
+        };
+        std::function<Scalar(const std::string&, const std::array<Scalar, 3>&)> stateTotal =
+            [&](const std::string& name, const std::array<Scalar, 3>& weights) {
+                Scalar sum = 0;
+                for (const auto& r : reports) {
+                    if (r.name != name) {
+                        continue;
+                    }
+                    for (const auto& m : r.members) {
+                        if (m.kind == 'c') {
+                            sum += m.efficiency * stateTotal(m.name, weights);
+                        } else {
+                            const auto q = stateRates(m.name, m.q);
+                            sum += m.efficiency * (weights[0] * q[0] + weights[1] * q[1] + weights[2] * q[2]);
+                        }
+                    }
+                }
+                return sum;
+            };
+        for (const auto& a : reports) {
+            log(fmt::format("GroupTreeActive under {} at report step {}: {} {} target {:.6g} sum {:.6g} m3/d "
+                            "(diff {:+.3g}): own wells {:.6g}, other members {:.6g}{}{}", root.name(),
+                            reportStepIdx, a.name, WellProducerCMode2String(a.mode), a.target * unit::day,
+                            a.total * unit::day, (a.total - a.target) * unit::day, a.own_total * unit::day,
+                            (a.total - a.own_total) * unit::day, a.has_row ? "" : ", no row (no own wells)",
+                            (a.has_row && a.own_total < Scalar{0}) ? ", NEGATIVE lambda" : ""));
+            log(fmt::format("GroupTreeActive   {} sum from well-state rates {:.6g} m3/d (diff to target {:+.3g})",
+                            a.name, stateTotal(a.name, a.weights) * unit::day,
+                            (stateTotal(a.name, a.weights) - a.target) * unit::day));
+            for (const auto& m : a.members) {
+                if (m.kind == 'c') {
+                    log(fmt::format("GroupTreeActive     group {} eff {:.4g}: sum {:.6g} m3/d", m.name,
+                                    m.efficiency, m.mode_rate * unit::day));
+                    continue;
+                }
+                std::string state = "not in well state";
+                if (well_model_.wellState().has(m.name)) {
+                    const auto& ws = well_model_.wellState().well(m.name);
+                    state = fmt::format("well state O/W/G {:.5g}/{:.5g}/{:.5g} bhp {:.3f} thp {:.3f} {}",
+                        -ws.surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx)] * unit::day,
+                        -ws.surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx)] * unit::day,
+                        -ws.surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx)] * unit::day,
+                        ws.bhp / unit::barsa, ws.thp / unit::barsa,
+                        WellProducerCMode2String(ws.production_cmode));
+                    // The network's bhp for it, and its IPR at the well
+                    // state's bhp (= its rates there if the IPR is anchored
+                    // at this state), with the IPR's slopes.
+                    const auto& sw = system.wells()[m.well];
+                    state += fmt::format("; net bhp {:.3f}; IPR at state bhp O/W/G {:.5g}/{:.5g}/{:.5g}, "
+                                         "slope O/W/G {:.4g}/{:.4g}/{:.4g} m3/d/bar",
+                                         result.well_bhp[m.well] / unit::barsa,
+                                         (sw.ipr_a[Sys::kOil] + sw.ipr_b[Sys::kOil] * ws.bhp) * unit::day,
+                                         (sw.ipr_a[Sys::kWater] + sw.ipr_b[Sys::kWater] * ws.bhp) * unit::day,
+                                         (sw.ipr_a[Sys::kGas] + sw.ipr_b[Sys::kGas] * ws.bhp) * unit::day,
+                                         sw.ipr_b[Sys::kOil] * unit::day * unit::barsa,
+                                         sw.ipr_b[Sys::kWater] * unit::day * unit::barsa,
+                                         sw.ipr_b[Sys::kGas] * unit::day * unit::barsa);
+                    const auto& gt = ws.use_group_target_fallback ? ws.group_target_fallback : ws.group_target;
+                    if (m.kind == 'g' || ws.production_cmode == Well::ProducerCMode::GRUP) {
+                        state += gt.has_value()
+                            ? fmt::format("; group target {} {} {:.6g} m3/d{}", gt->group_name,
+                                          Group::ProductionCMode2String(gt->production_cmode),
+                                          gt->target_value * unit::day,
+                                          ws.use_group_target_fallback ? " (fallback)" : "")
+                            : std::string("; no group target");
+                    }
+                }
+                log(fmt::format("GroupTreeActive     well {} {} eff {:.4g}{}: O/W/G {:.5g}/{:.5g}/{:.5g}, "
+                                "mode rate {:.6g} m3/d; {}", m.name,
+                                m.kind == 'g' ? "grp" : (m.kind == 't' ? "thp" : "pin"), m.efficiency,
+                                m.kind == 'g' ? fmt::format(" guide {:.4g}", m.guide_rate) : std::string{},
+                                m.q[Sys::kOil] * unit::day, m.q[Sys::kWater] * unit::day,
+                                m.q[Sys::kGas] * unit::day, m.mode_rate * unit::day, state));
+            }
+        }
+    }
     for (std::size_t n = 1; n < order.size() && result.converged; ++n) {
         if (fractions[n].has_value()) {
             group_tree_node_fractions_[order[n]] = *fractions[n];
@@ -1565,6 +1809,78 @@ assignNodeAndBranchValues(std::map<std::string, data::NodeData>& nodevalues,
                                             reportStepIdx,
                                             well_model_.comm());
     const auto& converged_pressures = converged.node_pressures;
+    // DEBUG: where GPR (the last network update's pressures) and GNETPR (this
+    // fixed-point recomputation from the final rates) differ, recompute the
+    // node's branch lookup in variants to show which difference causes it.
+    const auto& sched = well_model_.schedule();
+    if (well_model_.comm().rank() == 0) {
+        const auto& prod = *well_model_.getVFPProperties().getProd();
+        for (const auto& [node, gnetpr] : converged_pressures) {
+            const auto gpr_it = node_pressures_.find(node);
+            const auto br_it = converged.branch_data.find(node);
+            const auto up = network.uptree_branch(node);
+            if (gpr_it == node_pressures_.end() || br_it == converged.branch_data.end() || !up
+                || !up->vfp_table().has_value()) {
+                continue;
+            }
+            const Scalar gpr = gpr_it->second;
+            if (std::abs(gpr - gnetpr) < Scalar{0.5} * unit::barsa) {
+                continue;
+            }
+            const int table_id = *up->vfp_table();
+            const auto& table = prod.getTable(table_id);
+            const auto& b = br_it->second;   // production positive
+            const Scalar w = b.water_rate, o = b.oil_rate, g = b.gas_rate;
+            const Scalar alq = up->alq_value(VFPProdTable::ALQDimension(table.getALQType(), sched.getUnits())).value_or(0.0);
+            const std::string& up_node = up->uptree_node();
+            const Scalar up_gnetpr = converged_pressures.count(up_node) ? converged_pressures.at(up_node) : Scalar{0};
+            const Scalar up_gpr = node_pressures_.count(up_node) ? node_pressures_.at(up_node) : up_gnetpr;
+            const auto fb = group_tree_node_fractions_.find(node);
+            const Scalar fwfr = fb != group_tree_node_fractions_.end() ? fb->second[0] : Scalar{0};
+            const Scalar fgfr = fb != group_tree_node_fractions_.end() ? fb->second[1] : Scalar{0};
+            const Scalar flo = detail::getFlo(table, w, o, g);
+            const Scalar p_noclamp = prod.bhp(table_id, -w, -o, -g, up_gnetpr, alq, 0.0, 0.0, false);
+            const Scalar p_fallback = prod.bhp(table_id, -w, -o, -g, up_gnetpr, alq, fwfr, fgfr, false);
+            const Scalar p_from_gpr = prod.bhp(table_id, -w, -o, -g, up_gpr, alq, fwfr, fgfr, false);
+            std::string gt;
+            if (const auto f = group_tree_debug_node_flows_.find(node); f != group_tree_debug_node_flows_.end()) {
+                gt = fmt::format("; group-tree node flow O/W/G {:.5g}/{:.5g}/{:.5g} m3/d", f->second[0] * unit::day,
+                                 f->second[1] * unit::day, f->second[2] * unit::day);
+            }
+            if (sched.hasGroup(node, reportStepIdx)) {
+                for (const auto& wname : sched.getGroup(node, reportStepIdx).wells()) {
+                    const auto r = group_tree_debug_well_rates_.find(wname);
+                    gt += fmt::format("; {} group-tree O/W/G {}", wname, r == group_tree_debug_well_rates_.end()
+                        ? std::string("absent")
+                        : fmt::format("{:.5g}/{:.5g}/{:.5g}", r->second[0] * unit::day, r->second[1] * unit::day,
+                                      r->second[2] * unit::day));
+                    if (well_model_.wellState().has(wname)) {
+                        const auto& ws = well_model_.wellState().well(wname);
+                        const auto& pu = well_model_.phaseUsage();
+                        gt += fmt::format(" final {:.5g}/{:.5g}/{:.5g}",
+                            -ws.surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx)] * unit::day,
+                            -ws.surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx)] * unit::day,
+                            -ws.surface_rates[pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx)] * unit::day);
+                    }
+                }
+            }
+            OpmLog::debug(gt.empty() ? std::string{} : "  " + gt.substr(2));
+            OpmLog::debug(fmt::format(
+                "Node pressure check {} (up {}): GPR {:.3f} vs GNETPR {:.3f} bar (diff {:+.3f}); "
+                "unclamped {:.3f}, with fallback fractions {:.3f}, from upstream GPR {:.3f}; "
+                "rates O/W/G {:.5g}/{:.5g}/{:.5g} m3/d, FLO {:.5g} (axis {:.5g}..{:.5g}); "
+                "upstream GPR {:.3f} / GNETPR {:.3f} (THP axis {:.3f}..{:.3f}); fallback WFR/GFR {}; "
+                "table {} ALQ {:.4g}; add gas lift gas {}",
+                node, up_node, gpr / unit::barsa, gnetpr / unit::barsa, (gpr - gnetpr) / unit::barsa,
+                p_noclamp / unit::barsa, p_fallback / unit::barsa, p_from_gpr / unit::barsa,
+                o * unit::day, w * unit::day, g * unit::day, flo * unit::day,
+                table.getFloAxis().front() * unit::day, table.getFloAxis().back() * unit::day,
+                up_gpr / unit::barsa, up_gnetpr / unit::barsa,
+                table.getTHPAxis().front() / unit::barsa, table.getTHPAxis().back() / unit::barsa,
+                fb != group_tree_node_fractions_.end() ? fmt::format("{:.4g}/{:.4g}", fwfr, fgfr) : std::string("none"),
+                table_id, alq, network.node(node).add_gas_lift_gas() ? "yes" : "no"));
+        }
+    }
     converged_branchvalues = std::move(converged.branch_data);
     for (const auto& [node, converged_pressure] : converged_pressures) {
         auto it = nodevalues.find(node);

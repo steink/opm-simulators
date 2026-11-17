@@ -1493,15 +1493,68 @@ namespace Opm
         rhs[0][SPres] = -1.0;
 
         const BVectorWell x_well = this->linSys_.solve(rhs);
+        // DEBUG: the residual the well solve left, and what it does to the
+        // IPR. Under BHP control at ws.bhp the control row's residual is zero,
+        // so one Newton step at fixed bhp, -inv(D) R, gives the rates of the
+        // inflow at this bhp: q + dq, and ipr_a is off by dq.
+        const BVectorWell x_res = this->linSys_.solve(this->linSys_.residual());
+        Scalar max_scaled_residual = 0;
+        for (int seg = 0; seg < this->numberOfSegments(); ++seg) {
+            for (int comp_idx = 0; comp_idx < this->num_conservation_quantities_; ++comp_idx) {
+                max_scaled_residual = std::max(max_scaled_residual,
+                                               this->B_avg_[comp_idx] * std::abs(this->linSys_.residual()[seg][comp_idx]));
+            }
+        }
+        Scalar max_offset = 0;
+        std::string ipr_dq;
         constexpr int num_eq = MSWEval::numWellEq;
         for (int comp_idx = 0; comp_idx < this->num_conservation_quantities_; ++comp_idx){
             const EvalWell comp_rate = this->primary_variables_.getQs(comp_idx);
             const int idx = FluidSystem::activeCompToActivePhaseIdx(comp_idx);
+            Scalar dq = 0;
             for (size_t pvIdx = 0; pvIdx < num_eq; ++pvIdx) {
                 // well primary variable derivatives in EvalWell start at position Indices::numEq
                 ws.implicit_ipr_b[idx] -= x_well[0][pvIdx]*comp_rate.derivative(pvIdx+Indices::numEq);
+                dq -= x_res[0][pvIdx]*comp_rate.derivative(pvIdx+Indices::numEq);
             }
             ws.implicit_ipr_a[idx] = ws.implicit_ipr_b[idx]*ws.bhp - comp_rate.value();
+            if (ws.implicit_ipr_b[idx] != 0.0) {
+                max_offset = std::max(max_offset, std::abs(dq / ws.implicit_ipr_b[idx]));
+            }
+            ipr_dq += fmt::format(" {:.3g}", dq * unit::day);
+        }
+        if (this->regularize_ || max_scaled_residual > this->param_.tolerance_wells_
+            || max_offset > 0.01 * unit::barsa) {
+            deferred_logger.debug(fmt::format("IPR residual {}: scaled residual {:.2e} (tol {:.0e}, relaxed {:.0e}){}, "
+                                              "dq [{} ] Sm3/d, offset {:.3f} bar, rates [{:.4g} {:.4g} {:.4g}] Sm3/d",
+                                              this->name(), max_scaled_residual, this->param_.tolerance_wells_,
+                                              this->param_.relaxed_tolerance_flow_well_,
+                                              this->regularize_ ? " regularized" : "", ipr_dq,
+                                              max_offset / unit::barsa,
+                                              rates[0] * unit::day, rates.size() > 1 ? rates[1] * unit::day : 0.0,
+                                              rates.size() > 2 ? rates[2] * unit::day : 0.0));
+        }
+        // DEBUG: the IPR is anchored at the rates of the well's own unknowns
+        // (ipr_a + ipr_b*ws.bhp gives them back); report when those are not
+        // the well state's rates.
+        {
+            Scalar max_rel = 0;
+            std::string anchor, state;
+            for (int comp_idx = 0; comp_idx < this->num_conservation_quantities_; ++comp_idx) {
+                const Scalar q = this->primary_variables_.getQs(comp_idx).value();
+                const Scalar s = ws.surface_rates[FluidSystem::activeCompToActivePhaseIdx(comp_idx)];
+                const Scalar ref = std::max({std::abs(q), std::abs(s), Scalar{1} / unit::day});
+                max_rel = std::max(max_rel, std::abs(q - s) / ref);
+                anchor += fmt::format(" {:.5g}", -q * unit::day);
+                state += fmt::format(" {:.5g}", -s * unit::day);
+            }
+            if (max_rel > 1e-3) {
+                deferred_logger.debug(fmt::format("IPR anchor {}: rates of the well unknowns [{} ] vs well state "
+                                                  "[{} ] Sm3/d (comp order, max rel diff {:.2e}), bhp {:.3f} bar, "
+                                                  "cmode {}{}", this->name(), anchor, state, max_rel,
+                                                  ws.bhp / unit::barsa, WellProducerCMode2String(cmode),
+                                                  this->regularize_ ? ", regularized" : ""));
+            }
         }
         // reset cmode
         ws.production_cmode = cmode;

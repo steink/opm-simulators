@@ -19,6 +19,8 @@
 #ifndef OPM_NETWORK_SOLVE_HEADER_INCLUDED
 #define OPM_NETWORK_SOLVE_HEADER_INCLUDED
 
+#include <fmt/format.h>
+
 #include <dune/common/dynmatrix.hh>
 #include <dune/common/dynvector.hh>
 #include <dune/common/fmatrix.hh>
@@ -73,7 +75,14 @@ struct Result
     std::vector<Scalar> best_well_rate;
     std::vector<std::array<Scalar, 3>> best_well_phase_rates;
     std::vector<Scalar> best_well_bhp;
+    /// TEMPORARY diagnostics of a solve that did not converge: what the
+    /// system reports on its last kDiagnosticIterations iterations and its
+    /// final state (SystemBase::describeIteration(), describeState()).
+    std::vector<std::string> diagnostics;
 };
+
+/// TEMPORARY: how many of the last iterations of a failing solve are described.
+inline constexpr int kDiagnosticIterations = 10;
 
 /// Dense square system, solved by Dune. The networks this solves have tens of
 /// unknowns, so a dense direct solve is the whole story. Wrapped only to keep
@@ -146,6 +155,20 @@ public:
     /// Each well's phase rates and bhp.
     virtual std::vector<std::array<Scalar, 3>> wellPhaseRates(const State& x) const = 0;
     virtual State wellBhps(const State& x) const = 0;
+
+    /// TEMPORARY diagnostics, for a solve close to its iteration limit: lines
+    /// describing iteration \p it -- its worst residual rows and its Newton
+    /// step, before (\p dx_raw) and after (\p dx_limited) limitStep() -- and
+    /// the final state. Empty by default.
+    virtual std::vector<std::string> describeIteration(const int /*it*/, const State& /*x*/,
+                                                       const State& /*r*/,
+                                                       const State& /*dx_raw*/,
+                                                       const State& /*dx_limited*/,
+                                                       const bool /*controls_moved*/) const
+    {
+        return {};
+    }
+    virtual std::vector<std::string> describeState(const State& /*x*/) const { return {}; }
 };
 
 /// Take the Newton step as it comes.
@@ -237,6 +260,17 @@ solve(Sys& system,
     int switches = 0;
     auto best_x = x;
     Scalar best_worst = std::numeric_limits<Scalar>::infinity();
+    // TEMPORARY: described iterations of a solve that may be about to fail.
+    std::vector<std::string> diagnostics;
+    const int describe_from = max_iterations - kDiagnosticIterations + 1;
+    auto describe = [&](const int it, const auto& x_it, const auto& r_it, const auto& dx_raw,
+                        const auto& dx_limited, const bool moved) {
+        if (it < describe_from && it > 2) {   // DEBUG: also the first two, where it started
+            return;
+        }
+        auto lines = system.describeIteration(it, x_it, r_it, dx_raw, dx_limited, moved);
+        diagnostics.insert(diagnostics.end(), lines.begin(), lines.end());
+    };
     // An unconverged result: where it stopped, and its best iterate.
     auto unconverged = [&](const auto& x_end) {
         last.node_pressure = system.pressures(x_end);
@@ -246,6 +280,9 @@ solve(Sys& system,
         last.best_well_rate = system.wellRates(best_x);
         last.best_well_phase_rates = system.wellPhaseRates(best_x);
         last.best_well_bhp = system.wellBhps(best_x);
+        last.diagnostics = std::move(diagnostics);
+        const auto state = system.describeState(x_end);
+        last.diagnostics.insert(last.diagnostics.end(), state.begin(), state.end());
         return last;
     };
     for (int it = 1; it <= max_iterations; ++it) {
@@ -323,10 +360,14 @@ solve(Sys& system,
             negative[i] = -r[i];
         }
         if (!J.solve(negative, dx)) {
+            describe(describe_from, x, r, std::vector<Scalar>{}, std::vector<Scalar>{}, controls_moved);
+            diagnostics.push_back(fmt::format("iteration {}: singular Jacobian", it));
             return unconverged(x);
         }
 
+        const auto dx_raw = dx;
         dx = system.limitStep(x, dx);
+        describe(it, x, r, dx_raw, dx, controls_moved);
         // The residual jumps when a control switches, and that jump is not a
         // failure to make progress. Letting a globalisation veto it stalls the
         // active set instead of resolving it.

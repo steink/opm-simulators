@@ -129,6 +129,33 @@ refreshWellNetworkData(const double dt, const details::DomainScope scope)
         well->updateIPRImplicit(well_model_.simulator(),
                                 well_model_.groupStateHelper(),
                                 well_model_.wellState());
+        {   // DEBUG: the IPR's phase split (ipr_b, which ipr_a shares for a
+            // standard well) against the well state's, right after the refresh.
+            const auto& ws = well_model_.wellState().well(well->indexOfWell());
+            Scalar sum_b = 0, sum_q = 0;
+            for (std::size_t p = 0; p < ws.surface_rates.size(); ++p) {
+                sum_b += ws.implicit_ipr_b[p];
+                sum_q += ws.surface_rates[p];
+            }
+            Scalar max_diff = 0;
+            if (well->isProducer() && sum_b != Scalar{0} && sum_q != Scalar{0}) {
+                for (std::size_t p = 0; p < ws.surface_rates.size(); ++p) {
+                    max_diff = std::max(max_diff, std::abs(ws.implicit_ipr_b[p] / sum_b - ws.surface_rates[p] / sum_q));
+                }
+            }
+            if (max_diff > Scalar{0.01}) {
+                std::string ipr, rates, shares;
+                for (std::size_t p = 0; p < ws.surface_rates.size(); ++p) {
+                    ipr += fmt::format(" {:.5g}", -(ws.implicit_ipr_b[p] * ws.bhp - ws.implicit_ipr_a[p]) * unit::day);
+                    rates += fmt::format(" {:.5g}", -ws.surface_rates[p] * unit::day);
+                    shares += fmt::format(" {:.4g}/{:.4g}", ws.implicit_ipr_b[p] / sum_b, ws.surface_rates[p] / sum_q);
+                }
+                OpmLog::debug(fmt::format("IPR refresh {}: IPR at bhp {:.3f} bar [{} ] vs well state [{} ] Sm3/d "
+                                          "(active phase order); shares IPR/state [{} ], cmode {}",
+                                          well->name(), ws.bhp / unit::barsa, ipr, rates, shares,
+                                          WellProducerCMode2String(ws.production_cmode)));
+            }
+        }
         // A stopped producer's own implicit_ipr above is linearised
         // at its current, degenerate zero-rate state -- refresh a
         // separate, physically-grounded trial IPR (stopped_ipr_a/b)

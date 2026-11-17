@@ -346,6 +346,21 @@ public:
                              Scalar* flo_at_min = nullptr);
 
     /**
+     * TEMPORARY diagnostics: the points liftMargin() takes its minimum over,
+     * as {FLO, bhp the table requires (adjusted), bhp the IPR has available}.
+     */
+    static std::vector<std::array<Scalar, 3>>
+    liftMarginRows(const VFPProdTable& table,
+                   const Scalar thp,
+                   const Scalar wfr,
+                   const Scalar gfr,
+                   const Scalar alq,
+                   const Scalar ipr_a,
+                   const Scalar ipr_b,
+                   const Scalar bhp_limit,
+                   const std::function<Scalar(const Scalar, const Scalar)>& adjust_bhp);
+
+    /**
      * The highest THP within the table's THP range at which a well with this
      * IPR can flow: the largest thp with liftMargin(thp) <= 0. See
      * detail::MaxFlowingThp for what is returned.

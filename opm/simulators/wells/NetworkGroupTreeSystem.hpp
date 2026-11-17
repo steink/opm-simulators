@@ -27,6 +27,8 @@
 #include <opm/input/eclipse/Units/Units.hpp>
 #include <opm/material/densead/Evaluation.hpp>
 
+#include <fmt/format.h>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -1223,6 +1225,79 @@ public:
     const std::vector<ActiveNode>& activeNodes() const { return activeNodes_; }
     Scalar terminalPressure() const { return terminal_pressure_; }
 
+    /// DEBUG: one member of an Active node's target sum, at given well rates.
+    struct ActiveMemberReport
+    {
+        std::string name;
+        // 'g' group-controlled well, 't' Thp well, 'p' pinned well, 'c' nested
+        // Active node (q is then its subtree total, already efficiency-scaled).
+        char kind = 'p';
+        Scalar efficiency = 1;               // the member's weight in this node's sum
+        Scalar guide_rate = 0;               // 'g' only
+        std::array<Scalar, NP> q{};          // the well's own (pre-efficiency) rates
+        Scalar mode_rate = 0;                // q projected on this node's mode
+        int well = -1;                       // index into wells_ (not for 'c')
+    };
+    /// DEBUG: an Active node's target, its sum and its members at given well rates.
+    struct ActiveNodeReport
+    {
+        std::string name;
+        ::Opm::Well::ProducerCMode mode{::Opm::Well::ProducerCMode::CMODE_UNDEFINED};
+        Scalar target = 0;
+        Scalar total = 0;                    // the sum the target row compares with target
+        Scalar own_total = 0;                // the part of total from own (lambda-tied) wells
+        std::array<Scalar, NP> weights{};    // this node's mode, as phase weights
+        bool has_row = false;                // false: dropped by finalize() (no own wells)
+        std::vector<ActiveMemberReport> members;
+    };
+
+    /// DEBUG: every Active node's target against its sum at the well rates
+    /// \p q (a solve result's well_phase_rates), with the members of the sum.
+    std::vector<ActiveNodeReport> activeNodeReports(const std::vector<std::array<Scalar, NP>>& q) const
+    {
+        std::function<Scalar(int, const std::array<Scalar, NP>&)> total =
+            [&](const int k, const std::array<Scalar, NP>& weights) {
+                const auto& a = activeNodes_[k];
+                Scalar sum = 0;
+                for (const int w : a.own_wells) {
+                    sum += targetEfficiency(w) * projectOnMode(q[w], weights);
+                }
+                for (const auto& [w, eff] : a.member_wells) {
+                    sum += eff * projectOnMode(q[w], weights);
+                }
+                for (const auto& [child, eff] : a.active_children) {
+                    sum += eff * total(child, weights);
+                }
+                return sum;
+            };
+        std::vector<ActiveNodeReport> out;
+        for (int k = 0; k < numActiveNodes(); ++k) {
+            const auto& a = activeNodes_[k];
+            const auto weights = phaseWeights(a.mode, a.resv_coeff);
+            ActiveNodeReport r;
+            r.name = a.name;
+            r.mode = a.mode;
+            r.target = a.target;
+            r.total = total(k, weights);
+            r.has_row = k < static_cast<int>(lambda_slot_.size()) && lambda_slot_[k] >= 0;
+            r.weights = weights;
+            for (const int w : a.own_wells) {
+                r.members.push_back({wells_[w].name, 'g', targetEfficiency(w), wells_[w].guide_rate, q[w],
+                                     projectOnMode(q[w], weights), w});
+                r.own_total += targetEfficiency(w) * projectOnMode(q[w], weights);
+            }
+            for (const auto& [w, eff] : a.member_wells) {
+                r.members.push_back({wells_[w].name, wells_[w].kind == WellKind::Thp ? 't' : 'p', eff, Scalar{0},
+                                     q[w], projectOnMode(q[w], weights), w});
+            }
+            for (const auto& [child, eff] : a.active_children) {
+                r.members.push_back({activeNodes_[child].name, 'c', eff, Scalar{0}, {}, total(child, weights)});
+            }
+            out.push_back(std::move(r));
+        }
+        return out;
+    }
+
     /// The steepest d(bhp)/d(FLO) \p well's tubing curve may have before
     /// bhp_with_slope_limit() flattens it -- the well's own IPR slope in that
     /// same sense, with a margin. Along the IPR, FLO = flo(ipr_a + ipr_b*bhp),
@@ -1664,6 +1739,438 @@ public:
         return limited;
     }
 
+
+    // ------------------------------------------------------------------
+    // TEMPORARY diagnostics for solves that fail to converge (see
+    // NetworkSolve::SystemBase::describeIteration()).
+    // ------------------------------------------------------------------
+
+    /// What unknown (column) or equation (row) \p i is: the layout is node
+    /// pressures, then one lambda per active node that has one, then the Thp
+    /// wells' bhp.
+    std::string describeIndex(const int i) const
+    {
+        if (i < numNodes()) {
+            return fmt::format("node {}", nodes_[i + 1].name);
+        }
+        if (i < numNodes() + numActiveLambdas()) {
+            for (int k = 0; k < numActiveNodes(); ++k) {
+                if (lambda_slot_[k] >= 0 && lambdaIdx(k) == i) {
+                    return fmt::format("target {} ({})", activeNodes_[k].name,
+                                       ::Opm::WellProducerCMode2String(activeNodes_[k].mode));
+                }
+            }
+            return "lambda ?";
+        }
+        for (int w = 0; w < numWells(); ++w) {
+            if (wells_[w].kind == WellKind::Thp && thpBhpIdx(w) == i) {
+                return fmt::format("well {}", wells_[w].name);
+            }
+        }
+        return "?";
+    }
+
+    static std::string slopeLimitName(const detail::SlopeLimit limit)
+    {
+        switch (limit) {
+        case detail::SlopeLimit::Unflattened: return "unflattened";
+        case detail::SlopeLimit::Bridged: return "bridged";
+        case detail::SlopeLimit::NonMonotone: return "NON-MONOTONE";
+        case detail::SlopeLimit::Clamped: return "CLAMPED";
+        }
+        return "?";
+    }
+
+    std::string describeWell(const int w, const State& x) const
+    {
+        const auto& well = wells_[w];
+        const auto q = wellPhaseRatesOwn(w, x);
+        const auto rates = fmt::format("O/W/G {:.1f}/{:.1f}/{:.1f} m3/d", q[kOil] * unit::day,
+                                       q[kWater] * unit::day, q[kGas] * unit::day);
+        if (well.kind != WellKind::Thp) {
+            return fmt::format("  well {} [{}]: {}", well.name, controlLetter(w), rates);
+        }
+        const Scalar thp = x[pIdx(well.node)];
+        const Scalar bhp = x[thpBhpIdx(w)];
+        const auto tubing = slopeLimitedBhp(well, thp, q);
+        const auto f = wellFractions(well, q);
+        return fmt::format("  well {} [{}{}]: thp {:.3f}, bhp {:.3f}, shut-in {:.3f}, tubing {:.3f} ({}), "
+                           "row {:.3e}, {}; fractions WFR/GFR fixed {}, explicit {:.4g}/{:.4g}, used {:.4g}/{:.4g}{}",
+                           well.name, controlLetter(w), well.reopen_candidate ? ", candidate" : "",
+                           thp / unit::barsa, bhp / unit::barsa, well.bhp_shutin / unit::barsa,
+                           (tubing.evaluation.value - well.vfp_dp) / unit::barsa,
+                           slopeLimitName(tubing.limit), thpWellResidualRow(w, x), rates,
+                           well.fractions.has_value()
+                               ? fmt::format("{:.4g}/{:.4g}", (*well.fractions)[0], (*well.fractions)[1])
+                               : std::string("none"),
+                           well.explicit_fractions[0], well.explicit_fractions[1], f.wfr, f.gfr,
+                           f.fixed ? "" : " (below first FLO only)")
+            + tableDiagnostics(well, thp, q, f);   // DEBUG
+    }
+
+    /// DEBUG: where a well's tubing lookup sits on its table -- the table's
+    /// axes, the plain (not slope-limited) value, the FLO, the slope limit and
+    /// the datum correction.
+    std::string tableDiagnostics(const Well& well, const Scalar thp, const std::array<Scalar, NP>& q,
+                                 const auto& f) const
+    {
+        const auto& table = props_->getTable(well.vfp_table);
+        const auto range = [](const auto& axis, const Scalar scale) {
+            return axis.empty() ? std::string("-")
+                                : fmt::format("{:.4g}..{:.4g} ({})", axis.front() / scale, axis.back() / scale,
+                                              axis.size());
+        };
+        const Scalar flo = detail::getFlo(table, q[kWater], q[kOil], q[kGas]);
+        const Scalar plain = tableBhp(well.vfp_table, thp, q, well.alq, f);
+        return fmt::format("\n    table {}: plain {:.3f} bar, FLO {:.4g} m3/d, slope limit {}, datum "
+                           "correction {:.3f} bar; axes FLO {} m3/d, THP {} bar, WFR {}, GFR {}, ALQ {}",
+                           well.vfp_table, (plain - well.vfp_dp) / unit::barsa, flo * unit::day,
+                           well.ipr_slope_limit.has_value()
+                               ? fmt::format("{:.4g} bar/(m3/d)", *well.ipr_slope_limit / unit::barsa / unit::day)
+                               : std::string("none"),
+                           well.vfp_dp / unit::barsa, range(table.getFloAxis(), Scalar{1} / unit::day),
+                           range(table.getTHPAxis(), unit::barsa), range(table.getWFRAxis(), Scalar{1}),
+                           range(table.getGFRAxis(), Scalar{1}), range(table.getALQAxis(), Scalar{1}));
+    }
+
+    /// DEBUG: for a node looked up flattened, what the slope-limited lookup
+    /// did at this flow (unflattened, bridged, non-monotone, clamped), its
+    /// slope, the real table's value and slope, and the lookup's fractions.
+    std::string flattenedNodeDiagnostics(const int node, const Scalar upstream,
+                                         const std::array<Scalar, NP>& q) const
+    {
+        if (!hasTable(nodes_[node]) || !node_flattened_[node] || fixed_pressure_[node].has_value()) {
+            return {};
+        }
+        const auto f = nodeFractions(node);
+        const auto flat = props_->bhp_with_slope_limit(nodes_[node].vfp_table, -q[kWater], -q[kOil], -q[kGas],
+                                                       upstream, node_alq_[node], f.wfr, f.gfr, f.fixed, Scalar{0});
+        const auto real = props_->bhp_with_slope_limit(nodes_[node].vfp_table, -q[kWater], -q[kOil], -q[kGas],
+                                                       upstream, node_alq_[node], f.wfr, f.gfr, f.fixed,
+                                                       std::numeric_limits<Scalar>::lowest());
+        const auto& table = props_->getTable(nodes_[node].vfp_table);
+        const Scalar flo = detail::getFlo(table, q[kWater], q[kOil], q[kGas]);
+        return fmt::format("; flattened lookup {} (slope {:.4g} bar/(m3/d)), real {:.3f} bar (slope {:.4g}), "
+                           "FLO {:.1f} m3/d, WFR/GFR {:.5g}/{:.5g}", slopeLimitName(flat.limit),
+                           flat.evaluation.dflo / unit::barsa / unit::day, real.evaluation.value / unit::barsa,
+                           real.evaluation.dflo / unit::barsa / unit::day, flo * unit::day,
+                           detail::getWFR(table, -q[kWater], -q[kOil], -q[kGas]),
+                           detail::getGFR(table, -q[kWater], -q[kOil], -q[kGas]));
+    }
+
+    std::string describeRow(const int i, const State& x, const State& r,
+                            const std::vector<std::array<Scalar, NP>>& flows) const
+    {
+        if (i < numNodes()) {
+            const int node = i + 1;
+            const Scalar upstream = (nodes_[node].parent == 0) ? terminal_pressure_
+                                                               : x[pIdx(nodes_[node].parent)];
+            const Scalar computed = fixed_pressure_[node].has_value() ? *fixed_pressure_[node]
+                : (hasTable(nodes_[node]) ? nodeTableBhp(node, upstream, flows[node]) : upstream);
+            return fmt::format("  node {}: r {:.3e}, p {:.3f}, needed {:.3f} (upstream {:.3f}{}), "
+                               "O/W/G {:.1f}/{:.1f}/{:.1f} m3/d",
+                               nodes_[node].name, r[i], x[i] / unit::barsa, computed / unit::barsa,
+                               upstream / unit::barsa,
+                               fixed_pressure_[node].has_value() ? ", fixed"
+                                   : (hasTable(nodes_[node]) ? "" : ", no table"),
+                               flows[node][kOil] * unit::day, flows[node][kWater] * unit::day,
+                               flows[node][kGas] * unit::day)
+                + flattenedNodeDiagnostics(node, upstream, flows[node]);   // DEBUG
+        }
+        if (i < numNodes() + numActiveLambdas()) {
+            for (int k = 0; k < numActiveNodes(); ++k) {
+                if (lambda_slot_[k] < 0 || lambdaIdx(k) != i) {
+                    continue;
+                }
+                const auto& a = activeNodes_[k];
+                const auto weights = phaseWeights(a.mode, a.resv_coeff);
+                int capped = 0;
+                for (const auto& [w, eff] : a.member_wells) {
+                    capped += (wells_[w].kind == WellKind::Thp && thp_capped_[w]) ? 1 : 0;
+                }
+                return fmt::format("  target {} ({}): r {:.3e}, lambda {:.4e}, target {:.3f}, sum {:.3f} "
+                                   "(own {}, members {} of which {} capped, children {})",
+                                   a.name, ::Opm::WellProducerCMode2String(a.mode), r[i], x[i],
+                                   a.target * unit::day, activeNodeTotal(k, x, weights) * unit::day,
+                                   a.own_wells.size(), a.member_wells.size(), capped,
+                                   a.active_children.size());
+            }
+        }
+        for (int w = 0; w < numWells(); ++w) {
+            if (wells_[w].kind == WellKind::Thp && thpBhpIdx(w) == i) {
+                return describeWell(w, x);
+            }
+        }
+        return fmt::format("  row {}: r {:.3e}", i, r[i]);
+    }
+
+    std::vector<std::string> describeIteration(const int it, const State& x, const State& r,
+                                               const State& dx_raw, const State& dx_limited,
+                                               const bool controls_moved) const override
+    {
+        std::vector<std::string> out;
+        const int n = size();
+        auto norm2 = [](const State& v) {
+            Scalar s = 0;
+            for (const auto e : v) { s += e * e; }
+            return std::sqrt(s);
+        };
+        Scalar worst = 0;
+        for (const auto e : r) { worst = std::max(worst, std::abs(e)); }
+
+        std::string set;
+        for (int w = 0; w < numWells(); ++w) { set += controlLetter(w); }
+
+        // The step, in units of each column's scale, and what it does to the
+        // residual if taken in full.
+        std::string step = "no step (singular Jacobian)";
+        if (static_cast<int>(dx_limited.size()) == n) {
+            int i_max = 0;
+            Scalar s_max = -1;
+            for (int i = 0; i < n; ++i) {
+                const Scalar s = std::abs(dx_raw[i]) / columnScale(i);
+                if (s > s_max) { s_max = s; i_max = i; }
+            }
+            State next = x;
+            for (int i = 0; i < n; ++i) { next[i] += dx_limited[i]; }
+            const auto r_next = residual(next);
+            Scalar worst_next = 0;
+            for (const auto e : r_next) { worst_next = std::max(worst_next, std::abs(e)); }
+            step = fmt::format("max |dx|/scale {:.3e} at {} (dx {:.4e}, limited to {:.4e}); "
+                               "full step gives max|r| {:.3e}, |r|2 {:.3e}",
+                               s_max, describeIndex(i_max), dx_raw[i_max], dx_limited[i_max],
+                               worst_next, norm2(r_next));
+        }
+        out.push_back(fmt::format("Network diag it {}: max|r| {:.3e}, |r|2 {:.3e}, controls {}, set {}; {}",
+                                  it, worst, norm2(r), controls_moved ? "moved" : "fixed", set, step));
+
+        // The three worst rows.
+        std::vector<int> order(n);
+        for (int i = 0; i < n; ++i) { order[i] = i; }
+        const int top = std::min(n, 3);
+        std::partial_sort(order.begin(), order.begin() + top, order.end(),
+                          [&r](const int a, const int b) { return std::abs(r[a]) > std::abs(r[b]); });
+        const auto flows = nodeFlows(x);
+        for (int j = 0; j < top; ++j) {
+            out.push_back(describeRow(order[j], x, r, flows));
+        }
+
+        // Wells whose control letter changed since the last described iteration.
+        if (diag_letters_.size() == set.size()) {
+            for (int w = 0; w < numWells(); ++w) {
+                if (diag_letters_[w] != set[w]) {
+                    out.push_back(fmt::format("  changed {} -> {}:", diag_letters_[w], set[w])
+                                  + describeWell(w, x));
+                }
+            }
+        }
+        diag_letters_ = set;
+
+        // DEBUG: why a step cannot lower the residual. Along the Newton
+        // direction, each row's change for a small step (one-sided), the
+        // resulting rate of change of |r|^2, and per Thp well its FLO, the
+        // nearest FLO knot and its row's derivative in bhp from either side.
+        if (it >= 41 && !dx_raw.empty()) {
+            const auto sq2 = [](const State& v) {
+                Scalar s2 = 0;
+                for (const auto e : v) { s2 += e * e; }
+                return s2;
+            };
+            for (const Scalar eps : {Scalar{1e-2}, Scalar{1e-4}}) {
+                State xe = x;
+                for (int i = 0; i < n; ++i) { xe[i] += eps * dx_raw[i]; }
+                const auto re = residual(xe);
+                std::string rows;
+                for (int i = 0; i < n; ++i) {
+                    if (std::abs(r[i]) > 1e-8 || std::abs(re[i] - r[i]) > 1e-8) {
+                        rows += fmt::format(" [{}] {:+.4g}->{:+.4g} (d/dl {:+.4g})", i, r[i], re[i],
+                                            (re[i] - r[i]) / eps);
+                    }
+                }
+                out.push_back(fmt::format("  STALL eps {:.0e}: d|r|^2/dl {:+.4g} (Newton model {:+.4g});{}",
+                                          eps, (sq2(re) - sq2(r)) / eps, -2 * sq2(r), rows));
+            }
+            for (int w = 0; w < numWells(); ++w) {
+                const auto& well = wells_[w];
+                if (well.kind != WellKind::Thp) { continue; }
+                const int k = thpBhpIdx(w);
+                const auto qw = wellPhaseRatesOwn(w, x);
+                const auto& table = props_->getTable(well.vfp_table);
+                const Scalar flo = detail::getFlo(table, qw[kWater], qw[kOil], qw[kGas]) * unit::day;
+                Scalar knot = 0;
+                for (const auto v : table.getFloAxis()) {
+                    if (std::abs(v - flo) < std::abs(knot - flo)) { knot = v; }
+                }
+                const Scalar h = Scalar{1e-2} * unit::barsa;
+                const Scalar hs = Scalar{1e-5} * unit::barsa;
+                const auto rowAt = [&](const Scalar d) { State xs = x; xs[k] += d; return residual(xs)[k]; };
+                out.push_back(fmt::format("  STALL well {}: FLO {:.1f} m3/d, nearest knot {:.0f}; dRw/dbhp "
+                                          "fd(+0.01 bar) {:+.4g}, one-sided +{:+.4g} / -{:+.4g}; dx {:+.4g} bar",
+                                          well.name, flo, knot, (rowAt(h) - r[k]) / h * unit::barsa,
+                                          (rowAt(hs) - r[k]) / hs * unit::barsa,
+                                          (r[k] - rowAt(-hs)) / hs * unit::barsa, dx_raw[k] / unit::barsa));
+            }
+        }
+
+        // DEBUG: the Jacobian entries of each Thp well's row and of its
+        // node's row (bar per bar), and the raw step.
+        if (it <= 2 || it >= 41) {
+            const auto Jx = usesAnalyticJacobian() ? jacobian(x) : [&] {
+                DenseMatrix<Scalar> fd(n);
+                for (int j = 0; j < n; ++j) {
+                    const Scalar h = Scalar{1e-2} * columnScale(j);
+                    State shifted = x;
+                    shifted[j] += h;
+                    const auto rj = residual(shifted);
+                    for (int i = 0; i < n; ++i) { fd(i, j) = (rj[i] - r[i]) / h; }
+                }
+                return fd;
+            }();
+            for (int w = 0; w < numWells(); ++w) {
+                if (wells_[w].kind != WellKind::Thp) { continue; }
+                const int k = thpBhpIdx(w);
+                const int p = pIdx(wells_[w].node);
+                const auto qw = wellPhaseRatesOwn(w, x);
+                out.push_back(fmt::format("  J {}: dRw/dbhp {:+.4g}, dRw/dp {:+.4g}, dRn/dbhp {:+.4g}, dRn/dp {:+.4g}; "
+                                          "r_w {:+.4g}, r_n {:+.4g}; raw dbhp {:+.4g}, dp {:+.4g} bar; "
+                                          "q oil {:.4g} m3/d, dT/dq {}",
+                                          wells_[w].name, Jx(k, k) * unit::barsa, Jx(k, p) * unit::barsa,
+                                          Jx(p, k) * unit::barsa, Jx(p, p) * unit::barsa, r[k], r[p],
+                                          dx_raw.empty() ? 0.0 : dx_raw[k] / unit::barsa,
+                                          dx_raw.empty() ? 0.0 : dx_raw[p] / unit::barsa,
+                                          qw[kOil] * unit::day,
+                                          [&] {
+                                              const auto t = tableLookup(wells_[w].vfp_table, x[p], qw, wells_[w].alq,
+                                                                         wells_[w].ipr_slope_limit,
+                                                                         wellFractions(wells_[w], qw));
+                                              return fmt::format("{:.4g}/{:.4g}/{:.4g}", t.dq[kOil], t.dq[kWater], t.dq[kGas]);
+                                          }()));
+            }
+        }
+
+        // The analytic Jacobian against a forward difference of the residual,
+        // with the same steps NetworkSolve::solve() takes when it differences.
+        if (usesAnalyticJacobian()) {
+            const auto J = jacobian(x);
+            Scalar worst_mismatch = 0;
+            int wi = 0;
+            int wj = 0;
+            Scalar a_val = 0;
+            Scalar fd_val = 0;
+            for (int j = 0; j < n; ++j) {
+                const Scalar h_nominal = Scalar{1e-2} * columnScale(j);
+                State unit_dx(n, Scalar{0});
+                unit_dx[j] = h_nominal;
+                auto limited = limitStep(x, unit_dx);
+                if (std::abs(limited[j]) < Scalar{1e-6} * std::abs(h_nominal)) {
+                    unit_dx[j] = -h_nominal;
+                    limited = limitStep(x, unit_dx);
+                }
+                const Scalar h = limited[j];
+                if (h == Scalar{0}) { continue; }
+                State shifted = x;
+                for (int k = 0; k < n; ++k) { shifted[k] += limited[k]; }
+                const auto rj = residual(shifted);
+                for (int i = 0; i < n; ++i) {
+                    const Scalar fd = (rj[i] - r[i]) / h;
+                    // Mismatch relative to the column's scale, so columns in
+                    // Pa and dimensionless lambdas compare alike.
+                    const Scalar mismatch = std::abs(J(i, j) - fd) * columnScale(j);
+                    if (mismatch > worst_mismatch) {
+                        worst_mismatch = mismatch;
+                        wi = i; wj = j; a_val = J(i, j); fd_val = fd;
+                    }
+                }
+            }
+            // fd is a forward difference with a step of 1% of the column
+            // scale: a relative error of about 1e-3 or less is its own
+            // truncation error, a large one is a wrong (or discontinuous)
+            // derivative.
+            const Scalar rel = std::abs(a_val - fd_val)
+                / std::max({std::abs(a_val), std::abs(fd_val), std::numeric_limits<Scalar>::min()});
+            out.push_back(fmt::format("  jacobian check: worst |analytic - fd| * scale {:.3e} (relative {:.2e}) "
+                                      "at row {}, column {} (analytic {:.4e}, fd {:.4e})",
+                                      worst_mismatch, rel, describeIndex(wi), describeIndex(wj),
+                                      a_val, fd_val));
+        }
+        return out;
+    }
+
+    std::vector<std::string> describeState(const State& x) const override
+    {
+        std::vector<std::string> out;
+        out.push_back(fmt::format("Network diag final state: terminal {:.3f} bar",
+                                  terminal_pressure_ / unit::barsa));
+        const auto flows = nodeFlows(x);
+        const auto r = residual(x);
+        for (int i = 0; i < size(); ++i) {
+            if (i < numNodes() + numActiveLambdas()) {
+                out.push_back(describeRow(i, x, r, flows));
+            }
+        }
+        for (int w = 0; w < numWells(); ++w) {
+            out.push_back(describeWell(w, x));
+        }
+        // DEBUG: for a node on its real table whose row is not met, the
+        // node residual g(p) = p - T(upstream, q(p)) over a range of node
+        // pressures, every Thp well under it solved on its own row at p
+        // (bisection on the slope-limited curve; capped where it cannot
+        // lift), the rest of the state as it is. A root of g is a solution
+        // of this node with its wells; none means the real table has none.
+        for (int i = 1; i <= numNodes(); ++i) {
+            if (!hasTable(nodes_[i]) || node_flattened_[i] || fixed_pressure_[i].has_value()
+                || std::abs(r[pIdx(i)]) < Scalar{0.1}) {
+                continue;
+            }
+            const Scalar upstream = (nodes_[i].parent == 0) ? terminal_pressure_ : x[pIdx(nodes_[i].parent)];
+            const Scalar p0 = x[pIdx(i)];
+            std::string line;
+            for (Scalar dp = -10; dp <= 15.001; dp += 1) {
+                const Scalar p = p0 + dp * unit::barsa;
+                State xs = x;
+                xs[pIdx(i)] = p;
+                std::string wells;
+                for (int w = 0; w < numWells(); ++w) {
+                    const auto& well = wells_[w];
+                    if (well.kind != WellKind::Thp || well.node != i) { continue; }
+                    const int k = thpBhpIdx(w);
+                    auto row = [&](const Scalar bhp) {
+                        xs[k] = bhp;
+                        const auto qw = wellPhaseRatesOwn(w, xs);
+                        return bhp - (slopeLimitedBhp(well, p, qw).evaluation.value - well.vfp_dp);
+                    };
+                    Scalar hi = well.bhp_shutin - Scalar{1e-3} * unit::barsa;
+                    if (row(hi) <= Scalar{0}) {
+                        xs[k] = well.bhp_shutin;   // cannot lift at p: capped, no flow
+                    } else {
+                        Scalar lo = hi;
+                        Scalar step = unit::barsa;
+                        while (lo > unit::barsa && row(lo) > Scalar{0}) {
+                            hi = lo;
+                            lo = std::max(lo - step, Scalar{1} * unit::barsa);
+                            step *= 2;
+                        }
+                        for (int it = 0; it < 60; ++it) {
+                            const Scalar mid = Scalar{0.5} * (lo + hi);
+                            (row(mid) > Scalar{0} ? hi : lo) = mid;
+                        }
+                        xs[k] = Scalar{0.5} * (lo + hi);
+                    }
+                    const auto qw = wellPhaseRatesOwn(w, xs);
+                    wells += fmt::format(" {}:{:.0f}", well.name, (qw[kOil] + qw[kWater]) * unit::day);
+                }
+                const auto q = nodeFlows(xs)[i];
+                const Scalar real = tableBhp(nodes_[i].vfp_table, upstream, q, node_alq_[i], nodeFractions(i));
+                line += fmt::format("\n    p {:.2f}: L {:.0f} ({}), needed {:.2f}, g {:+.3f}",
+                                    p / unit::barsa, (q[kOil] + q[kWater]) * unit::day, wells,
+                                    real / unit::barsa, (p - real) / unit::barsa);
+            }
+            out.push_back(fmt::format("  SCAN node {} (real table, upstream {:.3f} bar):{}", nodes_[i].name,
+                                      upstream / unit::barsa, line));
+        }
+        return out;
+    }
+
     State pressures(const State& x) const override
     {
         State p(nodes_.size());
@@ -1705,6 +2212,8 @@ public:
     }
 
 private:
+    mutable std::string diag_letters_;   // TEMPORARY: see describeIteration()
+
     int numThpWells() const { return num_thp_; }
     int pIdx(const int node) const { return node - 1; }
     // Only ever called for a node with lambda_slot_[active_node] >= 0: the

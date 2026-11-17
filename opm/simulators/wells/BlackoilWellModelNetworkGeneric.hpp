@@ -449,8 +449,11 @@ protected:
     /// table is looked up with below that value at the next solve. Updated by
     /// solveGroupTree() (hence mutable).
     mutable std::map<std::string, std::array<Scalar, 2>> group_tree_node_fractions_;
-
-
+    // DEBUG: the last converged group-tree solve's node flows and well rates.
+    mutable std::map<std::string, std::array<Scalar, 3>> group_tree_debug_node_flows_;
+    mutable std::map<std::string, std::array<Scalar, 3>> group_tree_debug_well_rates_;
+    // DEBUG: (network root, report step) pairs already described.
+    mutable std::set<std::pair<std::string, int>> group_tree_debug_logged_;
 
     // Nodes without a valid VFP solution in the last evaluation (per domain); not serialized,
     // recomputed on every updatePressures().

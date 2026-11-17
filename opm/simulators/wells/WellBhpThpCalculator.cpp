@@ -482,6 +482,114 @@ maxFlowingThp(const WellState<Scalar, IndexTraits>& well_state,
 }
 
 template<typename Scalar, typename IndexTraits>
+std::vector<std::string> WellBhpThpCalculator<Scalar, IndexTraits>::
+describeMaxFlowingThp(const WellState<Scalar, IndexTraits>& well_state,
+                      const Well& well,
+                      const std::vector<Scalar>& rates,
+                      const Scalar rho,
+                      const SummaryState& summaryState,
+                      const Scalar thp) const
+{
+    // Same set-up as maxFlowingThp().
+    std::vector<std::string> out;
+    const auto& controls = well.productionControls(summaryState);
+    const auto& table = well_.vfpProperties()->getProd()->getTable(controls.vfp_table_number);
+    const Scalar aqua = rates[IndexTraits::waterPhaseIdx];
+    const Scalar liquid = rates[IndexTraits::oilPhaseIdx];
+    const Scalar vapour = rates[IndexTraits::gasPhaseIdx];
+    const Scalar flo = detail::getFlo(table, aqua, liquid, vapour);
+    const bool explicit_fractions = well_.useVfpExplicit() || -flo < table.getFloAxis().front();
+    Scalar wfr, gfr;
+    if (explicit_fractions) {
+        wfr = well_.vfpProperties()->getExplicitWFR(controls.vfp_table_number, well_.indexOfWell());
+        gfr = well_.vfpProperties()->getExplicitGFR(controls.vfp_table_number, well_.indexOfWell());
+    } else {
+        wfr = detail::getWFR(table, aqua, liquid, vapour);
+        gfr = detail::getGFR(table, aqua, liquid, vapour);
+    }
+    const auto ipr = getFloIPR(well_state, well, summaryState);
+    const Scalar dp_hydro = wellhelpers::computeHydrostaticCorrection(well_.refDepth(), table.getDatumDepth(),
+                                                                      rho, well_.gravity());
+    auto bhp_adjusted = [this, dp_hydro](const Scalar bhp, const Scalar t) {
+        return bhp - dp_hydro + getVfpBhpAdjustment(bhp, t);
+    };
+    const Scalar bhp_limit = mostStrictBhpFromBhpLimits(summaryState);
+    const Scalar alq = well_.getALQ(well_state);
+
+    // Per-phase IPRs: q_p = b_p * bhp - a_p (negative for production).
+    const auto& ws = well_state.well(well_.indexOfWell());
+    const auto& pu = well_.phaseUsage();
+    std::string phases;
+    const std::array<std::pair<int, const char*>, 3> names{{{IndexTraits::oilPhaseIdx, "oil"},
+                                                            {IndexTraits::waterPhaseIdx, "water"},
+                                                            {IndexTraits::gasPhaseIdx, "gas"}}};
+    for (const auto& [canonical, name] : names) {
+        if (!pu.phaseIsActive(canonical)) {
+            continue;
+        }
+        const int p = pu.canonicalToActivePhaseIdx(canonical);
+        const Scalar a = ws.implicit_ipr_a[p];
+        const Scalar b = ws.implicit_ipr_b[p];
+        phases += fmt::format("{} a {:.5g} m3/d, b {:.5g} m3/d/bar, zero rate at {:.3f} bar; ", name,
+                              a * unit::day, b * unit::day * unit::barsa,
+                              b != Scalar{0} ? a / b / unit::barsa : Scalar{0});
+    }
+    out.push_back("    IPR: " + phases);
+    const Scalar flo_max = ipr.first - ipr.second * bhp_limit;
+    out.push_back(fmt::format("    FLO IPR (FLO = a - b*bhp): a {:.5g} m3/d, b {:.5g} m3/d/bar, FLO = 0 at {:.3f} bar, "
+                              "FLO at bhp limit {:.3f} bar: {:.5g} m3/d; FLO of the rates {:.5g} m3/d",
+                              ipr.first * unit::day, ipr.second * unit::day * unit::barsa,
+                              ipr.second != Scalar{0} ? ipr.first / ipr.second / unit::barsa : Scalar{0},
+                              bhp_limit / unit::barsa, flo_max * unit::day, -flo * unit::day));
+    out.push_back(fmt::format("    table {}: WFR {:.5g}, GFR {:.5g} ({}), ALQ {:.5g}, datum correction {:.3f} bar, "
+                              "THP axis {:.3f}..{:.3f} bar ({} knots), FLO axis {:.5g}..{:.5g} m3/d ({} knots)",
+                              controls.vfp_table_number, wfr, gfr,
+                              explicit_fractions ? "explicit" : "from rates", alq, dp_hydro / unit::barsa,
+                              table.getTHPAxis().front() / unit::barsa, table.getTHPAxis().back() / unit::barsa,
+                              table.getTHPAxis().size(),
+                              table.getFloAxis().front() * unit::day, table.getFloAxis().back() * unit::day,
+                              table.getFloAxis().size()));
+
+    // The lift-margin rows at thp and at the THP knots bracketing it.
+    std::vector<Scalar> thps{thp};
+    const auto& axis = table.getTHPAxis();
+    for (std::size_t k = 0; k < axis.size(); ++k) {
+        if (axis[k] <= thp && (k + 1 == axis.size() || axis[k + 1] > thp)) {
+            thps.push_back(static_cast<Scalar>(axis[k]));
+            if (k + 1 < axis.size()) {
+                thps.push_back(static_cast<Scalar>(axis[k + 1]));
+            }
+        }
+    }
+    if (thp < axis.front()) {
+        thps.push_back(static_cast<Scalar>(axis.front()));
+    }
+    for (const Scalar t : thps) {
+        const auto rows = VFPHelpers<Scalar>::liftMarginRows(table, t, wfr, gfr, alq, ipr.first, ipr.second,
+                                                            bhp_limit, bhp_adjusted);
+        if (rows.empty()) {
+            out.push_back(fmt::format("    THP {:.3f} bar: no rows (IPR cannot produce above the bhp limit)",
+                                      t / unit::barsa));
+            continue;
+        }
+        std::size_t i_min = 0;
+        for (std::size_t i = 1; i < rows.size(); ++i) {
+            if (rows[i][1] - rows[i][2] < rows[i_min][1] - rows[i_min][2]) {
+                i_min = i;
+            }
+        }
+        std::string line = fmt::format("    THP {:.3f} bar, FLO: required/available [bar] (margin):", t / unit::barsa);
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            line += fmt::format(" {}{:.4g}: {:.2f}/{:.2f} ({:.2f}){}", i == i_min ? "[" : "",
+                                rows[i][0] * unit::day, rows[i][1] / unit::barsa, rows[i][2] / unit::barsa,
+                                (rows[i][1] - rows[i][2]) / unit::barsa, i == i_min ? "]" : "");
+        }
+        out.push_back(line);
+    }
+    return out;
+}
+
+template<typename Scalar, typename IndexTraits>
 Scalar WellBhpThpCalculator<Scalar, IndexTraits>::
 getVfpBhpAdjustment(const Scalar bhp_tab, const Scalar thp_limit) const
 {

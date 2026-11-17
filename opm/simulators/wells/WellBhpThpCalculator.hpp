@@ -28,6 +28,7 @@
 
 #include <functional>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace Opm {
@@ -122,6 +123,18 @@ public:
                   const std::vector<Scalar>& rates,
                   const Scalar rho,
                   const SummaryState& summaryState) const;
+
+    //! TEMPORARY diagnostics: maxFlowingThp()'s inputs (fractions, FLO IPR,
+    //! adjustments) and the lift-margin rows at \p thp and at the THP knots
+    //! around it -- the bhp the table requires and the bhp the IPR has
+    //! available at each FLO point, and their difference.
+    std::vector<std::string>
+    describeMaxFlowingThp(const WellState<Scalar, IndexTraits>& well_state,
+                          const Well& well,
+                          const std::vector<Scalar>& rates,
+                          const Scalar rho,
+                          const SummaryState& summaryState,
+                          const Scalar thp) const;
 
   bool isStableSolution(const WellState<Scalar, IndexTraits>& well_state,
                         const Well& well,
