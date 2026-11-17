@@ -254,6 +254,35 @@ public:
         return {};
     }
 
+    //! \brief Strictest individual production limit for the group-tree balancer's own
+    //! candidate gathering (ProdGroupTreeBalancer): (control_mode, target_value), from a
+    //! converged IPR (a stable-bhp solve) plus the well's own current rates -- see
+    //! WellInterface::estimateStrictestProductionLimitForBalancer(). Nullopt when it
+    //! cannot be determined (an injector, a well with a zero total rate, or the stable-bhp
+    //! solve declining) -- the balancer simply leaves such a well out of its candidate set.
+    virtual std::optional<std::pair<Well::ProducerCMode, Scalar>>
+    estimateStrictestProductionLimitForBalancer(const WellStateType&,
+                                                const SummaryState&,
+                                                DeferredLogger&) const
+    {
+        return std::nullopt;
+    }
+
+    //! \brief Strictest individual production limit for the group-tree balancer
+    //! from the well's potentials (ws.well_potentials) instead of a converged
+    //! IPR. The potentials give only the pressure limit's capacity (their
+    //! total); the limits are compared along the well's current rates, the
+    //! fractions the balancer scales with: the current rates scaled to that
+    //! capacity, a rate limit if those exceed it, else the pressure limit (BHP
+    //! or THP) with the total potential as its rate. Nullopt for an injector,
+    //! or a well without positive potentials or current rates.
+    virtual std::optional<std::pair<Well::ProducerCMode, Scalar>>
+    estimateStrictestProductionLimitFromPotentials(const WellStateType&,
+                                                   const SummaryState&) const
+    {
+        return std::nullopt;
+    }
+
     virtual int setPrimaryVars(typename std::vector<Scalar>::const_iterator)
     {
         return 0;

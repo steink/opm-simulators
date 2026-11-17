@@ -255,6 +255,7 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/wells/ParallelWBPCalculation.cpp
   opm/simulators/wells/ParallelWellInfo.cpp
   opm/simulators/wells/PerfData.cpp
+  opm/simulators/wells/ProdGroupTreeBalancer.cpp
   opm/simulators/wells/PerforationData.cpp
   opm/simulators/wells/RateConverter.cpp
   opm/simulators/wells/RatioCalculator.cpp
@@ -520,6 +521,7 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_glift1.cpp
   tests/test_graphcoloring.cpp
   tests/test_GroupState.cpp
+  tests/test_grouptreenetwork.cpp
   tests/test_ignore_keywords.cpp
   tests/test_InjectedPhase.cpp
   tests/test_injection_topup_phase_validation.cpp
@@ -780,6 +782,7 @@ list (APPEND TEST_DATA_FILES
   tests/options_system_cprw_approx_wells_bad_outer.json
   tests/options_system_cprw_complete.json
   tests/GCONSUMP.DATA
+  tests/GROUPTREE.DATA
   tests/GCONSUMP_COMPLEX.DATA
   tests/GROUP_HIGHER_CONSTRAINTS.DATA
   tests/GROUP_HIGHER_CONSTRAINTS_NETWORK.DATA
@@ -1399,6 +1402,8 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/ParallelWellInfo.hpp
   opm/simulators/wells/PerfData.hpp
   opm/simulators/wells/PerforationData.hpp
+  opm/simulators/wells/ProdGroupTreeBalancer.hpp
+  opm/simulators/wells/ProdGroupTreeNode.hpp
   opm/simulators/wells/RateConverter.hpp
   opm/simulators/wells/RatioCalculator.hpp
   opm/simulators/wells/RegionAttributeHelpers.hpp
