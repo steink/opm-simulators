@@ -364,22 +364,36 @@ public:
         Evaluation rhoAvg = (rhoIn + rhoEx)/2;
 
 #if OPM_IS_INSIDE_HOST_FUNCTION
-        // DEBUG (OPM_DEBUG_SAT_WEIGHTED_RHO): weight the densities by the saturation of
-        // the phase, so that a cell with almost none of the phase does not contribute
-        // its density to the gravity term. Falls back to the arithmetic mean if
-        // neither cell has the phase.
-        static const bool satWeightedRho = std::getenv("OPM_DEBUG_SAT_WEIGHTED_RHO") != nullptr;
-        if (satWeightedRho) {
-            const Evaluation& satIn = intQuantsIn.fluidState().saturation(phaseIdx);
-            const Scalar satEx = std::max(Toolbox::value(intQuantsEx.fluidState().saturation(phaseIdx)),
-                                          Scalar{0.0});
-            if (Toolbox::value(satIn) <= 0.0) {
-                if (satEx > 0.0) {
-                    rhoAvg = rhoEx;
-                }
+        // DEBUG (OPM_DEBUG_SAT_WEIGHTED_RHO=limit): weight the densities by
+        // min(S, limit) as --saturation-weighted-density-limit on the
+        // saturation-weighted-density branch.
+        static const Scalar satLimit = [] {
+            const char* env = std::getenv("OPM_DEBUG_SAT_WEIGHTED_RHO");
+            return env ? static_cast<Scalar>(std::atof(env)) : Scalar{0.0};
+        }();
+        // DEBUG (OPM_DEBUG_SAT_WEIGHTED_PHASES=mask): only weight the phases whose
+        // bit (1 << phaseIdx) is set; default all phases.
+        static const unsigned phaseMask = [] {
+            const char* env = std::getenv("OPM_DEBUG_SAT_WEIGHTED_PHASES");
+            return env ? static_cast<unsigned>(std::atoi(env)) : 7u;
+        }();
+        if (satLimit > 0.0 && ((phaseMask >> phaseIdx) & 1u)) {
+            // DEBUG (OPM_DEBUG_SAT_WEIGHTED_NODERIV0): no derivative at S = 0 exactly
+            static const bool noDeriv0 = std::getenv("OPM_DEBUG_SAT_WEIGHTED_NODERIV0") != nullptr;
+            Evaluation weightIn = intQuantsIn.fluidState().saturation(phaseIdx);
+            if (Toolbox::value(weightIn) < 0.0 || (noDeriv0 && Toolbox::value(weightIn) <= 0.0)) {
+                weightIn = 0.0;
             }
-            else {
-                rhoAvg = (satIn * rhoIn + satEx * rhoEx) / (satIn + satEx);
+            else if (Toolbox::value(weightIn) > satLimit) {
+                weightIn = satLimit;
+            }
+            const Scalar weightEx =
+                std::clamp(Scalar{Toolbox::value(intQuantsEx.fluidState().saturation(phaseIdx))},
+                           Scalar{0.0}, satLimit);
+            constexpr Scalar minWeightSum = 1e-10;
+            const Scalar weightSum = Toolbox::value(weightIn) + weightEx;
+            if (weightSum > minWeightSum && weightSum < 2 * satLimit) {
+                rhoAvg = (weightIn * rhoIn + weightEx * rhoEx) / (weightIn + weightEx);
             }
         }
 #endif

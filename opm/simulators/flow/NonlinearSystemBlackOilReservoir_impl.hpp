@@ -1082,7 +1082,7 @@ logWorstCnvCells(const std::vector<Scalar>& B_avg, const double dt)
                  Kro, Krw, Pcow, SoStart, ResO, FluxO, NumFaces, Cnv0 };
     // Per face, the largest oil fluxes first. Signs: + means out of the cell.
     enum FaceField { FI, FJ, FK, FTrans, FDPhiO, FUpO, FQo, FCnvO, FQw, FSwNb, FKroNb,
-                     numFaceFields };
+                     FDPhiG, FQg, FSgNb, FRhoG, FRhoGNb, FDZ, numFaceFields };
     constexpr int maxFaces = 8;
     constexpr int faceStart = Cnv0 + numEq;
     constexpr int recSize = faceStart + maxFaces * numFaceFields;
@@ -1230,14 +1230,16 @@ logWorstCnvCells(const std::vector<Scalar>& B_avg, const double dt)
                     const auto& fsNb = intQuantsNb.fluidState();
                     double rhoAvg = 0.5 * (getValue(fs.density(oilIdx))
                                            + getValue(fsNb.density(oilIdx)));
-                    static const bool satWeightedRho =
-                        std::getenv("OPM_DEBUG_SAT_WEIGHTED_RHO") != nullptr;
-                    if (satWeightedRho) {
-                        const double satIn = std::max<double>(getValue(fs.saturation(oilIdx)), 0.0);
-                        const double satNb = std::max<double>(getValue(fsNb.saturation(oilIdx)), 0.0);
-                        if (satIn + satNb > 0.0) {
-                            rhoAvg = (satIn * getValue(fs.density(oilIdx))
-                                      + satNb * getValue(fsNb.density(oilIdx))) / (satIn + satNb);
+                    static const double satLimit = [] {
+                        const char* env = std::getenv("OPM_DEBUG_SAT_WEIGHTED_RHO");
+                        return env ? std::atof(env) : 0.0;
+                    }();
+                    if (satLimit > 0.0) {
+                        const double wIn = std::clamp<double>(getValue(fs.saturation(oilIdx)), 0.0, satLimit);
+                        const double wNb = std::clamp<double>(getValue(fsNb.saturation(oilIdx)), 0.0, satLimit);
+                        if (wIn + wNb > 1e-10 && wIn + wNb < 2 * satLimit) {
+                            rhoAvg = (wIn * getValue(fs.density(oilIdx))
+                                      + wNb * getValue(fsNb.density(oilIdx))) / (wIn + wNb);
                         }
                     }
                     const double dPhiO = getValue(fsNb.pressure(oilIdx)) + rhoAvg * nb.res_nbinfo.dZg
@@ -1257,6 +1259,27 @@ logWorstCnvCells(const std::vector<Scalar>& B_avg, const double dt)
                     f[FQw] = getValue(flux[watEq]) * area * perDay;
                     f[FSwNb] = getValue(fsNb.saturation(watIdx));
                     f[FKroNb] = getValue(intQuantsNb.relativePermeability(oilIdx));
+                    f[FDZ] = nb.res_nbinfo.dZg / 9.80665;
+                    if (FluidSystem::phaseIsActive(gasIdx)) {
+                        const unsigned gasEq = FluidSystem::canonicalToActiveCompIdx(
+                            FluidSystem::solventComponentIndex(gasIdx));
+                        const double rhoG = getValue(fs.density(gasIdx));
+                        const double rhoGNb = getValue(fsNb.density(gasIdx));
+                        double rhoAvgG = 0.5 * (rhoG + rhoGNb);
+                        if (satLimit > 0.0) {
+                            const double wIn = std::clamp<double>(getValue(fs.saturation(gasIdx)), 0.0, satLimit);
+                            const double wNb = std::clamp<double>(getValue(fsNb.saturation(gasIdx)), 0.0, satLimit);
+                            if (wIn + wNb > 1e-10 && wIn + wNb < 2 * satLimit) {
+                                rhoAvgG = (wIn * rhoG + wNb * rhoGNb) / (wIn + wNb);
+                            }
+                        }
+                        f[FDPhiG] = (getValue(fsNb.pressure(gasIdx)) + rhoAvgG * nb.res_nbinfo.dZg
+                                     - getValue(fs.pressure(gasIdx))) / 1e5;
+                        f[FQg] = getValue(flux[gasEq]) * area * perDay;
+                        f[FSgNb] = getValue(fsNb.saturation(gasIdx));
+                        f[FRhoG] = rhoG;
+                        f[FRhoGNb] = rhoGNb;
+                    }
                     faces.push_back(f);
                 }
                 std::ranges::sort(faces, [](const auto& x, const auto& y)
@@ -1371,11 +1394,13 @@ logWorstCnvCells(const std::vector<Scalar>& B_avg, const double dt)
             const double* face = rec.data() + faceStart + f * numFaceFields;
             msg += fmt::format("\n      face to {:>5} {:>5} {:>4}  T[cP.m3/d/bar] {:9.3e}"
                                "  dPhiO[bar] {:+10.3e}  up {:>4}  qO {:+10.3e}  cnvO {:+9.2e}"
-                               "  qW {:+10.3e}  SwNb {:6.4f}  kroNb {:9.2e}",
+                               "  qW {:+10.3e}  SwNb {:6.4f}  kroNb {:9.2e}"
+                               "  dPhiG[bar] {:+10.3e}  qG {:+10.3e}  SgNb {:6.4f}  rhoG {:8.3f}  rhoGNb {:8.3f}  dZ {:+7.3f}",
                                static_cast<int>(face[FI]), static_cast<int>(face[FJ]),
                                static_cast<int>(face[FK]), face[FTrans], face[FDPhiO],
                                face[FUpO] > 0.5 ? "cell" : "nb", face[FQo], face[FCnvO],
-                               face[FQw], face[FSwNb], face[FKroNb]);
+                               face[FQw], face[FSwNb], face[FKroNb], face[FDPhiG], face[FQg],
+                               face[FSgNb], face[FRhoG], face[FRhoGNb], face[FDZ]);
         }
     }
     OpmLog::debug(msg);
