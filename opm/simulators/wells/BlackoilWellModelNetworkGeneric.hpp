@@ -429,6 +429,15 @@ protected:
                    const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree,
                    const bool offerReopenCandidates = false) const;
 
+    /// Check a group-tree solve's result against the categorization it was
+    /// solved with (GroupTreeSystem::checkCategorization(), with the wells'
+    /// own limits from the schedule, plus the pass-through groups of
+    /// \p balancedTree against their own limits) and log what does not hold:
+    /// one line per solve and one per issue, at debug level.
+    void logCategorizationCheck(const GroupTreeSolve& solved,
+                                const int reportStepIdx,
+                                const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree) const;
+
     bool group_tree_solver_ = false;
     std::optional<ProdGroupTreeBalancer::Tree<Scalar>> balanced_group_tree_;
     bool analytic_jacobian_ = false;

@@ -35,6 +35,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -748,7 +749,333 @@ public:
     /// bhp and its rates ([oil, water, gas], production positive).
     std::pair<Scalar, std::array<Scalar, NP>> thpWellAtNodePressure(const int w, const Scalar p) const
     {
-        const auto& well = wells_[w];
+        return operatingPointAtThp(wells_[w], p);
+    }
+
+    /// What well \p w's tubing can lift with its THP at \p p (its node's
+    /// pressure): its operating point on its IPR and its tubing curve, as
+    /// thpWellAtNodePressure() finds it for a Thp well, for a well of any kind
+    /// (a Group or Pinned well gets the shut-in bhp and the slope limit a Thp
+    /// well gets in finalize() and populateFromFlatNetwork()). A point found
+    /// only on the flattened curve (on_real_curve false) is not one the well
+    /// can operate at: it cannot lift at \p p. nullopt for a well without a
+    /// table or without an IPR whose FLO falls with bhp.
+    struct WellCapacity
+    {
+        Scalar bhp = 0;
+        std::array<Scalar, NP> q{};   // production positive, [oil, water, gas]
+        bool on_real_curve = true;
+    };
+    std::optional<WellCapacity> capacityAtNodePressure(const int w, const Scalar p) const
+    {
+        Well well = wells_[w];
+        if (well.vfp_table == NoTable) {
+            return std::nullopt;
+        }
+        const auto& table = props_->getTable(well.vfp_table);
+        if (!(detail::getFlo(table, well.ipr_b[kWater], well.ipr_b[kOil], well.ipr_b[kGas]) < Scalar{0})) {
+            return std::nullopt;
+        }
+        if (well.kind != WellKind::Thp) {
+            well.bhp_shutin = shutInBhp(well);
+            well.ipr_slope_limit = iprSlopeLimit(well);
+        }
+        WellCapacity out;
+        std::tie(out.bhp, out.q) = operatingPointAtThp(well, p);
+        out.on_real_curve = !well.ipr_slope_limit.has_value()
+            || slopeLimitedBhp(well, p, out.q).limit == detail::SlopeLimit::Unflattened;
+        return out;
+    }
+
+    /// A well's own limits, for checkCategorization(), in SI units.
+    struct IndividualLimits
+    {
+        /// Its rate limits: the mode (ORAT, WRAT, GRAT, LRAT or RESV) and
+        /// the limit, production positive.
+        std::vector<std::pair<::Opm::Well::ProducerCMode, Scalar>> rates;
+        std::array<Scalar, NP> resv_coeff{};   // for a RESV limit
+        std::optional<Scalar> bhp;             // its BHP limit
+    };
+
+    /// One way a solution contradicts the categorization it was solved with
+    /// (which well is on which branch of min(g*lambda, THP capacity, own
+    /// limit), which group is Active). value and bound are what was compared:
+    /// rates in SI, measured in mode (FLO for CMODE_UNDEFINED), or bhp for
+    /// mode BHP.
+    struct CategorizationIssue
+    {
+        enum class Kind
+        {
+            NegativeLambda,      // an Active group's lambda < 0; value: its own wells' total, bound 0
+            GroupOverCapacity,   // a group-controlled well allocated more than its tubing lifts at its node pressure
+            OverLimit,           // a well above one of its own limits (a rate, or a bhp below its BHP limit)
+            ThpOverShare,        // a THP well above its guide-rate share (guide rate * lambda) of its Active group
+            PinnedOverCapacity,  // a fixed-rate well above what its tubing lifts at its node pressure (in FLO)
+            ActiveOverTarget,    // an Active group without a row (no lever) whose members exceed its target
+            ActiveCannotMeet,    // an Active group whose members cannot reach its target at their bounds
+        };
+        Kind kind{Kind::NegativeLambda};
+        std::string name;
+        Scalar value = 0;
+        Scalar bound = 0;
+        ::Opm::Well::ProducerCMode mode{::Opm::Well::ProducerCMode::CMODE_UNDEFINED};
+    };
+
+    /// Tolerances of checkCategorization(): a quantity exceeds its bound if it
+    /// does by more than rel * bound + abs (rates, SI) or by more than
+    /// pressure (bhp).
+    struct CategorizationTolerance
+    {
+        Scalar rel = Scalar{0.02};
+        Scalar abs = Scalar{1.0e-5};               // m3/s, about 0.9 m3/day
+        Scalar pressure = Scalar{0.1} * unit::barsa;
+    };
+
+    /// Check \p result (a solve of this system, converged or its best
+    /// iterate) against the categorization it was solved with: the per-well
+    /// structure s_w = min(g_w * lambda, c_w(p), l_w) with each well's branch
+    /// fixed, and each Active group's sum equal to its target. \p limits holds
+    /// the wells' own limits by name (wells without an entry are not checked
+    /// against limits); \p guideRate gives a THP well's guide rate in an
+    /// Active group's mode, nullopt if it has none or is not available for
+    /// group control.
+    std::vector<CategorizationIssue>
+    checkCategorization(const Result<Scalar>& result,
+                        const std::unordered_map<std::string, IndividualLimits>& limits,
+                        const std::function<std::optional<Scalar>(const std::string&,
+                                                                  ::Opm::Well::ProducerCMode)>& guideRate,
+                        const CategorizationTolerance& tol = {}) const
+    {
+        std::vector<CategorizationIssue> out;
+        addLimitIssues(result, limits, tol, out);
+        addPinnedCapacityIssues(result, tol, out);
+        for (int k = 0; k < numActiveNodes(); ++k) {
+            addActiveNodeIssues(k, result, limits, guideRate, tol, out);
+        }
+        return out;
+    }
+
+private:
+    static bool exceeds(const Scalar value, const Scalar bound, const CategorizationTolerance& tol)
+    {
+        return value > bound + tol.rel * std::abs(bound) + tol.abs;
+    }
+
+    static bool flows(const std::array<Scalar, NP>& q)
+    {
+        return std::any_of(q.begin(), q.end(), [](const Scalar v) { return v > Scalar{0}; });
+    }
+
+    /// Wells above one of their own limits (checkCategorization()).
+    void addLimitIssues(const Result<Scalar>& result,
+                        const std::unordered_map<std::string, IndividualLimits>& limits,
+                        const CategorizationTolerance& tol,
+                        std::vector<CategorizationIssue>& out) const
+    {
+        using Issue = CategorizationIssue;
+        for (int w = 0; w < numWells(); ++w) {
+            const auto it = limits.find(wells_[w].name);
+            const auto& q = result.well_phase_rates[w];
+            if (it == limits.end() || !flows(q)) {
+                continue;
+            }
+            for (const auto& [mode, limit] : it->second.rates) {
+                const Scalar v = projectOnMode(q, phaseWeights(mode, it->second.resv_coeff));
+                if (exceeds(v, limit, tol)) {
+                    out.push_back({Issue::Kind::OverLimit, wells_[w].name, v, limit, mode});
+                }
+            }
+            // A Pinned well's bhp is not part of the solve.
+            if (it->second.bhp.has_value() && wells_[w].kind != WellKind::Pinned
+                && result.well_bhp[w] < *it->second.bhp - tol.pressure) {
+                out.push_back({Issue::Kind::OverLimit, wells_[w].name, result.well_bhp[w], *it->second.bhp,
+                               ::Opm::Well::ProducerCMode::BHP});
+            }
+        }
+    }
+
+    /// Fixed-rate wells above what their tubing lifts at their node's
+    /// pressure, compared in the table's FLO (checkCategorization()).
+    void addPinnedCapacityIssues(const Result<Scalar>& result,
+                                 const CategorizationTolerance& tol,
+                                 std::vector<CategorizationIssue>& out) const
+    {
+        for (int w = 0; w < numWells(); ++w) {
+            const auto& well = wells_[w];
+            if (well.kind != WellKind::Pinned || well.node <= 0 || well.vfp_table == NoTable
+                || !flows(well.fixed_q)) {
+                continue;
+            }
+            const auto cap = capacityAtNodePressure(w, result.node_pressure[well.node]);
+            if (!cap.has_value()) {
+                continue;
+            }
+            const auto& table = props_->getTable(well.vfp_table);
+            const auto flo = [&table](const std::array<Scalar, NP>& r) {
+                return detail::getFlo(table, r[kWater], r[kOil], r[kGas]);
+            };
+            const Scalar bound = cap->on_real_curve ? flo(cap->q) : Scalar{0};
+            if (exceeds(flo(well.fixed_q), bound, tol)) {
+                out.push_back({CategorizationIssue::Kind::PinnedOverCapacity, well.name, flo(well.fixed_q),
+                               bound, ::Opm::Well::ProducerCMode::CMODE_UNDEFINED});
+            }
+        }
+    }
+
+    /// Active node \p k: its lambda's sign, its group-controlled wells against
+    /// their capacity, its THP wells against their share, and whether its
+    /// members can meet its target (checkCategorization()).
+    void addActiveNodeIssues(const int k,
+                             const Result<Scalar>& result,
+                             const std::unordered_map<std::string, IndividualLimits>& limits,
+                             const std::function<std::optional<Scalar>(const std::string&,
+                                                                       ::Opm::Well::ProducerCMode)>& guideRate,
+                             const CategorizationTolerance& tol,
+                             std::vector<CategorizationIssue>& out) const
+    {
+        using Issue = CategorizationIssue;
+        const auto& q = result.well_phase_rates;
+        const auto& a = activeNodes_[k];
+        const auto weights = phaseWeights(a.mode, a.resv_coeff);
+        const auto lambda = lambdaFromRates(k, q);
+
+        if (lambda.has_value() && *lambda < Scalar{0}) {
+            Scalar own = 0;
+            for (const int w : a.own_wells) {
+                own += targetEfficiency(w) * projectOnMode(q[w], weights);
+            }
+            out.push_back({Issue::Kind::NegativeLambda, a.name, own, Scalar{0}, a.mode});
+        }
+
+        // What the members can reach: own wells at the least of their
+        // capacity and their own limits (measured in this group's mode along
+        // their composition), the others as solved.
+        Scalar attainable = 0;
+        bool bounded = true;
+        for (const int w : a.own_wells) {
+            const Scalar v = projectOnMode(q[w], weights);
+            std::optional<Scalar> bound;
+            if (const auto cap = capacityAtNodePressure(w, result.node_pressure[wells_[w].node])) {
+                bound = cap->on_real_curve ? std::max(projectOnMode(cap->q, weights), Scalar{0}) : Scalar{0};
+                if (v > Scalar{0} && exceeds(v, *bound, tol)) {
+                    out.push_back({Issue::Kind::GroupOverCapacity, wells_[w].name, v, *bound, a.mode});
+                }
+            }
+            if (const auto it = limits.find(wells_[w].name); it != limits.end()) {
+                if (const auto lim = limitInMode(wells_[w], it->second, weights, q[w])) {
+                    bound = bound.has_value() ? std::min(*bound, *lim) : *lim;
+                }
+            }
+            if (!bound.has_value()) {
+                bounded = false;
+                continue;
+            }
+            attainable += targetEfficiency(w) * std::max(*bound, Scalar{0});
+        }
+        for (const auto& [w, eff] : a.member_wells) {
+            const Scalar v = projectOnMode(q[w], weights);
+            attainable += eff * v;
+            if (wells_[w].kind != WellKind::Thp || !lambda.has_value() || !(v > Scalar{0})) {
+                continue;
+            }
+            if (const auto g = guideRate(wells_[w].name, a.mode); g.has_value() && *g > Scalar{0}) {
+                const Scalar share = *g * *lambda;
+                if (exceeds(v, std::max(share, Scalar{0}), tol)) {
+                    out.push_back({Issue::Kind::ThpOverShare, wells_[w].name, v, share, a.mode});
+                }
+            }
+        }
+        for (const auto& [child, eff] : a.active_children) {
+            attainable += eff * activeNodeTotalFromRates(child, q, weights);
+        }
+        if (bounded && exceeds(a.target, attainable, tol)) {
+            out.push_back({Issue::Kind::ActiveCannotMeet, a.name, attainable, a.target, a.mode});
+        }
+        if (a.own_wells.empty()) {
+            const Scalar total = activeNodeTotalFromRates(k, q, weights);
+            if (exceeds(total, a.target, tol)) {
+                out.push_back({Issue::Kind::ActiveOverTarget, a.name, total, a.target, a.mode});
+            }
+        }
+    }
+
+    /// Active node \p k's lambda at the well rates \p q, from its own wells
+    /// (each is at guide_rate * lambda in the node's mode); nullopt without
+    /// own wells.
+    std::optional<Scalar> lambdaFromRates(const int k, const std::vector<std::array<Scalar, NP>>& q) const
+    {
+        const auto& a = activeNodes_[k];
+        const auto weights = phaseWeights(a.mode, a.resv_coeff);
+        for (const int w : a.own_wells) {
+            if (wells_[w].guide_rate > Scalar{0}) {
+                return projectOnMode(q[w], weights) / wells_[w].guide_rate;
+            }
+        }
+        return std::nullopt;
+    }
+
+    /// activeNodeTotal() at the well rates \p q instead of a state.
+    Scalar activeNodeTotalFromRates(const int k,
+                                    const std::vector<std::array<Scalar, NP>>& q,
+                                    const std::array<Scalar, NP>& weights) const
+    {
+        const auto& a = activeNodes_[k];
+        Scalar sum = 0;
+        for (const int w : a.own_wells) {
+            sum += targetEfficiency(w) * projectOnMode(q[w], weights);
+        }
+        for (const auto& [w, eff] : a.member_wells) {
+            sum += eff * projectOnMode(q[w], weights);
+        }
+        for (const auto& [child, eff] : a.active_children) {
+            sum += eff * activeNodeTotalFromRates(child, q, weights);
+        }
+        return sum;
+    }
+
+    /// The most \p well can produce within \p limits, measured with
+    /// \p weights, along its composition (its IPR's, else that of \p q):
+    /// each rate limit scaled to \p weights, and its IPR's rate at its BHP
+    /// limit. nullopt if no limit bounds it.
+    static std::optional<Scalar> limitInMode(const Well& well,
+                                             const IndividualLimits& limits,
+                                             const std::array<Scalar, NP>& weights,
+                                             const std::array<Scalar, NP>& q)
+    {
+        std::array<Scalar, NP> c{};
+        for (int p = 0; p < NP; ++p) {
+            c[p] = -well.ipr_b[p];
+        }
+        if (!flows(c)) {
+            c = q;
+        }
+        const Scalar per_unit = projectOnMode(c, weights);
+        std::optional<Scalar> out;
+        const auto bound = [&out](const Scalar v) { out = out.has_value() ? std::min(*out, v) : v; };
+        if (per_unit > Scalar{0}) {
+            for (const auto& [mode, limit] : limits.rates) {
+                const Scalar measured = projectOnMode(c, phaseWeights(mode, limits.resv_coeff));
+                if (measured > Scalar{0}) {
+                    bound(limit * per_unit / measured);
+                }
+            }
+        }
+        if (limits.bhp.has_value() && flows(c) && well.kind != WellKind::Pinned) {
+            std::array<Scalar, NP> at_limit{};
+            for (int p = 0; p < NP; ++p) {
+                at_limit[p] = well.ipr_a[p] + well.ipr_b[p] * *limits.bhp;
+            }
+            bound(std::max(projectOnMode(at_limit, weights), Scalar{0}));
+        }
+        return out;
+    }
+
+    /// \p well's operating point with its THP at \p p: the root of its row on
+    /// the slope-limited tubing curve, or its shut-in cap, rates zero, where
+    /// it cannot lift at \p p. Its bhp and its rates ([oil, water, gas],
+    /// production positive). Uses well.bhp_shutin and well.ipr_slope_limit.
+    std::pair<Scalar, std::array<Scalar, NP>> operatingPointAtThp(const Well& well, const Scalar p) const
+    {
         const auto ratesAt = [&well](const Scalar bhp) {
             std::array<Scalar, NP> q{};
             for (int ph = 0; ph < NP; ++ph) { q[ph] = well.ipr_a[ph] + well.ipr_b[ph] * bhp; }
@@ -778,6 +1105,7 @@ public:
         return {bhp, q};
     }
 
+public:
     /// Whether node \p i can flow on its real branch table with the wells
     /// under it, at the upstream pressure of \p result (a converged solve).
     /// q(p): the flow the wells deliver into the node at node pressure p --

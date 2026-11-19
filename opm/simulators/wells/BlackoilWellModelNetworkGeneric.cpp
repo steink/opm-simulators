@@ -28,6 +28,7 @@
 #include <opm/material/fluidsystems/BlackOilDefaultFluidSystemIndices.hpp>
 
 #include <opm/input/eclipse/Schedule/Schedule.hpp>
+#include <opm/input/eclipse/Schedule/Group/GuideRate.hpp>
 #include <opm/input/eclipse/Schedule/Network/Balance.hpp>
 
 #include <opm/simulators/wells/BlackoilWellModelGeneric.hpp>
@@ -915,8 +916,273 @@ solveGroupTree(const Network::ExtNetwork& network,
             group_tree_node_fractions_[order[n]] = *fractions[n];
         }
     }
-    return GroupTreeSolve{std::move(system), std::move(order), std::move(result),
+    GroupTreeSolve solved{std::move(system), std::move(order), std::move(result),
                           std::move(network_cliff_wells)};
+    logCategorizationCheck(solved, reportStepIdx, balancedTree);
+    return solved;
+}
+
+template<typename Scalar, typename IndexTraits>
+void BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>::
+logCategorizationCheck(const GroupTreeSolve& solved,
+                       const int reportStepIdx,
+                       const ProdGroupTreeBalancer::Tree<Scalar>& balancedTree) const
+{
+    using Sys = NetworkSolve::GroupTreeSystem<Scalar>;
+    using Issue = typename Sys::CategorizationIssue;
+    using CMode = Well::ProducerCMode;
+    // The solve is the same on every rank.
+    if (well_model_.comm().rank() != 0) {
+        return;
+    }
+    const auto& schedule = well_model_.schedule();
+    const auto& summary_state = well_model_.summaryState();
+    const auto& system = solved.system;
+    const auto& result = solved.result;
+    const typename Sys::CategorizationTolerance tol{};
+
+    // The wells' own limits from the schedule (not their THP limit, which in
+    // the network is the node pressure); RESV with the balancer's coefficients.
+    std::unordered_map<std::string, typename Sys::IndividualLimits> limits;
+    for (const auto& w : system.wells()) {
+        if (!schedule.hasWell(w.name, reportStepIdx)) {
+            continue;   // a satellite group
+        }
+        const auto& well = schedule.getWell(w.name, reportStepIdx);
+        if (!well.isProducer()) {
+            continue;
+        }
+        const auto controls = well.productionControls(summary_state);
+        typename Sys::IndividualLimits lim;
+        const auto add = [&controls, &lim](const CMode mode, const double value) {
+            if (controls.hasControl(mode) && value > 0.0) {
+                lim.rates.emplace_back(mode, static_cast<Scalar>(value));
+            }
+        };
+        add(CMode::ORAT, controls.oil_rate);
+        add(CMode::WRAT, controls.water_rate);
+        add(CMode::GRAT, controls.gas_rate);
+        add(CMode::LRAT, controls.liquid_rate);
+        if (const auto t = balancedTree.find(w.name); t != balancedTree.end()) {
+            lim.resv_coeff = t->second.resvCoeff;
+            add(CMode::RESV, controls.resv_rate);
+        }
+        if (controls.hasControl(CMode::BHP)) {
+            lim.bhp = static_cast<Scalar>(controls.bhp_limit);
+        }
+        limits.emplace(w.name, std::move(lim));
+    }
+
+    // A THP well's guide rate in an Active group's mode, as the balancer
+    // looks it up for the group-controlled wells (extractFlatNetworkInput()).
+    const auto& guide_rate = well_model_.guideRate();
+    const auto guideRateOf = [&](const std::string& name, const CMode mode) -> std::optional<Scalar> {
+        const auto t = balancedTree.find(name);
+        if (t == balancedTree.end() || !t->second.availableForGroupControl
+            || !(guide_rate.has(name) || guide_rate.hasPotentials(name))) {
+            return std::nullopt;
+        }
+        GuideRateModel::Target target{GuideRateModel::Target::NONE};
+        switch (mode) {
+        case CMode::ORAT: target = GuideRateModel::Target::OIL; break;
+        case CMode::WRAT: target = GuideRateModel::Target::WAT; break;
+        case CMode::GRAT: target = GuideRateModel::Target::GAS; break;
+        case CMode::LRAT: target = GuideRateModel::Target::LIQ; break;
+        case CMode::RESV: target = GuideRateModel::Target::RES; break;
+        default: return std::nullopt;
+        }
+        // RateVector is {oil, gas, water}; the tree's rates are negative for production.
+        const auto& r = t->second.initialRates;
+        const GuideRate::RateVector rv{-r[0], -r[2], -r[1]};
+        const Scalar g = guide_rate.get(name, target, rv);
+        return g > Scalar{0} ? std::optional<Scalar>(g) : std::nullopt;
+    };
+
+    auto issues = system.checkCategorization(result, limits, guideRateOf, tol);
+
+    // Pass-through groups (in the balancer nothing of their own binds)
+    // against their own limits: the network's rates for the wells in this
+    // solve, the balancer's for the others. Groups without a well in this
+    // solve are left out.
+    std::unordered_map<std::string, std::array<Scalar, 3>> solved_rates;
+    for (int w = 0; w < system.numWells(); ++w) {
+        solved_rates[system.wells()[w].name] = result.well_phase_rates[w];
+    }
+    struct Total
+    {
+        std::array<Scalar, 3> q{};
+        bool in_solve = false;
+    };
+    std::function<Total(const std::string&)> total = [&](const std::string& name) {
+        Total t;
+        const auto it = balancedTree.find(name);
+        if (it == balancedTree.end()) {
+            return t;
+        }
+        const auto& node = it->second;
+        if (node.type == ProdNodeType::Well || node.isSatellite) {
+            const auto s = solved_rates.find(name);
+            if (node.type == ProdNodeType::Well && s != solved_rates.end()) {
+                t.q = s->second;
+                t.in_solve = true;
+            } else {
+                for (int c = 0; c < 3; ++c) {
+                    t.q[c] = -node.rates[c];
+                }
+            }
+            return t;
+        }
+        for (const auto& child : node.children) {
+            const auto ct = total(child);
+            const auto ch = balancedTree.find(child);
+            const Scalar eff = ch != balancedTree.end() ? ch->second.efficiencyFactor : Scalar{1};
+            for (int c = 0; c < 3; ++c) {
+                t.q[c] += eff * ct.q[c];
+            }
+            t.in_solve = t.in_solve || ct.in_solve;
+        }
+        return t;
+    };
+    struct PassThroughIssue
+    {
+        std::string name;
+        CMode mode;
+        Scalar value;
+        Scalar bound;
+    };
+    std::vector<PassThroughIssue> pass_through;
+    for (const auto& [name, node] : balancedTree) {
+        if (node.type != ProdNodeType::Group || node.isSatellite || node.Limits.empty()
+            || node.modeCategory == ProdNodeModeCategory::Individual) {
+            continue;
+        }
+        const auto t = total(name);
+        if (!t.in_solve) {
+            continue;
+        }
+        for (const auto& [mode, limit] : node.Limits) {
+            std::array<Scalar, 3> weights{};
+            switch (mode) {
+            case CMode::ORAT: weights = {1, 0, 0}; break;
+            case CMode::WRAT: weights = {0, 1, 0}; break;
+            case CMode::GRAT: weights = {0, 0, 1}; break;
+            case CMode::LRAT: weights = {1, 1, 0}; break;
+            case CMode::RESV: weights = node.resvCoeff; break;
+            default: continue;
+            }
+            const Scalar v = weights[0] * t.q[0] + weights[1] * t.q[1] + weights[2] * t.q[2];
+            if (v > limit + tol.rel * std::abs(limit) + tol.abs) {
+                pass_through.push_back({name, mode, v, limit});
+            }
+        }
+    }
+
+    // One line per solve (to count how often a solve ends with its
+    // categorization contradicted), one per issue.
+    const auto log = [this](const std::string& msg) {
+        if (well_model_.groupStateHelper().hasDeferredLogger()) {
+            well_model_.groupStateHelper().deferredLogger().debug(msg);
+        } else {
+            OpmLog::debug(msg);
+        }
+    };
+    const auto& root = solved.order.front();
+    const std::string state = result.converged ? "converged" : "best iterate";
+    if (issues.empty() && pass_through.empty()) {
+        log(fmt::format("GroupTreeCheck under {} at report step {} ({}): consistent", root, reportStepIdx,
+                        state));
+        return;
+    }
+    const std::array<std::pair<typename Issue::Kind, const char*>, 7> kinds{{
+        {Issue::Kind::NegativeLambda, "negative lambda"},
+        {Issue::Kind::GroupOverCapacity, "group-controlled over THP capacity"},
+        {Issue::Kind::OverLimit, "over own limit"},
+        {Issue::Kind::ThpOverShare, "THP over guide-rate share"},
+        {Issue::Kind::PinnedOverCapacity, "fixed-rate over THP capacity"},
+        {Issue::Kind::ActiveOverTarget, "Active group over target"},
+        {Issue::Kind::ActiveCannotMeet, "Active group cannot meet target"},
+    }};
+    std::string counts;
+    for (const auto& [kind, label] : kinds) {
+        const auto n = std::count_if(issues.begin(), issues.end(),
+                                     [kind = kind](const Issue& i) { return i.kind == kind; });
+        if (n > 0) {
+            counts += fmt::format("{}{} {}", counts.empty() ? "" : ", ", n, label);
+        }
+    }
+    if (!pass_through.empty()) {
+        counts += fmt::format("{}{} pass-through group over own limit", counts.empty() ? "" : ", ",
+                              pass_through.size());
+    }
+    log(fmt::format("GroupTreeCheck under {} at report step {} ({}): inconsistent: {}", root, reportStepIdx,
+                    state, counts));
+
+    std::unordered_map<std::string, int> index;
+    for (int w = 0; w < system.numWells(); ++w) {
+        index[system.wells()[w].name] = w;
+    }
+    const auto wellKind = [&](const std::string& name) -> std::string {
+        const auto it = index.find(name);
+        if (it == index.end()) {
+            return "";
+        }
+        const auto& w = system.wells()[it->second];
+        const char* kind = w.reopen_candidate ? "candidate"
+            : (w.kind == Sys::WellKind::Thp ? "THP" : (w.kind == Sys::WellKind::Group ? "group" : "fixed"));
+        return fmt::format("{}, node {} at {:.3f} bar", kind, solved.order[w.node],
+                           result.node_pressure[w.node] / unit::barsa);
+    };
+    const auto rate = [](const Scalar v) { return v * unit::day; };
+    // WellProducerCMode2String() throws for CMODE_UNDEFINED (a comparison in FLO).
+    const auto modeName = [](const CMode m) {
+        return m == CMode::CMODE_UNDEFINED ? std::string("FLO") : WellProducerCMode2String(m);
+    };
+    for (const auto& i : issues) {
+        const std::string mode = modeName(i.mode);
+        switch (i.kind) {
+        case Issue::Kind::NegativeLambda:
+            log(fmt::format("GroupTreeCheck   negative lambda: {} ({}): its group-controlled wells total "
+                            "{:.6g} m3/d", i.name, mode, rate(i.value)));
+            break;
+        case Issue::Kind::GroupOverCapacity:
+            log(fmt::format("GroupTreeCheck   group-controlled over THP capacity: {} ({}): allocated {:.6g} "
+                            "{} m3/d, its tubing lifts {:.6g}", i.name, wellKind(i.name), rate(i.value), mode,
+                            rate(i.bound)));
+            break;
+        case Issue::Kind::OverLimit:
+            if (i.mode == CMode::BHP) {
+                log(fmt::format("GroupTreeCheck   over own limit: {} ({}): bhp {:.3f} bar below its BHP "
+                                "limit {:.3f} bar", i.name, wellKind(i.name), i.value / unit::barsa,
+                                i.bound / unit::barsa));
+            } else {
+                log(fmt::format("GroupTreeCheck   over own limit: {} ({}): {:.6g} {} m3/d above its limit "
+                                "{:.6g}", i.name, wellKind(i.name), rate(i.value), mode, rate(i.bound)));
+            }
+            break;
+        case Issue::Kind::ThpOverShare:
+            log(fmt::format("GroupTreeCheck   THP over guide-rate share: {} ({}): {:.6g} {} m3/d above its "
+                            "share {:.6g}", i.name, wellKind(i.name), rate(i.value), mode, rate(i.bound)));
+            break;
+        case Issue::Kind::PinnedOverCapacity:
+            log(fmt::format("GroupTreeCheck   fixed-rate over THP capacity: {} ({}): FLO {:.6g} m3/d, its "
+                            "tubing lifts {:.6g}", i.name, wellKind(i.name), rate(i.value), rate(i.bound)));
+            break;
+        case Issue::Kind::ActiveOverTarget:
+            log(fmt::format("GroupTreeCheck   Active group over target: {} ({}, no group-controlled wells): "
+                            "members total {:.6g} m3/d, target {:.6g}", i.name, mode, rate(i.value),
+                            rate(i.bound)));
+            break;
+        case Issue::Kind::ActiveCannotMeet:
+            log(fmt::format("GroupTreeCheck   Active group cannot meet target: {} ({}): members reach at "
+                            "most {:.6g} m3/d, target {:.6g}", i.name, mode, rate(i.value), rate(i.bound)));
+            break;
+        }
+    }
+    for (const auto& p : pass_through) {
+        log(fmt::format("GroupTreeCheck   pass-through group over own limit: {}: {:.6g} {} m3/d above its "
+                        "limit {:.6g}", p.name, rate(p.value), modeName(p.mode),
+                        rate(p.bound)));
+    }
 }
 
 template<typename Scalar, typename IndexTraits>

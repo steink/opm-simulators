@@ -35,9 +35,12 @@
 
 #include <fmt/format.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 using namespace Opm;
@@ -1151,4 +1154,160 @@ BOOST_AUTO_TEST_CASE(slope_limit_moves_the_thp_wells_converged_point_off_the_cli
     // raw table silently reused.
     BOOST_CHECK_CLOSE(flat.well_bhp[0], (262.8 / 13.0) * unit::barsa, 1e-4);
     BOOST_CHECK_CLOSE(flat.well_rate[0], (254.4 / 13.0) * m3d, 1e-4);
+}
+
+namespace {
+
+using Issue = GroupTreeSystem<double>::CategorizationIssue;
+
+constexpr double kM3d = unit::cubic(unit::meter) / unit::day;
+
+bool hasIssue(const std::vector<Issue>& issues, const Issue::Kind kind, const std::string& name)
+{
+    return std::any_of(issues.begin(), issues.end(),
+                       [&](const Issue& i) { return i.kind == kind && i.name == name; });
+}
+
+// An oil-only well with a linear IPR: q = pi * (shutin - bhp).
+GroupTreeSystem<double>::Well oilWell(const std::string& name,
+                                      const GroupTreeSystem<double>::WellKind kind,
+                                      const double pi_m3d_per_bar,
+                                      const double shutin_bar)
+{
+    GroupTreeSystem<double>::Well w;
+    w.name = name;
+    w.node = 1;
+    w.kind = kind;
+    w.vfp_table = 3;
+    w.ipr_b[0] = -pi_m3d_per_bar * kM3d / unit::barsa;
+    w.ipr_a[0] = pi_m3d_per_bar * kM3d / unit::barsa * shutin_bar * unit::barsa;
+    return w;
+}
+
+// One node (table 3, terminal 10 bar) and one Active ORAT node "A" with a
+// group-controlled well G1 and a THP well T1, solved.
+struct GroupAndThp
+{
+    GroupTreeSystem<double> sys;
+    Result<double> result;
+};
+
+GroupAndThp solveGroupAndThp(const VFPProdProperties<double>& props,
+                             const double target_m3d,
+                             const double g_pi,
+                             const double g_shutin,
+                             const std::optional<double> pinned_m3d = std::nullopt)
+{
+    GroupAndThp out{GroupTreeSystem<double>(props), {}};
+    auto& sys = out.sys;
+    sys.addNode(Node{"N1", /*parent=*/0, /*vfp_table=*/3, /*efficiency=*/1.0});
+    sys.setTerminalPressure(10.0 * unit::barsa);
+
+    GroupTreeSystem<double>::ActiveNode a;
+    a.name = "A";
+    a.mode = Opm::Well::ProducerCMode::ORAT;
+    a.target = target_m3d * kM3d;
+    const int active_idx = sys.addActiveNode(a);
+
+    auto g = oilWell("G1", GroupTreeSystem<double>::WellKind::Group, g_pi, g_shutin);
+    g.active_node = active_idx;
+    g.guide_rate = 300.0;
+    const int g_idx = sys.addWell(g);
+    // T1: 300 m3/d at 18 bar, 6 m3/d/bar.
+    const int t_idx = sys.addWell(oilWell("T1", GroupTreeSystem<double>::WellKind::Thp, 6.0, 68.0));
+    sys.activeNode(active_idx).own_wells.push_back(g_idx);
+    sys.activeNode(active_idx).member_wells.emplace_back(t_idx, 1.0);
+    if (pinned_m3d.has_value()) {
+        // Outside the Active node: only the node's flow sees it.
+        auto p = oilWell("P1", GroupTreeSystem<double>::WellKind::Pinned, 10.0, 30.0);
+        p.fixed_q = {*pinned_m3d * kM3d, 0.0, 0.0};
+        sys.addWell(p);
+    }
+    sys.finalize();
+    out.result = NetworkSolve::solve(sys, std::vector<double>{15.0 * unit::barsa}, kParams, FullStep{});
+    return out;
+}
+
+const auto kNoGuideRate = [](const std::string&, Opm::Well::ProducerCMode) -> std::optional<double> {
+    return std::nullopt;
+};
+
+} // namespace
+
+// A well's capacity at its node pressure: for a THP well its own solution;
+// for a group-controlled well the crossing of its IPR with its tubing curve
+// at that pressure.
+BOOST_FIXTURE_TEST_CASE(capacity_at_node_pressure, Fixture)
+{
+    const auto solved = solveGroupAndThp(props, 800.0, 40.0, 70.0);
+    BOOST_REQUIRE(solved.result.converged);
+    const auto& sys = solved.sys;
+    const double p = solved.result.node_pressure[1];
+
+    const auto t = sys.capacityAtNodePressure(1, p);
+    BOOST_REQUIRE(t.has_value());
+    BOOST_CHECK(t->on_real_curve);
+    BOOST_CHECK_CLOSE(t->bhp, solved.result.well_bhp[1], 1e-4);
+    BOOST_CHECK_CLOSE(t->q[0], solved.result.well_phase_rates[1][0], 1e-4);
+
+    const auto g = sys.capacityAtNodePressure(0, p);
+    BOOST_REQUIRE(g.has_value());
+    BOOST_CHECK(g->on_real_curve);
+    const auto& w = sys.wells()[0];
+    BOOST_CHECK_CLOSE(g->q[0], w.ipr_a[0] + w.ipr_b[0] * g->bhp, 1e-9);
+    BOOST_CHECK_CLOSE(g->bhp, props.bhp(3, 0.0, -g->q[0], 0.0, p, 0.0, 0.0, 0.0, false), 1e-6);
+    // It can lift more than it is allocated here.
+    BOOST_CHECK_GT(g->q[0], solved.result.well_phase_rates[0][0]);
+}
+
+// A strong group-controlled well, no limits: nothing to flag.
+BOOST_FIXTURE_TEST_CASE(categorization_check_consistent_solution, Fixture)
+{
+    const auto solved = solveGroupAndThp(props, 800.0, 40.0, 70.0);
+    BOOST_REQUIRE(solved.result.converged);
+    const auto issues = solved.sys.checkCategorization(solved.result, {}, kNoGuideRate);
+    BOOST_CHECK(issues.empty());
+}
+
+// A target below what the THP well alone produces: the group-controlled well
+// is made to inject (lambda < 0), and the THP well is above its share.
+BOOST_FIXTURE_TEST_CASE(categorization_check_negative_lambda, Fixture)
+{
+    const auto solved = solveGroupAndThp(props, 100.0, 40.0, 70.0);
+    BOOST_REQUIRE(solved.result.converged);
+    BOOST_REQUIRE_LT(solved.result.well_phase_rates[0][0], 0.0);
+
+    const auto issues = solved.sys.checkCategorization(solved.result, {}, kNoGuideRate);
+    BOOST_CHECK(hasIssue(issues, Issue::Kind::NegativeLambda, "A"));
+    BOOST_CHECK(!hasIssue(issues, Issue::Kind::ThpOverShare, "T1"));
+
+    const auto guide = [](const std::string& name, Opm::Well::ProducerCMode) -> std::optional<double> {
+        return name == "T1" ? std::optional<double>(200.0) : std::nullopt;
+    };
+    const auto with_share = solved.sys.checkCategorization(solved.result, {}, guide);
+    BOOST_CHECK(hasIssue(with_share, Issue::Kind::ThpOverShare, "T1"));
+}
+
+// A weak group-controlled well allocated more than its tubing lifts, a target
+// its members cannot reach, a THP well above its own rate limit, and a
+// fixed-rate well above what its tubing lifts.
+BOOST_FIXTURE_TEST_CASE(categorization_check_capacity_and_limits, Fixture)
+{
+    const auto solved = solveGroupAndThp(props, 800.0, 30.0, 30.0, /*pinned_m3d=*/600.0);
+    BOOST_REQUIRE(solved.result.converged);
+
+    std::unordered_map<std::string, GroupTreeSystem<double>::IndividualLimits> limits;
+    limits["T1"].rates.emplace_back(Opm::Well::ProducerCMode::ORAT, 100.0 * kM3d);
+    limits["G1"].bhp = 1.0 * unit::barsa;
+    const auto issues = solved.sys.checkCategorization(solved.result, limits, kNoGuideRate);
+    for (const auto& i : issues) {
+        BOOST_TEST_MESSAGE(fmt::format("issue {} {}: {:.4g} vs {:.4g}", static_cast<int>(i.kind), i.name,
+                                        i.value, i.bound));
+    }
+    BOOST_CHECK(hasIssue(issues, Issue::Kind::GroupOverCapacity, "G1"));
+    BOOST_CHECK(hasIssue(issues, Issue::Kind::ActiveCannotMeet, "A"));
+    BOOST_CHECK(hasIssue(issues, Issue::Kind::OverLimit, "T1"));
+    BOOST_CHECK(!hasIssue(issues, Issue::Kind::OverLimit, "G1"));
+    BOOST_CHECK(hasIssue(issues, Issue::Kind::PinnedOverCapacity, "P1"));
+    BOOST_CHECK(!hasIssue(issues, Issue::Kind::NegativeLambda, "A"));
 }
