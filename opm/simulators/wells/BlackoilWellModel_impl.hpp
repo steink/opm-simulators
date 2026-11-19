@@ -1673,7 +1673,18 @@ namespace Opm {
         bool balancer_changed = false;
         if (balancer_commits && group_tree_network) {
             group_tree_cliff_diagnosis_ran = true;
-            const auto final_tree = settleGroupTree_(reportStepIdx, active_networks,
+            // The settling solves the network, which belongs only where the
+            // network is balanced (NETBALAN: the first iteration, or within
+            // NUPCOL). Elsewhere the node pressures stay frozen as the wells'
+            // THP limits: with no network to settle against, settleGroupTree_()
+            // is a single balance against those limits, as with standard
+            // group control.
+            const bool network_balanced = this->network_.shouldBalance(reportStepIdx)
+                || mandatory_network_balance;
+            const auto final_tree = settleGroupTree_(reportStepIdx,
+                                                     network_balanced
+                                                         ? active_networks
+                                                         : std::vector<details::NetworkDescriptor>{},
                                                      /*offer_reopen_candidates=*/false,
                                                      local_deferredLogger);
             balancer_changed = commitBalancedTree_(final_tree, /*commitRates=*/false,
